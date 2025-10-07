@@ -1,1 +1,29 @@
-./dist/*
+# Build directories
+/build/
+/dist/
+/todo/
+
+# Executables
+*.exe
+*.cmd
+
+# Config files
+*.conf
+
+# Logs
+/logs/
+PVS-STUDIO-log.*
+
+# IDE / Editor caches
+/.vs/
+/.vscode/
+/_ReSharper.Caches/
+/.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS / System files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Gallery</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/css/fb.css" type="text/css" />
+    <link rel="stylesheet" href="/css/style.css" type="text/css" />
+    <script src="/bundled"></script>
+    <style>
+        .fancybox-button--thumbs {
+            display: none;
+        }
+        
+        .fancybox-button--play {
+            display: none;
+        }
+        
+        .fancybox-button--close {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <button class="sidebar-toggle-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">
+			☰
+		</button>
+    <button class="scroll-to-top-btn" onclick="scrollToTopAndReset()">
+			⬆️ Reset
+		</button>
+
+    <div class="sidebar">
+        <div class="sidebar-header"></div>
+        <div id="folder-tree-container"></div>
+    </div>
+
+    <div class="gallery-container">
+        <div id="gallery" class="masonry" style="overflow: hidden">
+            <div class="grid-sizer"></div>
+        </div>
+        <div id="loading" class="loading">Loading...</div>
+    </div>
+
+    <script>
+        (function() {
+                const VIDEO_VOLUME = 0.3;
+                const urlParams = new URLSearchParams(window.location.search);
+                const dir = urlParams.get("dir") || "";
+                let page = parseInt(urlParams.get("page")) || 1;
+                let hasMore = true,
+                    isLoading = false;
+                let masonryInstance, debounceTimer, observer;
+                const $gallery = $("#gallery");
+                const $loading = $("#loading");
+
+                function initializeMasonry() {
+                    masonryInstance = new Masonry($gallery[0], {
+                        itemSelector: ".masonry-item",
+                        percentPosition: true,
+                        columnWidth: ".grid-sizer",
+                        gutter: 0
+                    });
+                }
+
+                function debounceLayout() {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(function() {
+                        if (masonryInstance) masonryInstance.layout();
+                    }, 100);
+                }
+
+                function setupLazyObserver(selector, loadFn, rootMargin) {
+                    const io = new IntersectionObserver((entries, obs) => {
+                        for (const entry of entries) {
+                            if (entry.isIntersecting) {
+                                loadFn(entry.target);
+                                obs.unobserve(entry.target);
+                            }
+                        }
+                    }, {
+                        rootMargin
+                    });
+                    document.querySelectorAll(`${selector}:not([data-observed])`).forEach(el => {
+                        io.observe(el);
+                        el.dataset.observed = "true";
+                    });
+                }
+
+                function lazyLoadImages() {
+                    setupLazyObserver("img.lazy", img => {
+                        img.src = img.dataset.src;
+                        img.onload = debounceLayout;
+                    }, "800px");
+                }
+
+                function lazyLoadVideos() {
+                    setupLazyObserver("video.lazy-video", video => {
+                        const source = video.querySelector("source");
+                        source.src = source.dataset.src;
+                        video.load();
+                        video.volume = VIDEO_VOLUME;
+                        video.addEventListener("loadedmetadata", debounceLayout, {
+                            once: true
+                        });
+                    }, "500px");
+                }
+
+                function initInfiniteScroll() {
+                    const loadingEl = document.getElementById("loading");
+                    if (!loadingEl) return;
+                    if (observer) observer.disconnect();
+                    observer = new IntersectionObserver(entries => {
+                        if (entries[0].isIntersecting && hasMore && !isLoading) loadMedia();
+                    }, {
+                        rootMargin: "600px"
+                    });
+                    observer.observe(loadingEl);
+                }
+
+                function loadMedia() {
+                    if (!hasMore || isLoading) return;
+                    isLoading = true;
+                    $loading.text("Loading...").show();
+                    const url = new URL(window.location);
+                    url.searchParams.set("page", page);
+                    history.pushState({
+                        path: url.href
+                    }, "", url.href);
+                    $.getJSON(`/api/media?dir=${dir}&page=${page}`, data => {
+                                const existing = new Set($gallery.find('a[data-fancybox="gallery"]').map((_, el) => el.getAttribute("href")).get());
+                                const newItems = data.items.filter(item => !existing.has("/images/" + item.path));
+                                if (newItems.length) {
+                                    const fragment = document.createDocumentFragment();
+                                    const elements = newItems.map(item => {
+                                                const src = "/images/" + item.path;
+                                                const wrapper = document.createElement("div");
+                                                wrapper.className = "masonry-item";
+                                                wrapper.innerHTML = `
+
+			                            <a data-fancybox="gallery" href="${src}" ${item.type !== "image" ? 'data-type="video"' : ""}>
+
+			                                ${item.type === "image"
+
+			                                    ? `<img data-src="${src}"class="lazy">`
+
+			                                    : `<video class="lazy-video"preload="metadata"muted loop><source data-src="${src}"type="video/mp4"></video>`}
+
+			                            </a>`;return wrapper;});elements.forEach(el=>fragment.appendChild(el));if(!masonryInstance)initializeMasonry();$gallery.append(fragment);masonryInstance.appended(elements);lazyLoadImages();lazyLoadVideos();}
+			hasMore=data.hasMore;page++;$loading.text(hasMore?"Loading...":"No more media");}).always(()=>{isLoading=false;if(!hasMore)$loading.hide();});}
+			window.scrollToTopAndReset=function(){window.scrollTo({top:0,behavior:"smooth"});masonryInstance?.destroy();$gallery.empty().append('<div class="grid-sizer"></div>');initializeMasonry();page=1;hasMore=true;isLoading=false;const url=new URL(window.location.href);url.searchParams.delete("page");history.pushState({path:url.href},"",url.href);initInfiniteScroll();loadMedia();};function updateResetButtonVisibility(){const btn=document.querySelector(".scroll-to-top-btn");if(!btn)return;if((parseInt(new URLSearchParams(location.search).get("page"))||1)>1){btn.classList.remove("hidden");}else{btn.classList.add("hidden");}}
+			function initFancybox(){$('[data-fancybox="gallery"]').fancybox({buttons:["close"],loop:true,video:{autoplay:false,preload:"auto",controls:false,loop:true},afterShow:(_,current)=>{masonryInstance.layout();const video=current.$content.find("video").get(0);if(video){Object.assign(video,{controls:true,preload:"auto",volume:VIDEO_VOLUME,muted:false,loop:true});video.load();}},afterClose:(_,current)=>{const video=current.$content.find("video").get(0);if(video){video.pause();video.currentTime=0;}}});}
+			(function folderTree(){const activeDir=urlParams.get("dir")||"";function buildTree(node){if(!node?.children)return"";return`<ul class="folder-list">`+node.children.map(child=>{const isActive=activeDir===child.path;const hasChildren=child.children?.length>0;const isOpen=isActive||activeDir.startsWith(child.path+"/");return`
+
+			                        <li class="folder-item ${hasChildren ? "has-children" : ""} ${isOpen ? "open" : ""}" data-path="${child.path}">
+
+			                            ${hasChildren ? '<span class="folder-toggle"></span>' : '<span class="folder-spacer"></span>'}
+
+			                            <a href="/?dir=${child.path}" class="folder-link ${isActive ? "active" : ""}"> 📁 <span class="folder-name">${child.name}</span> </a>
+
+			                            ${hasChildren ? `<div class="folder-children"style="display:${isOpen ? "block" : "none"};">${buildTree(child)}</div>` : ""}
+
+			                        </li>`;}).join("")+`</ul>`;}
+			function initFolderToggles(){document.querySelectorAll(".folder-item.has-children").forEach(item=>{const toggle=item.querySelector(".folder-toggle");const children=item.querySelector(".folder-children");const toggleOpen=()=>{item.classList.toggle("open");children.style.display=item.classList.contains("open")?"block":"none";debounceLayout();};toggle.addEventListener("click",e=>{e.stopPropagation();toggleOpen();});item.querySelector(".folder-link")?.addEventListener("click",toggleOpen);});}
+			document.addEventListener("DOMContentLoaded",()=>{fetch("/api/tree").then(r=>r.ok?r.json():Promise.reject(r.status)).then(data=>{const container=document.getElementById("folder-tree-container");if(!data)return container.innerHTML="<p>No media folders found.</p>";container.innerHTML=buildTree(data);initFolderToggles();const activeItem=document.querySelector(`.folder-item[data-path="${activeDir}"]`);if(activeItem){let el=activeItem;while(el&&el.classList&&el.classList.contains("folder-item")){el.classList.add("open");const children=el.querySelector(".folder-children");if(children)children.style.display="block";el=el.parentElement?el.parentElement.closest(".folder-item"):null;}
+			setTimeout(()=>activeItem.scrollIntoView({block:"center",behavior:"smooth"}),300);}}).catch(()=>{document.getElementById("folder-tree-container").innerHTML="<p>Error loading folders.</p>";});});})();(function uiHandlers(){const btn=document.querySelector(".scroll-to-top-btn");const originalPush=history.pushState;history.pushState=function(...args){originalPush.apply(this,args);updateResetButtonVisibility();};const originalReplace=history.replaceState;history.replaceState=function(...args){originalReplace.apply(this,args);updateResetButtonVisibility();};window.addEventListener("popstate",updateResetButtonVisibility);document.addEventListener("DOMContentLoaded",()=>{updateResetButtonVisibility();if(window.innerWidth>768&&localStorage.getItem("sidebarState")==="open"){document.querySelector(".sidebar")?.classList.add("open");}});window.addEventListener("scroll",()=>{if(btn){btn.classList.toggle("show",window.scrollY>200);}});window.onbeforeunload=()=>window.scrollTo(0,0);document.addEventListener("click",e=>{if(window.innerWidth<=768&&!e.target.closest(".sidebar")&&!e.target.matches(".sidebar-toggle-btn")){document.querySelector(".sidebar")?.classList.remove("open");}});document.addEventListener("keydown",e=>{if(e.key==="Escape")document.querySelector(".sidebar")?.classList.remove("open");});document.addEventListener("play",e=>{if(e.target.tagName==="VIDEO"){Object.assign(e.target,{volume:VIDEO_VOLUME,muted:false,loop:true});}},true);})();$(document).ready(()=>{initFancybox();initializeMasonry();initInfiniteScroll();loadMedia();});window.u=loadMedia;})();
+    </script>
+</body>
+
+</html>
