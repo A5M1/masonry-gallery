@@ -61,6 +61,7 @@ typedef struct stat stat_t;
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <errno.h>
 

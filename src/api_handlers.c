@@ -9,16 +9,10 @@
 #include "crypto.h"
 #include "thread_pool.h"
 #include "platform.h"
-#include <fcntl.h>
-#include <stdarg.h>
-#include <stdatomic.h>
-#include <time.h>
+#include "common.h"
 #ifdef _WIN32
-#include <windows.h>
 #endif
 #ifndef _WIN32
-#include <sys/inotify.h>
-#include <unistd.h>
 #endif
 
 #define MAX_FFMPEG 2

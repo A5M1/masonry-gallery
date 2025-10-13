@@ -4,11 +4,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <stddef.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <stdint.h>
+#include "common.h"
 
 #define json_containerOf(ptr,type,member)((type*)((char*)ptr-offsetof(type,member)))
 

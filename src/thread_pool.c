@@ -2,8 +2,7 @@
 #include "api_handlers.h"
 #include "logging.h"
 #include "http.h"
-#include <stdlib.h>
-#include <string.h>
+#include "common.h"
 #define QUEUE_CAP 1024
 
 static int* job_ring;

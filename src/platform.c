@@ -1,12 +1,7 @@
 #include "platform.h"
 #include "common.h"
-#include <stdio.h>
 #ifdef _WIN32
-#include <Windows.h>
 #else
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #endif
 
 void platform_sleep_ms(int ms) {
