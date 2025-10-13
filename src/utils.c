@@ -168,3 +168,18 @@ void make_thumb_path(char* out, size_t outlen, const char* basename) {
 	char root[PATH_MAX]; get_thumbs_root(root, sizeof(root));
 	snprintf(out, outlen, "%s" DIR_SEP_STR "%s", root, basename);
 }
+
+void html_escape(const char* src, char* out, size_t outlen) {
+	if (!src || !out || outlen == 0) return;
+	size_t i = 0;
+	for (const char* p = src; *p && i + 6 < outlen; ++p) {
+		unsigned char c = (unsigned char)*p;
+		if (c == '&') { strcpy(out + i, "&amp;"); i += 5; }
+		else if (c == '<') { strcpy(out + i, "&lt;"); i += 4; }
+		else if (c == '>') { strcpy(out + i, "&gt;"); i += 4; }
+		else if (c == '"') { strcpy(out + i, "&quot;"); i += 6; }
+		else if (c == '\'') { strcpy(out + i, "&#39;"); i += 5; }
+		else { out[i++] = *p; }
+	}
+	out[i < outlen ? i : outlen - 1] = '\0';
+}

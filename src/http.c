@@ -2,6 +2,7 @@
 #include "http.h"
 #include "logging.h"
 #include <immintrin.h>
+#include "platform.h"
 #include "common.h"
 
 
@@ -167,21 +168,12 @@ void send_text(int c, int status, const char* text, const char* body, int keep) 
 
 void send_file_stream(int c, const char* path, const char* range, int keep) {
 	LOG_INFO("Serving file: %s", path);
-#ifdef _WIN32
-	struct _stat64 st;
-	if(_stat64(path, &st)<0) {
-		LOG_ERROR("Failed to stat file: %s", path);
-		send_text(c, 404, "Not Found", "Not found", keep);
-		return;
-	}
-#else
 	struct stat st;
-	if(stat(path, &st)<0) {
+	if (platform_stat(path, &st) < 0) {
 		LOG_ERROR("Failed to stat file: %s", path);
 		send_text(c, 404, "Not Found", "Not found", keep);
 		return;
 	}
-#endif
 	long fsz=(long)st.st_size;
 	range_t r=parse_range_header(range, fsz);
 	const char* ctype=mime_for(path);
@@ -191,113 +183,13 @@ void send_file_stream(int c, const char* path, const char* range, int keep) {
 		LOG_INFO("Range request: %ld-%ld (%ld bytes)", r.start, r.end, sz);
 	}
 
-#ifdef _WIN32
-	HANDLE hFile=CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if(hFile==INVALID_HANDLE_VALUE) {
-		LOG_ERROR("Failed to open file: %s", path);
-		send_text(c, 404, "Not Found", "Not found", keep);
-		return;
-	}
-#else
-	int fd=open(path, O_RDONLY);
-	if(fd<0) {
-		LOG_ERROR("Failed to open file: %s", path);
-		send_text(c, 404, "Not Found", "Not found", keep);
-		return;
-	}
-#endif
+	(void)0; /* file open handled in platform_stream_file_payload */
 
-	if(r.is_range) {
-#ifdef _WIN32
-		LARGE_INTEGER li;
-		li.QuadPart=start;
-		if(!SetFilePointerEx(hFile, li, NULL, FILE_BEGIN)) {
-			LOG_ERROR("SetFilePointerEx failed for range request on file: %s", path);
-			CloseHandle(hFile);
-			send_text(c, 416, "Range Not Satisfiable", "Range not satisfiable", keep);
-			return;
-		}
-#else
-		if(lseek(fd, start, SEEK_SET)<0) {
-			LOG_ERROR("lseek failed for range request on file: %s", path);
-			close(fd);
-			send_text(c, 416, "Range Not Satisfiable", "Range not satisfiable", keep);
-			return;
-		}
-#endif
-	}
+	/* range handling passed to platform_stream_file_payload */
 
 	send_header(c, code, txt, ctype, sz, r.is_range ? &r : NULL, fsz, keep);
 
-#if defined(_WIN32)
-	if(!r.is_range) {
-		WSAPROTOCOL_INFO pi;
-		int pi_len=sizeof(pi);
-		if(getsockopt(c, SOL_SOCKET, SO_PROTOCOL_INFO, (char*)&pi, &pi_len)==0) {
-			if(TransmitFile((SOCKET)c, hFile, 0, 0, NULL, NULL, 0)) {
-				LOG_INFO("File transfer completed for %s: %ld bytes sent (TransmitFile)", path, sz);
-				CloseHandle(hFile);
-				return;
-			}
-		}
+	if (platform_stream_file_payload(c, path, start, sz, r.is_range) != 0) {
+		LOG_WARN("File transfer incomplete or failed for %s", path);
 	}
-	char buf[65536];long rem=sz;size_t total=0;
-	while(rem>0) {
-		DWORD n=(rem<(long)sizeof(buf)?(DWORD)rem:(DWORD)sizeof(buf));
-		DWORD rd=0;
-		if(!ReadFile(hFile, buf, n, &rd, NULL)||rd==0) {
-			LOG_ERROR("File read error on: %s", path);
-			break;
-		}
-		int snt=send(c, buf, (int)rd, 0);
-		if(snt<=0) {
-			int e=WSAGetLastError();
-			if(e==WSAEWOULDBLOCK||e==WSAEINTR)continue;
-			LOG_ERROR("Send error while streaming file: %s", path);
-			break;
-		}
-		rem-=snt;total+=snt;
-	}
-	CloseHandle(hFile);
-	if(rem>0)LOG_WARN("File transfer incomplete for %s: %ld bytes remaining", path, rem);
-	else LOG_INFO("File transfer completed for %s: %zu bytes sent", path, total);
-#else
-	if(!r.is_range) {
-		off_t offset=0;
-		long remain=sz;
-		while(remain>0) {
-			ssize_t sent=sendfile(c, fd, &offset, remain);
-			if(sent<=0) {
-				if(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)continue;
-				LOG_ERROR("sendfile error while streaming file: %s", path);
-				break;
-			}
-			remain-=sent;
-		}
-		close(fd);
-		if(remain>0)LOG_WARN("File transfer incomplete for %s: %ld bytes remaining", path, remain);
-		else LOG_INFO("File transfer completed for %s: %ld bytes sent (sendfile)", path, sz);
-		return;
-	}
-	char buf[65536];long rem=sz;size_t total=0;
-	while(rem>0) {
-		size_t n=(rem<(long)sizeof(buf)?(size_t)rem:sizeof(buf));
-		ssize_t rd=read(fd, buf, n);
-		if(rd<=0) {
-			if(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)continue;
-			LOG_ERROR("File read error on: %s", path);
-			break;
-		}
-		int snt=send(c, buf, (int)rd, 0);
-		if(snt<=0) {
-			if(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)continue;
-			LOG_ERROR("Send error while streaming file: %s", path);
-			break;
-		}
-		rem-=snt;total+=snt;
-	}
-	close(fd);
-	if(rem>0)LOG_WARN("File transfer incomplete for %s: %ld bytes remaining", path, rem);
-	else LOG_INFO("File transfer completed for %s: %zu bytes sent", path, total);
-#endif
 }

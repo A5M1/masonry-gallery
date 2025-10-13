@@ -20,4 +20,4 @@ Thumbs.db
 folder-index.json
 .hintrc
 
-/
+/libraries/**
