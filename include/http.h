@@ -1,6 +1,10 @@
 #pragma once
 #include "common.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int is_range;
     long start;
@@ -13,3 +17,7 @@ void send_header(int c,int status,const char* text,const char* ctype,long len,co
 void send_text(int c,int status,const char* text,const char* body,int keep_alive);
 range_t parse_range_header(const char* header_value,long file_size);
 void send_file_stream(int c,const char* fs_path,const char* range_header,int keep_alive);
+
+#ifdef __cplusplus
+}
+#endif

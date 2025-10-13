@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "platform.h"
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
@@ -155,4 +156,15 @@ void sb_append_esc(char** buf, size_t* cap, size_t* len, const char* s) {
 			sb_append(buf, cap, len, t);
 		}
 	}
+}
+
+void get_thumbs_root(char* out, size_t outlen) {
+	if (!out || outlen == 0) return;
+	snprintf(out, outlen, "%s" DIR_SEP_STR "thumbs", BASE_DIR);
+}
+
+void make_thumb_path(char* out, size_t outlen, const char* basename) {
+	if (!out || outlen == 0 || !basename) return;
+	char root[PATH_MAX]; get_thumbs_root(root, sizeof(root));
+	snprintf(out, outlen, "%s" DIR_SEP_STR "%s", root, basename);
 }

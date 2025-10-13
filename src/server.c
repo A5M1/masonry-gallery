@@ -1,5 +1,6 @@
 #include "server.h"
 #include "directory.h"
+#include "platform.h"
 
 char BASE_DIR[PATH_MAX]={ 0 };
 char VIEWS_DIR[PATH_MAX]={ 0 };
@@ -8,22 +9,22 @@ char CSS_DIR[PATH_MAX]={ 0 };
 char BUNDLED_FILE[PATH_MAX]={ 0 };
 
 static void join_path(char* dest, size_t size, const char* base, const char* sub) {
-	size_t len=strlen(base);
-	if(len>0&&(base[len-1]=='/'||base[len-1]=='\\')) {
-		snprintf(dest, size, "%s%s", base, sub);
-	}
-	else {
-		snprintf(dest, size, "%s%c%s", base, DIR_SEP, sub);
-	}
+	snprintf(dest, size, "%s" DIR_SEP_STR "%s", base, sub);
 }
 
-void derive_paths() {
+void derive_paths(const char* argv0) {
 	char exe_path[PATH_MAX];
 
 #ifdef _WIN32
 	if(!GetModuleFileNameA(NULL, exe_path, PATH_MAX)) exit(1);
 #else
-	if(argv0[0]=='/'||argv0[0]=='.') {
+	if (!argv0) {
+		if (!getcwd(exe_path, PATH_MAX)) {
+			strncpy(exe_path, ".", PATH_MAX);
+			exe_path[PATH_MAX-1] = '\0';
+		}
+	}
+	else if(argv0[0]=='/'||argv0[0]=='.') {
 		if(!realpath(argv0, exe_path)) exit(1);
 	}
 	else {

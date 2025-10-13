@@ -1,8 +1,7 @@
 #pragma once
 
-// ===================== PLATFORM DETECTION =====================
 #ifdef _WIN32
-#define _WIN32_WINNT 0x0A00
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -51,7 +50,6 @@ typedef struct stat stat_t;
 #define FOPEN_READ(path) fopen(path, "rb")
 #endif
 
-// ===================== STANDARD INCLUDES =====================
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,7 +64,6 @@ typedef struct stat stat_t;
 #include <time.h>
 #include <errno.h>
 
-// ===================== COMMON MACROS =====================
 #define STRCPY(dest, src) do { strncpy(dest, src, sizeof(dest) - 1); dest[sizeof(dest) - 1] = '\0'; } while(0)
 #define IS_EMPTY_STR(s) ((s)[0] == '\0')
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
@@ -74,11 +71,9 @@ typedef struct stat stat_t;
 #define SAFE_FREE(ptr) do { if(ptr) { free(ptr); ptr = NULL; } } while(0)
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-// ===================== CONSTANTS =====================
 #define ITEMS_PER_PAGE 25
 #define KEEP_ALIVE_TIMEOUT_SEC 180
 
-// ===================== ANSI COLOR CODES =====================
 #define ANSI_COLOR_BLACK           "\x1b[30m"
 #define ANSI_COLOR_RED             "\x1b[31m"
 #define ANSI_COLOR_GREEN           "\x1b[32m"
@@ -92,13 +87,21 @@ typedef struct stat stat_t;
 #define ANSI_COLOR_BRIGHT_GREEN    "\x1b[92m"
 #define ANSI_COLOR_BRIGHT_YELLOW   "\x1b[93m"
 #define ANSI_COLOR_BRIGHT_BLUE     "\x1b[94m"
-#define ANSI_COLOR_BRIGHT_MAGENTA  "\x1b[95m"
-#define ANSI_COLOR_BRIGHT_CYAN     "\x1b[96m"
-#define ANSI_COLOR_BRIGHT_WHITE    "\x1b[97m"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#define ANSI_BG_BLACK              "\x1b[40m"
-#define ANSI_BG_RED                "\x1b[41m"
-#define ANSI_BG_GREEN              "\x1b[42m"
+extern const char* IMAGE_EXTS[];
+
+extern char BASE_DIR[PATH_MAX];
+extern char VIEWS_DIR[PATH_MAX];
+extern char JS_DIR[PATH_MAX];
+extern char CSS_DIR[PATH_MAX];
+extern char BUNDLED_FILE[PATH_MAX];
+
+#ifdef __cplusplus
+}
+#endif
 #define ANSI_BG_YELLOW             "\x1b[43m"
 #define ANSI_BG_BLUE               "\x1b[44m"
 #define ANSI_BG_MAGENTA            "\x1b[45m"
@@ -120,7 +123,6 @@ typedef struct stat stat_t;
 #define ANSI_COLOR_REVERSE         "\x1b[7m"
 #define ANSI_COLOR_HIDDEN          "\x1b[8m"
 
-// ===================== EXTERNS =====================
 extern const char* IMAGE_EXTS[];
 extern const char* VIDEO_EXTS[];
 

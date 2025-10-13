@@ -1,20 +1,17 @@
 CC_x86=x86_64-w64-mingw32-gcc
 CC_arm=aarch64-w64-mingw32-gcc
-
-CFLAGS_COMMON=-std=c11 -O3 -Iinclude -s -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation
+CFLAGS_COMMON=-std=c11 -Os -flto -Iinclude -s -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation
 CFLAGS_x86=$(CFLAGS_COMMON) -msse2
 CFLAGS_arm=$(CFLAGS_COMMON) -march=armv8-a+simd
-
-LDFLAGS=-Wl,--gc-sections -lws2_32 -lmswsock
-
+LDFLAGS=-flto -Wl,--gc-sections -Wl,--strip-all -Wl,-O1 -lws2_32 -lmswsock
+CFLAGS_DEBUG_COMMON=-std=c11 -g -O0 -Iinclude -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation
+CFLAGS_DEBUG_x86=$(CFLAGS_DEBUG_COMMON) -msse2
+CFLAGS_DEBUG_arm=$(CFLAGS_DEBUG_COMMON) -march=armv8-a+simd
+LDFLAGS_DEBUG=-Wl,--gc-sections -Wl,-O1 -lws2_32 -lmswsock
 EXECUTABLE=galleria.exe
 EXECUTABLE_ARM=galleria_arm64.exe
-TEST_EXEC=test.exe
-RM=rm -f
-RMDIR=rm -rf
-MKDIR=mkdir -p
-UPX=upx
-
+EXECUTABLE_DEBUG=galleria_debug.exe
+EXECUTABLE_ARM_DEBUG=galleria_arm64_debug.exe
 SRC_DIR=src
 BUILD_DIR=build
 ASM_DIR=asm
@@ -25,18 +22,18 @@ ASMS=$(patsubst $(SRC_DIR)/%.c,$(ASM_DIR)/%.s,$(SRCS))
 all: x86
 
 $(BUILD_DIR):
-	@$(MKDIR) $(BUILD_DIR)
+	@mkdir -p $@
 
 $(ASM_DIR):
-	@$(MKDIR) $(ASM_DIR)
+	@mkdir -p $@
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-	@$(MKDIR) $(dir $@)
+	@mkdir -p $(dir $@)
 	@echo "[CC] $< -> $@"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 $(ASM_DIR)/%.s: $(SRC_DIR)/%.c
-	@$(MKDIR) $(dir $@)
+	@mkdir -p $(dir $@)
 	@echo "[ASM] $< -> $@"
 	@$(CC) $(CFLAGS) -S $< -o $@
 
@@ -48,6 +45,14 @@ arm: CC=$(CC_arm)
 arm: CFLAGS=$(CFLAGS_arm)
 arm: $(BUILD_DIR) $(EXECUTABLE_ARM)
 
+debug: CC=$(CC_x86)
+debug: CFLAGS=$(CFLAGS_DEBUG_x86)
+debug: $(BUILD_DIR) $(EXECUTABLE_DEBUG)
+
+debug-arm: CC=$(CC_arm)
+debug-arm: CFLAGS=$(CFLAGS_DEBUG_arm)
+debug-arm: $(BUILD_DIR) $(EXECUTABLE_ARM_DEBUG)
+
 asm: CC=$(CC_x86)
 asm: CFLAGS=$(CFLAGS_x86)
 asm: $(ASM_DIR) $(ASMS)
@@ -56,23 +61,35 @@ $(EXECUTABLE): $(OBJS)
 	@echo "[LD] $@"
 	@$(CC) -o $@ $(OBJS) $(LDFLAGS)
 
+$(EXECUTABLE_DEBUG): $(OBJS)
+	@echo "[LD] $@"
+	@$(CC) -o $@ $(OBJS) $(LDFLAGS_DEBUG)
+
 $(EXECUTABLE_ARM): $(OBJS)
 	@echo "[LD] $@"
 	@$(CC) -o $@ $(OBJS) $(LDFLAGS)
 
+$(EXECUTABLE_ARM_DEBUG): $(OBJS)
+	@echo "[LD] $@"
+	@$(CC) -o $@ $(OBJS) $(LDFLAGS_DEBUG)
+
 upx-x64: $(EXECUTABLE)
-	@$(UPX) --best $(EXECUTABLE)
+	@upx --best $@
 
 upx-arm: $(EXECUTABLE_ARM)
-	@$(UPX) --best $(EXECUTABLE_ARM)
+	@upx --best $@
+
+smallest: x86
+	@echo "[SMALL] compressing $(EXECUTABLE) with UPX..."
+	@upx --best $(EXECUTABLE) || echo "UPX failed; binary left uncompressed"
 
 clean:
-	@$(RM) $(OBJS) $(ASMS) $(EXECUTABLE) $(EXECUTABLE_ARM) $(TEST_EXEC)
-	@$(RMDIR) $(BUILD_DIR) $(ASM_DIR)
+	@rm -f $(OBJS) $(ASMS) $(EXECUTABLE) $(EXECUTABLE_ARM) $(EXECUTABLE_DEBUG) $(EXECUTABLE_ARM_DEBUG)
+	@rm -rf $(BUILD_DIR) $(ASM_DIR)
 
 rebuild: clean all
 
 run: $(EXECUTABLE)
 	@./$(EXECUTABLE)
 
-.PHONY: all clean rebuild run x86 arm asm upx-x64 upx-arm
+.PHONY: all clean rebuild run x86 arm asm debug debug-arm upx-x64 upx-arm smallest

@@ -1,6 +1,10 @@
 #pragma once
 #include "common.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifdef _WIN32
 typedef struct {
 	HANDLE h;
@@ -27,3 +31,7 @@ bool dir_open(diriter* it, const char* path);
 const char* dir_next(diriter* it);
 void dir_close(diriter* it);
 bool has_media_rec(const char* dir);
+
+#ifdef __cplusplus
+}
+#endif

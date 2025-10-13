@@ -1,5 +1,0 @@
-todo: 
-  -generate proper esbuild
-  -link deps (HLS, JQUERY, FANCYBOX JQ, MASONRY, IMAGESLOADED)
-  -strip out all unused bullshit in favor of smaller jsbundle
-  -remove herobrine

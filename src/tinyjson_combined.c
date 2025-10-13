@@ -236,12 +236,6 @@ static char* chtoa(char* dest, char ch, size_t* remLen) { if (*remLen != 0) { --
 static char* atoa(char* dest, char const* src, size_t* remLen) { for (;*src != '\0' && *remLen != 0;++dest, ++src, -- * remLen)*dest = *src;*dest = '\0';return dest; }
 static char* strname(char* dest, char const* name, size_t* remLen) { dest = chtoa(dest, '\"', remLen);if (NULL != name) { dest = atoa(dest, name, remLen);dest = atoa(dest, "\":\"", remLen); }return dest; }
 static int nibbletoch(int nibble) { return"0123456789ABCDEF"[nibble % 16u]; }
-/**
- * Escapes a given character for JSON encoding.
- *
- * @param ch The character to escape.
- * @return The escaped character code, or the original character if no escaping is needed.
- */
 static int escape(int ch) {
     static struct { char code; char ch; } const pair[] = {
         {'\"','\"'}, {'\\','\\'}, {'/','/'}, {'b','\b'},
@@ -251,29 +245,6 @@ static int escape(int ch) {
         if (ch == pair[i].ch) return pair[i].code;
     return '\0';
 }
-
-
-
-/**
- * @brief Escapes special characters in a string for JSON encoding.
- *
- * Copies characters from the source string `src` to the destination buffer `dest`,
- * escaping special characters as required by JSON (e.g., quotes, backslashes, control characters).
- * The function processes up to `len` characters or until the end of the source string,
- * whichever comes first, and ensures that no more than `*remLen` characters are written to `dest`.
- *
- * @param dest      Pointer to the destination buffer where the escaped string will be written.
- * @param src       Pointer to the source string to be escaped.
- * @param len       Maximum number of characters to process from the source string.
- *                  If `len` is negative, processes until the end of the string.
- * @param remLen    Pointer to a variable holding the remaining space in the destination buffer.
- *                  This value is decremented as characters are written.
- *
- * @return Pointer to the end of the written string in the destination buffer.
- *
- * @note The destination buffer will be null-terminated.
- * @note The function relies on helper functions `escape()` and `nibbletoch()` for character escaping.
- */
 static char* atoesc(char* dest, char const* src, int len, size_t* remLen) {
     for (int i = 0;src[i] != '\0' && (i<len || 0>len) && *remLen != 0;++dest, ++i, -- * remLen) {
         if (src[i] >= ' ' && src[i] != '\"' && src[i] != '\\' && src[i] != '/')*dest = src[i];
@@ -294,22 +265,13 @@ static char* atoesc(char* dest, char const* src, int len, size_t* remLen) {
     }
     *dest = '\0';return dest;
 }
-/**
- * The function primitivename takes a destination string, a name string, and a remaining length, and
- * appends the name string surrounded by double quotes followed by a colon to the destination string.
- * 
- * @param dest The `dest` parameter is a pointer to a character array where the function
- * `primitivename` will write the formatted string.
- * @param name The `name` parameter in the `primitivename` function is a constant character pointer,
- * which means it points to a string that cannot be modified within the function.
- * @param remLen The `remLen` parameter is a pointer to a `size_t` variable. It is used to keep track
- * of the remaining length of the destination buffer `dest` in the `primitivename` function. This
- * allows the function to ensure that it does not write beyond the allocated space in
- * 
- * @return The function `primitivename` returns a `char*` pointer to the destination buffer after
- * processing the input `name` string.
- */
-static char* primitivename(char* dest, char const* name, size_t* remLen) { if (NULL == name)return dest;dest = chtoa(dest, '\"', remLen);dest = atoa(dest, name, remLen);dest = atoa(dest, "\":", remLen);return dest; }
+static char* primitivename(char* dest, char const* name, size_t* remLen) {
+    if (NULL == name)return dest;
+    dest = chtoa(dest, '\"', remLen);
+    dest = atoa(dest, name, remLen);
+    dest = atoa(dest, "\":", remLen);
+    return dest;
+}
 
 
 /* ===== NEW/REPLACED FUNCTIONS START ===== */

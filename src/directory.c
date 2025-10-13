@@ -1,18 +1,6 @@
 #include "directory.h"
 #include "common.h"
 
-struct diriter {
-#ifdef _WIN32
-	HANDLE h;
-	WIN32_FIND_DATAA ffd;
-	char pattern[PATH_MAX];
-	bool first;
-#else
-	DIR* d;
-	struct dirent* e;
-#endif
-};
-
 bool has_ext(const char* name, const char* const exts[]) {
 	const char* dot = strrchr(name, '.');
 	if (!dot) return false;

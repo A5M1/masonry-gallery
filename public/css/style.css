@@ -71,9 +71,9 @@ body {
 }
 
 .masonry-item {
-    background: #222;
-    overflow: hidden;
-    border-radius: 8px
+    background: transparent;
+    overflow: visible;
+    border-radius: 0;
 }
 
 .loading {
@@ -244,21 +244,32 @@ body {
     background: #2e2e2e
 }
 
-.media-wrapper img,
-.media-wrapper video {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    object-position: center center
+.masonry-item {
+    overflow: visible;
+    border-radius: 0;
 }
 
 .masonry-item img,
-.masonry-item video {
+.masonry-item video,
+.thumb-img {
     width: 100%;
-    display: block
+    height: auto;
+    display: block;
+    object-fit: contain;
+}
+
+/* Legacy: aspect-ratio approach removed; images use natural aspect and fill width */
+
+/* Ensure thumb-img fills the wrapper */
+.thumb-img {
+    position: static;
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    object-position: center center;
 }
 
 video::-webkit-media-controls-timeline {
