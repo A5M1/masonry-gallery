@@ -182,13 +182,8 @@ void send_file_stream(int c, const char* path, const char* range, int keep) {
 		start=r.start;sz=r.end-r.start+1;code=206;txt="Partial Content";
 		LOG_INFO("Range request: %ld-%ld (%ld bytes)", r.start, r.end, sz);
 	}
-
-	(void)0; /* file open handled in platform_stream_file_payload */
-
-	/* range handling passed to platform_stream_file_payload */
-
+	(void)0; 
 	send_header(c, code, txt, ctype, sz, r.is_range ? &r : NULL, fsz, keep);
-
 	if (platform_stream_file_payload(c, path, start, sz, r.is_range) != 0) {
 		LOG_WARN("File transfer incomplete or failed for %s", path);
 	}
