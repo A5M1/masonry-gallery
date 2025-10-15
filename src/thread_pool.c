@@ -78,12 +78,11 @@ static void* worker_thread(void* arg) {
     if (!buffer) {
         LOG_ERROR("Failed to allocate thread buffer");
 #ifdef _WIN32
-        return 1; // Return error code for Windows
+        return 1;  
 #else
         return NULL;
 #endif
     }
-
     for (;;) {
         int c = dequeue_job();
         size_t total_read = 0;
@@ -91,10 +90,8 @@ static void* worker_thread(void* arg) {
         bool headers_done = false;
         char* headers_end = NULL;
         int broken = 0;
-
-        // Add timeout for socket operations
         struct timeval timeout;
-        timeout.tv_sec = 30;  // 30 second timeout
+        timeout.tv_sec = 30;  
         timeout.tv_usec = 0;
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
@@ -136,18 +133,16 @@ static void* worker_thread(void* arg) {
 
             total_read += r;
             buffer[total_read] = '\0';
-
             if (!headers_done) {
                 headers_end = strstr(buffer, "\r\n\r\n");
                 if (headers_end) {
                     headers_done = true;
-                    char method[16] = {0}; // Increased buffer size
-                    if (sscanf(buffer, "%15s", method) == 1) { // Bounds check
+                    char method[16] = {0};
+                    if (sscanf(buffer, "%15s", method) == 1) { 
                         if (strcmp(method, "POST") == 0) {
                             char* cl = get_header_value(buffer, "Content-Length:");
                             if (cl) {
                                 content_length = atoi(cl);
-                                // Validate content length
                                 if (content_length < 0 || content_length > 10*1024*1024) {
                                     LOG_WARN("Invalid content length: %d", content_length);
                                     broken = 1;
@@ -169,7 +164,6 @@ static void* worker_thread(void* arg) {
             size_t headers_len = headers_end - buffer + 4;
             if (headers_len >= 2) buffer[headers_len - 2] = '\0';
 
-            // Use stack allocation for small requests to avoid malloc overhead
             char* headers_copy = NULL;
             char stack_headers[4096];
             if (headers_len < sizeof(stack_headers)) {
@@ -209,7 +203,6 @@ static void* worker_thread(void* arg) {
 
             handle_single_request(c, headers_copy, body, headers_len, content_length, true);
 
-            // Clean up dynamically allocated memory
             if (headers_copy != stack_headers) free(headers_copy);
             if (body != stack_body && body != NULL) free(body);
         }
@@ -219,7 +212,7 @@ static void* worker_thread(void* arg) {
 
     free(buffer);
 #ifdef _WIN32
-    return 0; // Success return code for Windows
+    return 0; 
 #else
     return NULL;
 #endif
@@ -287,9 +280,7 @@ static int dequeue_job(void) {
     int c;
     thread_mutex_lock(&job_mutex);
 #ifdef _WIN32
-    /* Wait for a job to become available */
     while (job_count == 0) {
-        /* release lock while waiting on semaphore */
         thread_mutex_unlock(&job_mutex);
         WaitForSingleObject(job_not_empty, INFINITE);
         thread_mutex_lock(&job_mutex);

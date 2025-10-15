@@ -1,5 +1,9 @@
 #include "directory.h"
 #include "common.h"
+#ifndef _WIN32
+#include <strings.h>
+#include <stdlib.h>
+#endif
 
 bool has_ext(const char* name, const char* const exts[]) {
 	const char* dot = strrchr(name, '.');
@@ -15,7 +19,19 @@ bool has_ext(const char* name, const char* const exts[]) {
 }
 
 void path_join(char* out, const char* a, const char* b) {
-	snprintf(out, PATH_MAX, "%s%s%s", a, DIR_SEP_STR, b);
+	if (!a || !b) { out[0] = '\0'; return; }
+	size_t al = strlen(a);
+	if (al == 0) {
+		snprintf(out, PATH_MAX, "%s", b);
+		return;
+	}
+	char last = a[al - 1];
+	if (last == '/' || last == '\\') {
+		/* base already ends with separator: don't add another */
+		snprintf(out, PATH_MAX, "%s%s", a, b);
+	} else {
+		snprintf(out, PATH_MAX, "%s%s%s", a, DIR_SEP_STR, b);
+	}
 }
 
 bool is_file(const char* p) {
@@ -47,6 +63,8 @@ int mk_dir(const char* p) {
 }
 
 void normalize_path(char* p) {
+	if (!p) return;
+	/* First, convert all separators to the platform DIR_SEP */
 	for (char* ptr = p; *ptr; ++ptr) {
 #ifdef _WIN32
 		if (*ptr == '/') *ptr = DIR_SEP;
@@ -54,6 +72,14 @@ void normalize_path(char* p) {
 		if (*ptr == '\\') *ptr = DIR_SEP;
 #endif
 	}
+	/* Then collapse duplicate separators (e.g. "E:\\\\F\\file" -> "E:\\F\\file") */
+	char* src = p; char* dst = p; char prev = '\0';
+	while (*src) {
+		char c = *src++;
+		if (c == DIR_SEP && prev == DIR_SEP) continue; /* skip duplicate */
+		*dst++ = c; prev = c;
+	}
+	*dst = '\0';
 }
 
 bool real_path(const char* in, char* out) {

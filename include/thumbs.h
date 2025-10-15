@@ -17,13 +17,21 @@ void get_thumb_rel_names(const char* full_path, const char* filename, char* smal
 int get_media_dimensions(const char* path, int* width, int* height);
 void start_background_thumb_generation(const char* dir_path);
 int dir_has_missing_thumbs(const char* dir, int videos_only);
+int dir_has_missing_thumbs_shallow(const char* dir, int videos_only);
 bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_path_len);
 extern atomic_int ffmpeg_active;
+#if defined(__cplusplus)
+extern "C" {
+#endif
+void make_thumb_fs_paths(const char* media_full, const char* filename, char* small_fs_out, size_t small_fs_out_len, char* large_fs_out, size_t large_fs_out_len);
+void start_periodic_thumb_maintenance(int interval_seconds);
+#if defined(__cplusplus)
+}
+#endif
 #ifndef MAX_FFMPEG
 #define MAX_FFMPEG 2
 #endif
 #endif
 
-/* Internal helpers exposed for api_handlers.c callers */
 void start_auto_thumb_watcher(const char* dir_path);
 void run_thumb_generation(const char* dir);

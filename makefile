@@ -53,6 +53,19 @@ debug-arm: CC=$(CC_arm)
 debug-arm: CFLAGS=$(CFLAGS_DEBUG_arm)
 debug-arm: $(BUILD_DIR) $(EXECUTABLE_ARM_DEBUG)
 
+thumbs-tool: CC=$(CC_x86)
+thumbs-tool: CFLAGS=$(CFLAGS_x86)
+thumbs-tool: $(BUILD_DIR) $(TOOLS_OBJ) $(OBJS)
+	@echo "[LD] tools/thumbs_tool.exe"
+	@$(CC) $(CFLAGS) -o tools/thumbs_tool.exe $(TOOLS_OBJ) $(filter-out $(BUILD_DIR)/main.o,$(OBJS)) $(LDFLAGS)
+
+$(BUILD_DIR)/tools/thumbs_tool.o: tools/thumbs_tool.c
+	@mkdir -p $(dir $@)
+	@echo "[CC] tools/thumbs_tool.c -> $@"
+	@$(CC) $(CFLAGS) -c tools/thumbs_tool.c -o $@
+
+TOOLS_OBJ=$(BUILD_DIR)/tools/thumbs_tool.o
+
 asm: CC=$(CC_x86)
 asm: CFLAGS=$(CFLAGS_x86)
 asm: $(ASM_DIR) $(ASMS)

@@ -115,9 +115,6 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 		message_buffer[sizeof(message_buffer)-2]='.';
 		message_buffer[sizeof(message_buffer)-1]='\0';
 	}
-
-	/* Detect whether we should emit ANSI color sequences (only for interactive consoles)
-	   On Windows, GetConsoleMode succeeded earlier when enabling VT; reuse a simple check. */
 	int use_color = 0;
 #ifdef _WIN32
 	{
@@ -128,21 +125,14 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 #else
 	if(isatty(fileno(stderr))) use_color = 1;
 #endif
-
 	const char* color_prefix = use_color ? level_color_str : "";
 	const char* color_reset = use_color ? ANSI_COLOR_RESET : "";
-
-	/* Compose final output into a single buffer to avoid split writes */
 	char outbuf[512 + MAX_LOG_MESSAGE_LENGTH];
 	int out_len = snprintf(outbuf, sizeof(outbuf), "%s[%s] [%s]%s %s: %s\n",
 		color_prefix, time_str, level_str, color_reset, function, message_buffer);
 	if(out_len < 0) out_len = 0;
 	if((size_t)out_len >= sizeof(outbuf)) out_len = sizeof(outbuf) - 1;
-
-	/* Write to stderr (colored if enabled) */
 	fwrite(outbuf, 1, out_len, stderr);
-
-	/* Write uncolored entry to log file */
 	if(log_file) {
 		fprintf(log_file, "[%s] [%s] %s: %s\n", time_str, level_str, function, message_buffer);
 		fflush(log_file);

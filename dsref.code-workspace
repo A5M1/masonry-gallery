@@ -83,7 +83,8 @@
 			"string": "cpp",
 			"string_view": "cpp",
 			"random": "cpp",
-			"CRYPTO.H": "cpp"
+			"CRYPTO.H": "cpp",
+			"exception_handler.h": "c"
 		},
 		"prettier.bracketSpacing": false
 	}

@@ -221,18 +221,16 @@ size_t crypto_base64_decode(const char* encoded_in, size_t len, uint8_t* decoded
 	if (len % 4 != 0) return (size_t)-1;
 	size_t max_dec = crypto_base64_decode_maxlen(len);
 	if (max_dec == (size_t)-1) return (size_t)-1;
-	if (out_size < max_dec) return (size_t)-1; /* ensure caller buffer big enough */
-
+	if (out_size < max_dec) return (size_t)-1; 
 	size_t i = 0, j = 0;
 	while (i < len) {
 		int a = base64_val((unsigned char)encoded_in[i]);
 		int b = base64_val((unsigned char)encoded_in[i + 1]);
 		int c = encoded_in[i + 2] == '=' ? 0 : base64_val((unsigned char)encoded_in[i + 2]);
 		int d = encoded_in[i + 3] == '=' ? 0 : base64_val((unsigned char)encoded_in[i + 3]);
-		if (a < 0 || b < 0) return (size_t)-1; /* invalid input */
+		if (a < 0 || b < 0) return (size_t)-1;
 		if (encoded_in[i + 2] != '=' && c < 0) return (size_t)-1;
 		if (encoded_in[i + 3] != '=' && d < 0) return (size_t)-1;
-
 		uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12) | ((uint32_t)c << 6) | (uint32_t)d;
 		decoded_out[j++] = (triple >> 16) & 0xFF;
 		if (encoded_in[i + 2] != '=') {

@@ -7,6 +7,8 @@
 #include "server.h"
 #include "thread_pool.h"
 #include "config.h"
+#include "thumbs.h"
+#include "exception_handler.h"
 
 
 
@@ -62,30 +64,46 @@
 
 int main(int argc, char** argv) {
     log_init();
+    install_exception_handlers();
+    LOG_INFO("startup: installed exception handlers");
+    LOG_INFO("startup: after log_init");
     INIT_NETWORK();
+    LOG_INFO("startup: after INIT_NETWORK");
     derive_paths(argc > 0 ? argv[0] : NULL);
+    LOG_INFO("startup: after derive_paths");
     load_config();
+    LOG_INFO("startup: after load_config");
    
-    LOG_INFO("Checking for media files in configured folders...");
-    if (has_media_rec(BASE_DIR)) {
-        size_t count;
+    LOG_INFO("Registering gallery folder watchers (no automatic generation on startup)...");
+    LOG_INFO("startup: about to get_gallery_folders");
+    {
+        size_t count = 0;
         char** folders = get_gallery_folders(&count);
-        LOG_INFO("Starting background thumbnail generation for %zu folder(s)...", count);
-        for (size_t i = 0; i < count; i++)
-            start_background_thumb_generation(folders[i]);
+        LOG_INFO("startup: get_gallery_folders returned count=%zu", count);
+        if (count == 0) {
+            LOG_WARN("No gallery folders configured.");
+        } else {
+            LOG_INFO("Registering directory watcher for %zu folder(s)", count);
+            for (size_t i = 0; i < count; ++i) {
+                LOG_INFO("startup: registering watcher for folder[%zu]=%s", i, folders[i]);
+                start_auto_thumb_watcher(folders[i]);
+                LOG_INFO("startup: watcher registered for folder[%zu]", i);
+            }
+        }
     }
-    else {
-        LOG_WARN("No media files found; skipping startup thumbnail generation.");
-    }
+    LOG_INFO("startup: about to create_listen_socket");
     int port = 3000;
     int s = create_listen_socket(port);
+    LOG_INFO("startup: create_listen_socket returned %d", s);
     if (s < 0) {
         LOG_ERROR("Failed to create listening socket on port %d", port);
         CLEANUP_NETWORK();
         return 1;
     }
     LOG_INFO("Gallery server running on http://localhost:%d", port);
+    LOG_INFO("startup: about to start_thread_pool");
     start_thread_pool(0);
+    LOG_INFO("startup: after start_thread_pool");
     int wait_ct = 0;
     for (;;) {
         struct sockaddr_in ca;

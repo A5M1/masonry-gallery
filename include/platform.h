@@ -11,13 +11,17 @@ int platform_make_dir(const char* path);
 int platform_file_exists(const char* path);
 FILE* platform_popen(const char* cmd, const char* mode);
 int platform_pclose(FILE* f);
+FILE* platform_popen_direct(const char* cmd, const char* mode);
+int platform_pclose_direct(FILE* f);
 int platform_create_lockfile_exclusive(const char* lock_path);
+int platform_pid_is_running(int pid);
+int platform_run_command(const char* cmd, int timeout_seconds);
 typedef void (*platform_watcher_callback_t)(const char* dir);
 int platform_start_dir_watcher(const char* dir, platform_watcher_callback_t cb);
 int platform_stream_file_payload(int client_socket, const char* path, long start, long len, int is_range);
 int platform_stat(const char* path, struct stat* st);
 const char* platform_devnull(void);
-
+int platform_copy_file(const char* src, const char* dst);
 #ifdef __cplusplus
 }
 #endif

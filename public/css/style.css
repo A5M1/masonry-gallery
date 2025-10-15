@@ -258,9 +258,6 @@ body {
     object-fit: contain;
 }
 
-/* Legacy: aspect-ratio approach removed; images use natural aspect and fill width */
-
-/* Ensure thumb-img fills the wrapper */
 .thumb-img {
     position: static;
     display: block;

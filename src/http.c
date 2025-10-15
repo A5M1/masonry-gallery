@@ -24,6 +24,7 @@ const char* mime_for(const char* p) {
 }
 
 char* get_header_value(char* buf, const char* h) {
+	if (!buf) return NULL;
 	size_t hl=strlen(h);char* line=strstr(buf, "\r\n");
 	while(line) {
 		char* next=strstr(line+2, "\r\n");if(!next)break;
@@ -149,7 +150,7 @@ void send_header(int c, int status, const char* text, const char* ctype, long le
 	int off=snprintf(hbuf, sizeof(hbuf),
 		"HTTP/1.1 %d %s\r\nConnection: %s\r\nContent-Type: %s\r\n",
 		status, text, keep ? "keep-alive" : "close", ctype);
-	if(strstr(ctype, "image/")||strstr(ctype, "video/"))
+	if (ctype && (strstr(ctype, "image/") || strstr(ctype, "video/")))
 		off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Disposition: inline\r\n");
 	if(keep)off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Keep-Alive: timeout=%d, max=100\r\n", 5);
 	if(r&&r->is_range) {

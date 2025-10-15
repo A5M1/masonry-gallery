@@ -230,7 +230,6 @@ static char const* const endofblock = "}]";
 static char* setToNull(char* ch) { if (!isOneOfThem(*ch, endofblock))*ch++ = '\0';return ch; }
 static bool isEndOfPrimitive(char ch) { return ch == ',' || isOneOfThem(ch, blank) || isOneOfThem(ch, endofblock); }
 
-/* ===== JSON MAKER ===== */
 
 static char* chtoa(char* dest, char ch, size_t* remLen) { if (*remLen != 0) { --*remLen;*dest = ch;*++dest = '\0'; }return dest; }
 static char* atoa(char* dest, char const* src, size_t* remLen) { for (;*src != '\0' && *remLen != 0;++dest, ++src, -- * remLen)*dest = *src;*dest = '\0';return dest; }
@@ -274,7 +273,6 @@ static char* primitivename(char* dest, char const* name, size_t* remLen) {
 }
 
 
-/* ===== NEW/REPLACED FUNCTIONS START ===== */
 char* json_objOpen(char* dest, char const* name, size_t* remLen) {
     if (!name) return chtoa(dest, '{', remLen);
     dest = chtoa(dest, '\"', remLen);
@@ -320,7 +318,6 @@ char* json_end(char* dest, size_t* remLen) {
     if (dest[-1] == ',') { --dest; ++*remLen; }
     return dest;
 }
-/* ===== NEW/REPLACED FUNCTIONS END ===== */
 
 
 #define ALL_TYPES \
