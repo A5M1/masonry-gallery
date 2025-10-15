@@ -83,8 +83,6 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	normalize_path(target);
 	char target_real[PATH_MAX]; char base_real[PATH_MAX];
 	if (!resolve_and_validate_target(base_dir, dirparam, target_real, sizeof(target_real), base_real, sizeof(base_real))) { if (out_len) *out_len = 0; return NULL; }
-	/* Ensure background thumbnail generation is kicked off when rendering media fragments
-	   so loading the site (root page) triggers generation as well as API calls. */
 	if (dir_has_missing_thumbs_shallow(target_real, 0)) start_background_thumb_generation(target_real);
 
 	char** files = NULL; size_t n = 0, alloc = 0;

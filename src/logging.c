@@ -38,7 +38,6 @@ void log_init(void) {
 			SetConsoleMode(hOut, dwMode);
 		}
 	}
-	/* Also enable VT processing for stderr so colored output on stderr is handled */
 	HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
 	if(hErr!=INVALID_HANDLE_VALUE) {
 		DWORD dwModeErr = 0;
@@ -58,7 +57,6 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 
 	thread_mutex_lock(&log_mutex);
 
-	/* thread-safe localtime */
 	time_t t = time(NULL);
 	char time_str[32];
 #ifdef _WIN32

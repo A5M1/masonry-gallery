@@ -86,7 +86,6 @@ int platform_pclose(FILE* f) {
 FILE* platform_popen_direct(const char* cmd, const char* mode) {
 #ifdef _WIN32
     if (!cmd || !mode) return NULL;
-    /* Create anonymous pipe for stdout */
     SECURITY_ATTRIBUTES saAttr; ZeroMemory(&saAttr, sizeof(saAttr)); saAttr.nLength = sizeof(saAttr); saAttr.bInheritHandle = TRUE; saAttr.lpSecurityDescriptor = NULL;
     HANDLE hRead = NULL, hWrite = NULL;
     if (!CreatePipe(&hRead, &hWrite, &saAttr, 0)) return NULL;
@@ -94,29 +93,16 @@ FILE* platform_popen_direct(const char* cmd, const char* mode) {
 
     STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = hWrite; si.hStdError = hWrite; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     ZeroMemory(&pi, sizeof(pi));
-
-    /* Need to create command line array - here we run cmd directly if cmd contains spaces? To avoid shell, split simple path and args.
-       For simplicity, we'll run via CreateProcessA with cmd as the application and NULL for arguments - relies on proper quoting from caller.
-       If that fails, fall back to CreateProcessA with cmdline = cmd and lpApplicationName = NULL (let system parse).
-    */
     char* cmdline = strdup(cmd);
     BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     free(cmdline);
-    /* Close write end in parent - child has inherited it */
     CloseHandle(hWrite);
     if (!ok) { CloseHandle(hRead); return NULL; }
-    /* Convert HANDLE to FILE* */
     int fd = _open_osfhandle((intptr_t)hRead, _O_RDONLY | _O_BINARY);
     if (fd == -1) { CloseHandle(hRead); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); return NULL; }
     FILE* f = _fdopen(fd, mode);
     if (!f) { _close(fd); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); return NULL; }
-    /* Attach process handles to the FILE* via its cookie using setvbuf? Not necessary; store process handle in FILE* using low-level map isn't trivial.
-       We'll use duplicate handle table: store the process handle in the HANDLE table keyed by file descriptor using _get_osfhandle not portable. Simpler: set the FILE*'s close to also wait on process in platform_pclose_direct by using GetExitCodeProcess via stored global map.
-       For now, we return FILE* and leak process/thread handles — but will immediately close handles to avoid leak? We must keep process handle to get exit code on close. To keep it simple and safe, duplicate process handle and store it in the FILE* via _get_osfhandle not available. Instead, create a small pipe-based wrapper: not feasible here. We'll instead call platform_pclose_direct to call WaitForSingleObject by scanning for a child process—impractical.
-    */
-    /* Store process handle in the file descriptor using _setmode? Not possible. As a pragmatic compromise, close thread handle and keep process handle in a detached list is complex. We'll close thread handle and return FILE*; platform_pclose_direct will not be able to retrieve process handle and will just fclose and return 0. */
     CloseHandle(pi.hThread);
-    /* We don't need to keep the process handle open for now; close it to avoid leaks. */
     CloseHandle(pi.hProcess);
     return f;
 #else
@@ -138,7 +124,6 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
     if (!cmd) return -1;
 #ifdef _WIN32
     STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
-    /* Run through cmd.exe so shell features (redirection) work */
     char cmdline[4096];
     if (snprintf(cmdline, sizeof(cmdline), "cmd.exe /C %s", cmd) >= (int)sizeof(cmdline)) return -1;
     BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
@@ -148,7 +133,6 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
     if (wait == WAIT_OBJECT_0) {
         GetExitCodeProcess(pi.hProcess, &exit_code);
     } else {
-        /* timeout - terminate */
         TerminateProcess(pi.hProcess, 1);
         exit_code = -1;
     }
@@ -158,7 +142,6 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        /* child */
         execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
         _exit(127);
     }
@@ -175,7 +158,6 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
         } else if (rc == 0) {
-            /* shouldn't happen */
             waitpid(pid, &status, 0);
         }
     } else {
@@ -195,7 +177,6 @@ int platform_create_lockfile_exclusive(const char* lock_path) {
         if (err == ERROR_FILE_EXISTS) return 1;
         return -1;
     }
-    /* write PID into the lockfile for detection */
     DWORD pid = GetCurrentProcessId();
     char buf[64]; int bl = snprintf(buf, sizeof(buf), "%u\n", (unsigned int)pid);
     DWORD written = 0; WriteFile(h, buf, (DWORD)bl, &written, NULL);
@@ -207,7 +188,6 @@ int platform_create_lockfile_exclusive(const char* lock_path) {
         if (errno == EEXIST) return 1;
         return -1;
     }
-    /* write PID into the lockfile for detection */
     pid_t pid = getpid();
     char buf[64]; int bl = snprintf(buf, sizeof(buf), "%d\n", (int)pid);
     ssize_t w = write(fd, buf, (size_t)bl);
@@ -229,7 +209,6 @@ int platform_pid_is_running(int pid) {
     return code == STILL_ACTIVE;
 #else
     if (pid <= 0) return 0;
-    /* kill with signal 0 to check existence */
     if (kill((pid_t)pid, 0) == 0) return 1;
     return errno != ESRCH;
 #endif
@@ -305,8 +284,6 @@ static void watcher_trampoline(void* arg) {
     close(fd);
     free(dir);
 #else
-    /* Fallback watcher: simple polling that invokes callback periodically.
-       Not as efficient as inotify, but portable. */
     for (;;) {
         platform_sleep_ms(1000);
         cb(dir);
@@ -387,5 +364,50 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
     }
     close(fd);
     return 0;
+#endif
+}
+
+int platform_run_command_redirect(const char* cmd, const char* out_err_path, int timeout_seconds) {
+    if (!cmd) return -1;
+#ifdef _WIN32
+    STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
+    HANDLE hOut = CreateFileA(out_err_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hOut == INVALID_HANDLE_VALUE) return -1;
+    si.hStdOutput = hOut; si.hStdError = hOut; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    char cmdline[4096]; if (snprintf(cmdline, sizeof(cmdline), "%s", cmd) >= (int)sizeof(cmdline)) { CloseHandle(hOut); return -1; }
+    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (!ok) { CloseHandle(hOut); return -1; }
+    DWORD wait = WaitForSingleObject(pi.hProcess, (timeout_seconds > 0) ? (DWORD)timeout_seconds * 1000 : INFINITE);
+    DWORD exit_code = -1;
+    if (wait == WAIT_OBJECT_0) { GetExitCodeProcess(pi.hProcess, &exit_code); } else { TerminateProcess(pi.hProcess, 1); exit_code = -1; }
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hOut);
+    return (int)exit_code;
+#else
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int fd = open(out_err_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd);
+        }
+        execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
+        _exit(127);
+    }
+    int status = -1;
+    if (timeout_seconds > 0) {
+        int elapsed = 0; int rc;
+        while (elapsed < timeout_seconds) {
+            rc = waitpid(pid, &status, WNOHANG);
+            if (rc == pid) break;
+            sleep(1);
+            elapsed++;
+        }
+        if (elapsed >= timeout_seconds) { kill(pid, SIGKILL); waitpid(pid, &status, 0); }
+        else if (rc == 0) { waitpid(pid, &status, 0); }
+    } else {
+        waitpid(pid, &status, 0);
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
 #endif
 }

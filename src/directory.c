@@ -27,7 +27,6 @@ void path_join(char* out, const char* a, const char* b) {
 	}
 	char last = a[al - 1];
 	if (last == '/' || last == '\\') {
-		/* base already ends with separator: don't add another */
 		snprintf(out, PATH_MAX, "%s%s", a, b);
 	} else {
 		snprintf(out, PATH_MAX, "%s%s%s", a, DIR_SEP_STR, b);
@@ -64,7 +63,6 @@ int mk_dir(const char* p) {
 
 void normalize_path(char* p) {
 	if (!p) return;
-	/* First, convert all separators to the platform DIR_SEP */
 	for (char* ptr = p; *ptr; ++ptr) {
 #ifdef _WIN32
 		if (*ptr == '/') *ptr = DIR_SEP;
@@ -72,11 +70,10 @@ void normalize_path(char* p) {
 		if (*ptr == '\\') *ptr = DIR_SEP;
 #endif
 	}
-	/* Then collapse duplicate separators (e.g. "E:\\\\F\\file" -> "E:\\F\\file") */
 	char* src = p; char* dst = p; char prev = '\0';
 	while (*src) {
 		char c = *src++;
-		if (c == DIR_SEP && prev == DIR_SEP) continue; /* skip duplicate */
+		if (c == DIR_SEP && prev == DIR_SEP) continue;
 		*dst++ = c; prev = c;
 	}
 	*dst = '\0';

@@ -22,7 +22,6 @@ void install_exception_handlers(void) {
 #else
 static void signal_handler(int sig) {
     LOG_ERROR("Received signal %d", sig);
-    /* no portable backtrace here without extra deps */
 }
 void install_exception_handlers(void) {
     signal(SIGSEGV, signal_handler);

@@ -7,16 +7,8 @@
 #include "crypto.h"
 #include "common.h"
 #include <stdint.h>
-#include <errno.h>
 #include <assert.h>
 #include <sys/stat.h>
-#ifdef _WIN32
-#include <io.h>
-#include <windows.h>
-#include <fcntl.h>
-#else
-#include <unistd.h>
-#endif
 
 #define DB_FILENAME "thumbs.db"
 #define LINE_MAX 4096
@@ -67,10 +59,7 @@ static ht_entry_t* ht_find(const char* key) {
     if (!ht) return NULL;
     uint32_t h = ht_hash(key) % ht_buckets;
     ht_entry_t* e = ht[h];
-    while (e) {
-        if (strcmp(e->key, key) == 0) return e;
-        e = e->next;
-    }
+    while (e) { if (strcmp(e->key, key) == 0) return e; e = e->next; }
     return NULL;
 }
 
@@ -139,7 +128,6 @@ static int persist_tx_ops(tx_op_t* ops) {
 }
 
 int thumbdb_open(void) {
-    /* Backwards-compatible: open global thumbs DB under thumbs root */
     char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
     char global_db[PATH_MAX]; snprintf(global_db, sizeof(global_db), "%s" DIR_SEP_STR DB_FILENAME, thumbs_root);
     return thumbdb_open_for_dir(global_db);
@@ -147,10 +135,8 @@ int thumbdb_open(void) {
 
 int thumbdb_open_for_dir(const char* db_full_path) {
     if (!db_open_mutex_inited) { if (thread_mutex_init(&db_open_mutex) == 0) db_open_mutex_inited = 1; }
-    /* serialize DB open/close across threads: lock until thumbdb_close() is called */
     thread_mutex_lock(&db_open_mutex);
     if (db_inited) {
-        /* close existing DB to allow opening a different per-gallery DB */
         thumbdb_close();
     }
     if (thread_mutex_init(&db_mutex) != 0) {
@@ -165,25 +151,10 @@ int thumbdb_open_for_dir(const char* db_full_path) {
     }
     strncpy(db_path, db_full_path, sizeof(db_path)-1); db_path[sizeof(db_path)-1] = '\0';
 
-    /* Ensure parent directory exists (create if necessary) */
-    {
-        char parent[PATH_MAX]; strncpy(parent, db_path, sizeof(parent)-1); parent[sizeof(parent)-1] = '\0';
-        char* last_sl = strrchr(parent, '/');
-        char* last_bsl = strrchr(parent, '\\');
-        char* last = last_sl && last_bsl ? (last_sl > last_bsl ? last_sl : last_bsl) : (last_sl ? last_sl : last_bsl);
-        if (last) {
-            *last = '\0';
-            if (!is_dir(parent)) platform_make_dir(parent);
-        }
-    }
-
     FILE* f = fopen(db_path, "a+");
     if (!f) {
-        LOG_WARN("thumbdb: failed to open db file %s (errno=%d)", db_path, errno);
-        /* cleanup and ensure db_open_mutex is not left locked */
-        ht_free_all(); thread_mutex_destroy(&db_mutex);
-        if (db_open_mutex_inited) thread_mutex_unlock(&db_open_mutex);
-        return -1;
+        LOG_WARN("thumbdb: failed to open db file %s", db_path);
+        ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
     }
     fclose(f);
 
@@ -375,13 +346,6 @@ int thumbdb_tx_commit(void) {
 #ifndef _WIN32
     int fd = fileno(f); if (fd >= 0) fsync(fd);
 #endif
-        #ifdef _WIN32
-        int fd = _fileno(f);
-        if (fd >= 0) {
-            intptr_t h = _get_osfhandle(fd);
-            if (h != -1) FlushFileBuffers((HANDLE)h);
-        }
-        #endif
     fclose(f);
     {
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
@@ -417,13 +381,6 @@ int thumbdb_set(const char* key, const char* value) {
 #ifndef _WIN32
         int fd = fileno(f); if (fd >= 0) fsync(fd);
 #endif
-            #ifdef _WIN32
-            int fd = _fileno(f);
-            if (fd >= 0) {
-                intptr_t h = _get_osfhandle(fd);
-                if (h != -1) FlushFileBuffers((HANDLE)h);
-            }
-            #endif
         fclose(f);
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
@@ -458,13 +415,6 @@ int thumbdb_delete(const char* key) {
 #ifndef _WIN32
         int fd = fileno(f); if (fd >= 0) fsync(fd);
 #endif
-            #ifdef _WIN32
-            int fd = _fileno(f);
-            if (fd >= 0) {
-                intptr_t h = _get_osfhandle(fd);
-                if (h != -1) FlushFileBuffers((HANDLE)h);
-            }
-            #endif
         fclose(f);
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
@@ -498,13 +448,6 @@ int thumbdb_compact(void) {
 #ifndef _WIN32
     int fd = fileno(f); if (fd >= 0) fsync(fd);
 #endif
-        #ifdef _WIN32
-        int fd = _fileno(f);
-        if (fd >= 0) {
-            intptr_t h = _get_osfhandle(fd);
-            if (h != -1) FlushFileBuffers((HANDLE)h);
-        }
-        #endif
     fclose(f);
     platform_file_delete(db_path);
     if (rename(tmp, db_path) != 0) { LOG_WARN("thumbdb: compaction rename failed"); thread_mutex_unlock(&db_mutex); return -1; }

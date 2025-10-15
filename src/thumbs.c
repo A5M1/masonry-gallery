@@ -83,11 +83,11 @@ static void strip_trailing_sep(char* p) {
     size_t len = strlen(p);
     while (len > 0) {
 #ifdef _WIN32
-    if (p[len-1] == '\\' || p[len-1] == '/') { p[len-1] = '\0'; len--; continue; }
+        if (p[len - 1] == '\\' || p[len - 1] == '/') { p[len - 1] = '\0'; len--; continue; }
 #else
-    if (p[len-1] == '/') { p[len-1] = '\0'; len--; continue; }
+        if (p[len - 1] == '/') { p[len - 1] = '\0'; len--; continue; }
 #endif
-    break;
+        break;
     }
 }
 
@@ -141,7 +141,8 @@ void get_thumb_rel_names(const char* full_path, const char* filename, char* smal
         if (blen >= sizeof(base_name)) blen = sizeof(base_name) - 1;
         memcpy(base_name, fname, blen); base_name[blen] = '\0';
         size_t elen = strlen(dot + 1); if (elen >= sizeof(ext)) elen = sizeof(ext) - 1; memcpy(ext, dot + 1, elen); ext[elen] = '\0';
-    } else {
+    }
+    else {
         strncpy(base_name, fname, sizeof(base_name) - 1); base_name[sizeof(base_name) - 1] = '\0';
         strncpy(ext, "jpg", sizeof(ext) - 1); ext[sizeof(ext) - 1] = '\0';
     }
@@ -180,13 +181,13 @@ int dir_has_missing_thumbs(const char* dir, int videos_only) {
         char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
         get_thumb_rel_names(full, name, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
         char dirbuf[PATH_MAX]; get_parent_dir(full, dirbuf, sizeof(dirbuf));
-    char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-    char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0';
-    { size_t si = 0; for (size_t ii = 0; dirbuf[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dirbuf[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
-    char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
-    char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
-    snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
-    snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
+        char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+        char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0';
+        { size_t si = 0; for (size_t ii = 0; dirbuf[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dirbuf[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
+        char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+        char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
+        snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
+        snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
         LOG_DEBUG("dir_has_missing_thumbs: checking media=%s small=%s large=%s", full, small_fs, large_fs);
         int small_exists = is_file(small_fs);
         int large_exists = is_file(large_fs);
@@ -210,21 +211,22 @@ int dir_has_missing_thumbs_shallow(const char* dir, int videos_only) {
     diriter it;
     if (!dir_open(&it, dir)) { LOG_DEBUG("dir_has_missing_thumbs_shallow: failed to open %s", dir); return 0; }
     const char* name;
+    int checked = 0;
+    const int MAX_SHALLOW_CHECK = 25;
     while ((name = dir_next(&it))) {
         if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "thumbs")) continue;
         char full[PATH_MAX]; path_join(full, dir, name);
-        if (is_dir(full)) continue; /* shallow - don't recurse */
-        if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) continue;
+        if (is_dir(full)) continue;         if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) continue;
         if (videos_only && !has_ext(name, VIDEO_EXTS)) continue;
         char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
         get_thumb_rel_names(full, name, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
-    char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-    char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0';
-    { size_t si = 0; for (size_t ii = 0; dir[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dir[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
-    char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
-    char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
-    snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
-    snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
+        char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+        char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0';
+        { size_t si = 0; for (size_t ii = 0; dir[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dir[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
+        char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+        char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
+        snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
+        snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
         LOG_DEBUG("dir_has_missing_thumbs_shallow: checking media=%s small=%s large=%s", full, small_fs, large_fs);
         int small_exists = is_file(small_fs);
         int large_exists = is_file(large_fs);
@@ -236,6 +238,12 @@ int dir_has_missing_thumbs_shallow(const char* dir, int videos_only) {
         if (media_stat == 0 && small_stat == 0 && st_small.st_mtime < st_media.st_mtime) { dir_close(&it); return 1; }
         if (!large_exists) { dir_close(&it); return 1; }
         if (media_stat == 0 && large_stat == 0 && st_large.st_mtime < st_media.st_mtime) { dir_close(&it); return 1; }
+        checked++;
+        if (checked >= MAX_SHALLOW_CHECK) {
+            LOG_DEBUG("dir_has_missing_thumbs_shallow: reached max checks (%d) for %s, assuming missing thumbs", MAX_SHALLOW_CHECK, dir);
+            dir_close(&it);
+            return 1;
+        }
     }
     dir_close(&it);
     LOG_DEBUG("dir_has_missing_thumbs_shallow: no missing thumbs found in %s", dir);
@@ -294,52 +302,51 @@ static void thumb_watcher_cb(const char* dir) {
 }
 
 #ifdef _WIN32
-static unsigned __stdcall thumb_maintenance_thread(void* args){
+static unsigned __stdcall thumb_maintenance_thread(void* args) {
 #else
-static void* thumb_maintenance_thread(void* args){
+static void* thumb_maintenance_thread(void* args) {
 #endif
-    int interval=args?*((int*)args):300;
-    int ival=interval;
+    int interval = args ? *((int*)args) : 300;
+    int ival = interval;
     free(args);
     thumbdb_open();
-    for(;;){
-        platform_sleep_ms(1000*ival);
+    for (;;) {
+        platform_sleep_ms(1000 * ival);
         LOG_INFO("Periodic thumb maintenance: running migration and orphan cleanup");
-        size_t gf_count=0;
-        char** gfolders=get_gallery_folders(&gf_count);
-        if(gf_count==0)continue;
-        for(size_t gi=0;gi<gf_count;++gi){
-            char* gallery=gfolders[gi];
-            /* Open per-gallery DB and thumbs dir */
-            char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root,sizeof(thumbs_root));
+        size_t gf_count = 0;
+        char** gfolders = get_gallery_folders(&gf_count);
+        if (gf_count == 0)continue;
+        for (size_t gi = 0;gi < gf_count;++gi) {
+            char* gallery = gfolders[gi];
+            char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
             char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0'; size_t sdi = 0; for (size_t ii = 0; gallery[ii] && sdi < sizeof(safe_dir_name) - 1; ++ii) { char ch = gallery[ii]; safe_dir_name[sdi++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[sdi] = '\0';
-            char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root,sizeof(per_thumbs_root),"%s" DIR_SEP_STR "%s",thumbs_root,safe_dir_name);
+            char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
             if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
             char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
             thumbdb_open_for_dir(per_db);
-            if(thumbdb_tx_begin()!=0)LOG_WARN("thumbs: failed to start tx for gallery %s",gallery);
-            diriter it; if(!dir_open(&it,gallery)){thumbdb_tx_abort();continue;}
+            if (thumbdb_tx_begin() != 0)LOG_WARN("thumbs: failed to start tx for gallery %s", gallery);
+            diriter it; if (!dir_open(&it, gallery)) { thumbdb_tx_abort();continue; }
             const char* mname;
-            while((mname=dir_next(&it))){
-                if(!strcmp(mname,".")||!strcmp(mname,"..")||!strcmp(mname,"thumbs"))continue;
-                char media_full[PATH_MAX]; path_join(media_full,gallery,mname);
-                if(!is_file(media_full))continue;
-                if(!(has_ext(mname,IMAGE_EXTS)||has_ext(mname,VIDEO_EXTS)))continue;
-                char small_rel[PATH_MAX],large_rel[PATH_MAX];
-                get_thumb_rel_names(media_full,mname,small_rel,sizeof(small_rel),large_rel,sizeof(large_rel));
-                char desired_small[PATH_MAX],desired_large[PATH_MAX];
-                snprintf(desired_small,sizeof(desired_small),"%s" DIR_SEP_STR "%s",per_thumbs_root,small_rel);
-                snprintf(desired_large,sizeof(desired_large),"%s" DIR_SEP_STR "%s",per_thumbs_root,large_rel);
-                (void)0; /* legacy migration removed */
+            while ((mname = dir_next(&it))) {
+                if (!strcmp(mname, ".") || !strcmp(mname, "..") || !strcmp(mname, "thumbs"))continue;
+                char media_full[PATH_MAX]; path_join(media_full, gallery, mname);
+                if (!is_file(media_full))continue;
+                if (!(has_ext(mname, IMAGE_EXTS) || has_ext(mname, VIDEO_EXTS)))continue;
+                char small_rel[PATH_MAX], large_rel[PATH_MAX];
+                get_thumb_rel_names(media_full, mname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+                char desired_small[PATH_MAX], desired_large[PATH_MAX];
+                snprintf(desired_small, sizeof(desired_small), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
+                snprintf(desired_large, sizeof(desired_large), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
+                (void)0;
             }
             dir_close(&it);
-            ensure_thumbs_in_dir(gallery,NULL);
-            clean_orphan_thumbs(gallery,NULL);
-            if(thumbdb_tx_commit()!=0){
-                LOG_WARN("thumbs: failed to commit tx for gallery %s, aborting",gallery);
+            ensure_thumbs_in_dir(gallery, NULL);
+            clean_orphan_thumbs(gallery, NULL);
+            if (thumbdb_tx_commit() != 0) {
+                LOG_WARN("thumbs: failed to commit tx for gallery %s, aborting", gallery);
                 thumbdb_tx_abort();
-            } else {
-                /* sweep and compact this per-gallery DB */
+            }
+            else {
                 thumbdb_sweep_orphans();
                 thumbdb_compact();
             }
@@ -358,7 +365,7 @@ void start_periodic_thumb_maintenance(int interval_seconds) {
     int* arg = malloc(sizeof(int));
     if (!arg) return;
     *arg = interval_seconds > 0 ? interval_seconds : 300;
-    thread_create_detached((void*(*)(void*))thumb_maintenance_thread, arg);
+    thread_create_detached((void* (*)(void*))thumb_maintenance_thread, arg);
 }
 
 void start_auto_thumb_watcher(const char* dir_path) {
@@ -396,7 +403,6 @@ void run_thumb_generation(const char* dir) {
     snprintf(lock_path, sizeof(lock_path), "%s" DIR_SEP_STR ".thumbs.lock", per_thumbs_root);
     int lock_ret = platform_create_lockfile_exclusive(lock_path);
     if (lock_ret == 1) {
-        /* try to read PID from lockfile and remove if PID not running or file is stale */
         struct stat st; if (platform_stat(lock_path, &st) == 0) {
             time_t now = time(NULL);
             const time_t STALE_SECONDS = 300;
@@ -412,7 +418,8 @@ void run_thumb_generation(const char* dir) {
                 LOG_WARN("Lockfile %s owned by dead PID %d or unreadable; removing", lock_path, owner_pid);
                 platform_file_delete(lock_path);
                 lock_ret = platform_create_lockfile_exclusive(lock_path);
-            } else if (now > st.st_mtime && (now - st.st_mtime) > STALE_SECONDS) {
+            }
+            else if (now > st.st_mtime && (now - st.st_mtime) > STALE_SECONDS) {
                 LOG_WARN("Stale lock file detected %s age=%llds (owner pid %d still alive), removing", lock_path, (long long)(now - st.st_mtime), owner_pid);
                 platform_file_delete(lock_path);
                 lock_ret = platform_create_lockfile_exclusive(lock_path);
@@ -432,7 +439,8 @@ void run_thumb_generation(const char* dir) {
     int tbr = thumbdb_open_for_dir(per_db);
     if (tbr != 0) {
         LOG_WARN("run_thumb_generation: thumbdb_open_for_dir failed for %s (rc=%d)", per_db, tbr);
-    } else {
+    }
+    else {
         LOG_DEBUG("run_thumb_generation: opened DB %s", per_db);
     }
     count_media_in_dir(dir_used, &prog);
@@ -461,7 +469,8 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
     if (last) {
         strncpy(filename, last + 1, PATH_MAX - 1); filename[PATH_MAX - 1] = '\0';
         *last = '\0';
-    } else {
+    }
+    else {
         strncpy(filename, dirbuf, PATH_MAX - 1); filename[PATH_MAX - 1] = '\0';
         dirbuf[0] = '.'; dirbuf[1] = '\0';
     }
@@ -509,33 +518,33 @@ void start_background_thumb_generation(const char* dir_path) {
     start_auto_thumb_watcher(dir_path);
 }
 
-    #ifdef _WIN32
-    static unsigned __stdcall thumbnail_generation_thread(void* args) {
-        thread_args_t* thread_args = (thread_args_t*)args;
-        char dir_path[PATH_MAX];
-        strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
-        dir_path[PATH_MAX - 1] = '\0';
-        free(args);
-        LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
-        run_thumb_generation(dir_path);
-        LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
-        return 0;
-    }
-    #else
-    static void* thumbnail_generation_thread(void* args) {
-        thread_args_t* thread_args = (thread_args_t*)args;
-        char dir_path[PATH_MAX];
-        strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
-        dir_path[PATH_MAX - 1] = '\0';
-        free(args);
-        LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
-        run_thumb_generation(dir_path);
-        LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
-        return NULL;
-    }
-    #endif
+#ifdef _WIN32
+static unsigned __stdcall thumbnail_generation_thread(void* args) {
+    thread_args_t* thread_args = (thread_args_t*)args;
+    char dir_path[PATH_MAX];
+    strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
+    dir_path[PATH_MAX - 1] = '\0';
+    free(args);
+    LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
+    run_thumb_generation(dir_path);
+    LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
+    return 0;
+}
+#else
+static void* thumbnail_generation_thread(void* args) {
+    thread_args_t* thread_args = (thread_args_t*)args;
+    char dir_path[PATH_MAX];
+    strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
+    dir_path[PATH_MAX - 1] = '\0';
+    free(args);
+    LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
+    run_thumb_generation(dir_path);
+    LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
+    return NULL;
+}
+#endif
 
-void add_skip(progress_t* prog, const char* reason, const char* path) {
+void add_skip(progress_t * prog, const char* reason, const char* path) {
     char log_path[PATH_MAX]; path_join(log_path, prog->thumbs_dir, "skipped.log");
     FILE* f = fopen(log_path, "a");
     if (f) { fprintf(f, "[%s] %s\n", reason, path);fclose(f); }
@@ -549,7 +558,7 @@ void add_skip(progress_t* prog, const char* reason, const char* path) {
     curr->count++;
 }
 
-void print_skips(progress_t* prog) {
+void print_skips(progress_t * prog) {
     skip_counter_t* curr = prog->skip_head;
     while (curr) {
         if (curr->count > 0)
@@ -570,7 +579,7 @@ int is_valid_media(const char* path) {
     struct stat st;
     if (platform_stat(path, &st) != 0 || st.st_size < 16) return 0;
     if (!is_path_safe(path)) return 0;
-    char esc_path[PATH_MAX*2]; escape_path_for_cmd(path, esc_path, sizeof(esc_path));
+    char esc_path[PATH_MAX * 2]; escape_path_for_cmd(path, esc_path, sizeof(esc_path));
     char cmd[PATH_MAX * 3];
     snprintf(cmd, sizeof(cmd), "ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 %s", esc_path);
     FILE* f = platform_popen_direct(cmd, "r");
@@ -583,12 +592,11 @@ int is_valid_media(const char* path) {
 
 int is_decodable(const char* path) {
     if (!is_path_safe(path)) return 0;
-    char esc_path2[PATH_MAX*2]; escape_path_for_cmd(path, esc_path2, sizeof(esc_path2));
+    char esc_path2[PATH_MAX * 2]; escape_path_for_cmd(path, esc_path2, sizeof(esc_path2));
     char cmd[PATH_MAX * 3];
     snprintf(cmd, sizeof(cmd), "ffprobe -v error -i %s -show_entries format=duration -of default=nw=1:nk=1", esc_path2);
     FILE* f = platform_popen_direct(cmd, "r");
     if (!f) return 0;
-    /* We don't need the output; rely on exit status */
     int status = platform_pclose_direct(f);
     return status == 0;
 }
@@ -599,7 +607,7 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
         return;
     }
     LOG_INFO("[%d/%d] Processing: %s", index, total, input);
-    
+
     char in_path[PATH_MAX]; char out_path[PATH_MAX];
     strncpy(in_path, input, PATH_MAX - 1); in_path[PATH_MAX - 1] = '\0';
     strncpy(out_path, output, PATH_MAX - 1); out_path[PATH_MAX - 1] = '\0';
@@ -614,22 +622,14 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
         snprintf(dbg_log, sizeof(dbg_log), "%s" DIR_SEP_STR "ffmpeg_%lld_%d.log", thumbs_root, (long long)now, index);
     }
     if (ext && (!strcasecmp(ext, ".gif") || !strcasecmp(ext, ".webp"))) {
-#ifdef _WIN32
-    snprintf(cmd, sizeof(cmd), "ffmpeg -y -threads 1 -i \"%s\" -vf scale=%d:-1 -vframes 1 -update 1 -q:v %d \"%s\" > nul 2> \"%s\"", in_path, scale, q, out_path, dbg_log);
-#else
-    snprintf(cmd, sizeof(cmd), "ffmpeg -y -i \"%s\" -vf scale=%d:-1 -vframes 1 -update 1 -q:v %d \"%s\" > /dev/null 2> \"%s\"", in_path, scale, q, out_path, dbg_log);
-#endif
+        snprintf(cmd, sizeof(cmd), "ffmpeg -y -threads 1 -i \"%s\" -vf scale=%d:-1 -vframes 1 -update 1 -q:v %d \"%s\"", in_path, scale, q, out_path);
     }
     else {
-#ifdef _WIN32
-        snprintf(cmd, sizeof(cmd), "ffmpeg -y -threads 1 -i \"%s\" -vf scale=%d:-1 -vframes 1 -update 1 -q:v %d \"%s\" > nul 2> \"%s\"", in_path, scale, q, out_path, dbg_log);
-#else
-    snprintf(cmd, sizeof(cmd), "ffmpeg -y -i \"%s\" -vf scale=%d:-1 -vframes 1 -update 1 -q:v %d \"%s\" > /dev/null 2> \"%s\"", in_path, scale, q, out_path, dbg_log);
-#endif
+        snprintf(cmd, sizeof(cmd), "ffmpeg -y -threads 1 -i \"%s\" -vf scale=%d:-1 -vframes 1 -update 1 -q:v %d \"%s\"", in_path, scale, q, out_path);
     }
     while (atomic_load(&ffmpeg_active) >= MAX_FFMPEG) sleep_ms(50);
     atomic_fetch_add(&ffmpeg_active, 1);
-    int __ret = platform_run_command(cmd, 30);
+    int __ret = platform_run_command_redirect(cmd, dbg_log, 30);
     atomic_fetch_sub(&ffmpeg_active, 1);
     if (__ret != 0) {
         LOG_WARN("[%d/%d] ffmpeg failed for %s -> %s (rc=%d)", index, total, in_path, out_path, __ret);
@@ -643,7 +643,7 @@ int get_media_dimensions(const char* path, int* width, int* height) {
     char tmp_path[PATH_MAX];
     strncpy(tmp_path, path, PATH_MAX - 1); tmp_path[PATH_MAX - 1] = '\0';
     normalize_path(tmp_path);
-    char esc_tmp[PATH_MAX*2]; escape_path_for_cmd(tmp_path, esc_tmp, sizeof(esc_tmp));
+    char esc_tmp[PATH_MAX * 2]; escape_path_for_cmd(tmp_path, esc_tmp, sizeof(esc_tmp));
     char cmd[PATH_MAX * 3];
     snprintf(cmd, sizeof(cmd), "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x %s", esc_tmp);
     FILE* f = platform_popen_direct(cmd, "r");
@@ -658,7 +658,7 @@ int get_media_dimensions(const char* path, int* width, int* height) {
     return 1;
 }
 
-void count_media_in_dir(const char* dir, progress_t* prog) {
+void count_media_in_dir(const char* dir, progress_t * prog) {
     diriter it; if (!dir_open(&it, dir)) return;
     const char* name;
     while ((name = dir_next(&it))) {
@@ -671,8 +671,14 @@ void count_media_in_dir(const char* dir, progress_t* prog) {
     dir_close(&it);
 }
 
-void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
+void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
     LOG_DEBUG("ensure_thumbs_in_dir: enter for %s", dir);
+    if (!prog) {
+        int quick = dir_has_missing_thumbs_shallow(dir, 0);
+        if (quick) start_background_thumb_generation(dir);
+        else start_auto_thumb_watcher(dir);
+        return;
+    }
     if (prog) LOG_DEBUG("ensure_thumbs_in_dir: prog total_files=%zu processed=%zu", prog->total_files, prog->processed_files);
     diriter it;
     if (!dir_open(&it, dir)) return;
@@ -696,21 +702,22 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
             add_skip(prog, "STAT_FAIL", full);
             continue;
         }
-    char thumb_small_rel[PATH_MAX], thumb_large_rel[PATH_MAX];
-    get_thumb_rel_names(full, name, thumb_small_rel, sizeof(thumb_small_rel), thumb_large_rel, sizeof(thumb_large_rel));
-    char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-    char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0'; { size_t si = 0; for (size_t ii = 0; dir[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dir[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
-    char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
-    if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
-    char thumb_small[PATH_MAX], thumb_large[PATH_MAX];
-    snprintf(thumb_small, sizeof(thumb_small), "%s" DIR_SEP_STR "%s", per_thumbs_root, thumb_small_rel);
-    snprintf(thumb_large, sizeof(thumb_large), "%s" DIR_SEP_STR "%s", per_thumbs_root, thumb_large_rel);
+        char thumb_small_rel[PATH_MAX], thumb_large_rel[PATH_MAX];
+        get_thumb_rel_names(full, name, thumb_small_rel, sizeof(thumb_small_rel), thumb_large_rel, sizeof(thumb_large_rel));
+        char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+        char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0'; { size_t si = 0; for (size_t ii = 0; dir[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dir[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
+        char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+        if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
+        char thumb_small[PATH_MAX], thumb_large[PATH_MAX];
+        snprintf(thumb_small, sizeof(thumb_small), "%s" DIR_SEP_STR "%s", per_thumbs_root, thumb_small_rel);
+        snprintf(thumb_large, sizeof(thumb_large), "%s" DIR_SEP_STR "%s", per_thumbs_root, thumb_large_rel);
         struct stat st_media, st_small, st_large;
         int need_small = 0, need_large = 0;
         if (platform_stat(full, &st_media) == 0) {
             if (!is_file(thumb_small) || platform_stat(thumb_small, &st_small) != 0 || st_small.st_mtime < st_media.st_mtime) need_small = 1;
             if (!is_file(thumb_large) || platform_stat(thumb_large, &st_large) != 0 || st_large.st_mtime < st_media.st_mtime) need_large = 1;
-        } else {
+        }
+        else {
             need_small = !is_file(thumb_small);
             need_large = !is_file(thumb_large);
         }
@@ -720,7 +727,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
             LOG_INFO("Generating small thumb for %s -> %s", full, thumb_small);
             generate_thumb_c(full, thumb_small, 320, 75, prog->processed_files, prog->total_files);
             {
-                char *bn = strrchr(thumb_small, DIR_SEP);
+                char* bn = strrchr(thumb_small, DIR_SEP);
                 if (bn) bn = bn + 1; else bn = thumb_small;
                 thumbdb_set(bn, full);
             }
@@ -729,7 +736,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
             LOG_INFO("Generating large thumb for %s -> %s", full, thumb_large);
             generate_thumb_c(full, thumb_large, 1280, 85, prog->processed_files, prog->total_files);
             {
-                char *bn = strrchr(thumb_large, DIR_SEP);
+                char* bn = strrchr(thumb_large, DIR_SEP);
                 if (bn) bn = bn + 1; else bn = thumb_large;
                 thumbdb_set(bn, full);
             }
@@ -738,7 +745,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     dir_close(&it);
 }
 
-void clean_orphan_thumbs(const char* dir, progress_t* prog) {
+void clean_orphan_thumbs(const char* dir, progress_t * prog) {
     if (!dir) return;
     char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
     char safe_dir_name[PATH_MAX]; safe_dir_name[0] = '\0'; { size_t si = 0; for (size_t ii = 0; dir[ii] && si < sizeof(safe_dir_name) - 1; ++ii) { char ch = dir[ii]; safe_dir_name[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir_name[si] = '\0'; }
@@ -786,12 +793,9 @@ void clean_orphan_thumbs(const char* dir, progress_t* prog) {
         }
         if (!found) {
             char thumb_full[PATH_MAX]; path_join(thumb_full, thumbs_path, tname_copy);
-            char *bn_del = strrchr(tname_copy, DIR_SEP);
+            char* bn_del = strrchr(tname_copy, DIR_SEP);
             if (bn_del) bn_del = bn_del + 1; else bn_del = tname_copy;
-            /* Only delete thumbs that the thumb DB maps to media inside the provided gallery directory.
-               This avoids removing thumbs that belong to other galleries that share the same global thumbs folder. */
             char mapped_media[PATH_MAX];
-            /* Ensure we're operating on the per-gallery DB */
             char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", thumbs_path);
             thumbdb_open_for_dir(per_db);
             if (thumbdb_get(bn_del, mapped_media, sizeof(mapped_media)) == 0) {
@@ -800,14 +804,17 @@ void clean_orphan_thumbs(const char* dir, progress_t* prog) {
                     thumbdb_delete(bn_del);
                     if (platform_file_delete(thumb_full) != 0) {
                         LOG_WARN("Failed to delete orphan thumb: %s", thumb_full);
-                    } else {
+                    }
+                    else {
                         LOG_INFO("Removed orphan thumb: %s", thumb_full);
                     }
                     add_skip(prog, "ORPHAN_REMOVED", thumb_full);
-                } else {
+                }
+                else {
                     LOG_DEBUG("Skipping thumb %s mapped to other gallery media: %s", thumb_full, mapped_media);
                 }
-            } else {
+            }
+            else {
                 LOG_DEBUG("Skipping thumb with no db mapping: %s", thumb_full);
             }
         }
