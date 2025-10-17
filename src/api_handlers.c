@@ -83,7 +83,6 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	normalize_path(target);
 	char target_real[PATH_MAX]; char base_real[PATH_MAX];
 	if (!resolve_and_validate_target(base_dir, dirparam, target_real, sizeof(target_real), base_real, sizeof(base_real))) { if (out_len) *out_len = 0; return NULL; }
-	/* Always start background generation/cleanup for the requested directory so the front-end action triggers cleanup */
 	start_background_thumb_generation(target_real);
 
 	char** files = NULL; size_t n = 0, alloc = 0;
@@ -623,13 +622,16 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			rename(tmp_path, cache_path);
 #endif
 		}
-		else LOG_WARN("Failed to write cache file: %s", tmp_path);
+		else {
+			LOG_WARN("Failed to write cache file: %s", tmp_path);
+		}
 		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)hused, NULL, 0, keep_alive);
 		send(c, hbuf, (int)hused, 0);
 		free(hbuf);
 		free(files);
 		return;
 	}
+
 	size_t cap = 8192;
 	char* buf = malloc(cap);
 	if (!buf) {
@@ -645,9 +647,11 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 	ensure_json_buf(&buf, &cap, used, 4096);
 	ptr = buf + used; len = cap - used;
 	for (int i = start; i < end; i++) {
+
 		used = ptr - buf;
 		ensure_json_buf(&buf, &cap, used, 4096);
 		ptr = buf + used; len = cap - used;
+
 		if (i > start) ptr = json_comma_safe(ptr, &len);
 		char full_path[PATH_MAX];
 		path_join(full_path, target_real, files[i]);
@@ -695,12 +699,15 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 		else {
 			ptr = json_str(ptr, "type", "unknown", &len);
 		}
+
+
 		char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
 		get_thumb_rel_names(full_path, files[i], small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
 		char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 		make_thumb_fs_paths(full_path, files[i], small_fs, sizeof(small_fs), large_fs, sizeof(large_fs));
 		int small_exists = is_file(small_fs);
 		int large_exists = is_file(large_fs);
+
 		if (small_exists || large_exists) {
 			char small_url[PATH_MAX]; char large_url[PATH_MAX];
 				if (dirparam[0]) {

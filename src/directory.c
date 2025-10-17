@@ -1,9 +1,5 @@
 #include "directory.h"
 #include "common.h"
-#ifndef _WIN32
-#include <strings.h>
-#include <stdlib.h>
-#endif
 #include "utils.h"
 bool has_ext(const char* name, const char* const exts[]) {
 	const char* dot = strrchr(name, '.');

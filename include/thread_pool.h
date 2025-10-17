@@ -2,9 +2,6 @@
 
 #include "common.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
     void start_thread_pool(int nworkers);
     void enqueue_job(int client_socket);
     void stop_thread_pool(void);
@@ -19,6 +16,3 @@ extern "C" {
     void thread_mutex_unlock(thread_mutex_t* m);
     int thread_create_detached(void* (*start_routine)(void*), void* arg);
 
-#ifdef __cplusplus
-}
-#endif

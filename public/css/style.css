@@ -270,6 +270,7 @@ body {
 	height: auto;
 	display: block;
 	object-fit: contain;
+	border-radius: 8px;
 }
 
 .thumb-img {
@@ -340,7 +341,6 @@ video::-webkit-media-controls.sizing-small
 
 .scroll-to-top-btn:hover {
 	background: var(--accent-color);
-	/* Adjusted hover effect */
 	transform: translateY(-5px);
 }
 

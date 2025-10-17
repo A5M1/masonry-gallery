@@ -1,7 +1,6 @@
 
 #include "http.h"
 #include "logging.h"
-#include <immintrin.h>
 #include "platform.h"
 #include "common.h"
 
@@ -168,7 +167,7 @@ void send_text(int c, int status, const char* text, const char* body, int keep) 
 }
 
 void send_file_stream(int c, const char* path, const char* range, int keep) {
-	LOG_INFO("Serving file: %s", path);
+	LOG_DEBUG("Serving file: %s", path);
 	struct stat st;
 	if (platform_stat(path, &st) < 0) {
 		LOG_ERROR("Failed to stat file: %s", path);
@@ -186,6 +185,6 @@ void send_file_stream(int c, const char* path, const char* range, int keep) {
 	(void)0; 
 	send_header(c, code, txt, ctype, sz, r.is_range ? &r : NULL, fsz, keep);
 	if (platform_stream_file_payload(c, path, start, sz, r.is_range) != 0) {
-		LOG_WARN("File transfer incomplete or failed for %s", path);
+		LOG_DEBUG("File transfer incomplete or failed for %s", path);
 	}
 }

@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <mswsock.h>
 #include <io.h>
+#include <fcntl.h>
 #include <direct.h>
 #include <process.h>
 #include <sys/types.h>
@@ -57,13 +58,35 @@ typedef struct stat stat_t;
 #include <stdint.h>
 #include <stddef.h>
 
-#include <limits.h>
+#include <signal.h>
+#include <assert.h>
+#include <strings.h>
+
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <errno.h>
+
+#if defined(__linux__)
+#include <execinfo.h>
+#include <sys/syscall.h>
+#endif
+
+#ifdef _WIN32
+#include <dbghelp.h>
+#include <psapi.h>
+#endif
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #define STRCPY(dest, src) do { strncpy(dest, src, sizeof(dest) - 1); dest[sizeof(dest) - 1] = '\0'; } while(0)
 #define IS_EMPTY_STR(s) ((s)[0] == '\0')
@@ -88,21 +111,7 @@ typedef struct stat stat_t;
 #define ANSI_COLOR_BRIGHT_GREEN    "\x1b[92m"
 #define ANSI_COLOR_BRIGHT_YELLOW   "\x1b[93m"
 #define ANSI_COLOR_BRIGHT_BLUE     "\x1b[94m"
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-extern const char* IMAGE_EXTS[];
-
-extern char BASE_DIR[PATH_MAX];
-extern char VIEWS_DIR[PATH_MAX];
-extern char JS_DIR[PATH_MAX];
-extern char CSS_DIR[PATH_MAX];
-extern char BUNDLED_FILE[PATH_MAX];
-
-#ifdef __cplusplus
-}
-#endif
 #define ANSI_BG_YELLOW             "\x1b[43m"
 #define ANSI_BG_BLUE               "\x1b[44m"
 #define ANSI_BG_MAGENTA            "\x1b[45m"
@@ -132,3 +141,4 @@ extern char VIEWS_DIR[PATH_MAX];
 extern char JS_DIR[PATH_MAX];
 extern char CSS_DIR[PATH_MAX];
 extern char BUNDLED_FILE[PATH_MAX];
+

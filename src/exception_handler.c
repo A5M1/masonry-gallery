@@ -1,9 +1,7 @@
 #include "exception_handler.h"
 #include "logging.h"
 #include "platform.h"
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include "common.h"
 #include "thread_pool.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -21,7 +19,6 @@ static void write_process_memory_info(void) {
         LOG_ERROR("Memory: PageFaultCount=%lu WorkingSetSize=%zu PeakWorkingSetSize=%zu PagefileUsage=%zu", pmc.PageFaultCount, (size_t)pmc.WorkingSetSize, (size_t)pmc.PeakWorkingSetSize, (size_t)pmc.PagefileUsage);
     }
 }
-
 static void write_handles_and_modules(void) {
     HMODULE mods[1024];DWORD needed=0;
     if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
@@ -32,7 +29,6 @@ static void write_handles_and_modules(void) {
             if (GetModuleFileNameA(mods[i], name, sizeof(name))) LOG_ERROR("  %s", name);
         }
     }
-    // list handles/counts via PSAPI: enumerate processes using this module instead to get some context
 }
 
 static void write_minidump(EXCEPTION_POINTERS* ep) {
@@ -50,29 +46,49 @@ static void write_minidump(EXCEPTION_POINTERS* ep) {
     }
 }
 
+static void write_minidump_with_filename(EXCEPTION_POINTERS*ep){
+    SYSTEMTIME st;GetLocalTime(&st);
+    char fname[MAX_PATH];
+    snprintf(fname,sizeof(fname),"crashdump_%04d%02d%02d_%02d%02d%02d.dmp",
+        st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond);
+    HANDLE hFile=CreateFileA(fname,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
+    if(hFile==INVALID_HANDLE_VALUE){
+        LOG_ERROR("Failed to create minidump file %s (err=%lu)",fname,GetLastError());
+        return;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION mei;
+    mei.ThreadId=GetCurrentThreadId();
+    mei.ExceptionPointers=ep;
+    mei.ClientPointers=FALSE;
+    BOOL ok=MiniDumpWriteDump(GetCurrentProcess(),GetCurrentProcessId(),hFile,MiniDumpWithFullMemory,&mei,NULL,NULL);
+    if(!ok)LOG_ERROR("MiniDumpWriteDump failed (err=%lu)",GetLastError());
+    else LOG_ERROR("Minidump written: %s",fname);
+    CloseHandle(hFile);
+}
+
 static LONG WINAPI exception_filter(EXCEPTION_POINTERS*ep){
     LOG_ERROR("=== UNHANDLED EXCEPTION ===");
     LOG_ERROR("Code=0x%08x Address=%p",(unsigned)ep->ExceptionRecord->ExceptionCode,ep->ExceptionRecord->ExceptionAddress);
-    DWORD pid = GetCurrentProcessId();
-    DWORD tid = GetCurrentThreadId();
-    LOG_ERROR("Process=%u Thread=%u", (unsigned)pid, (unsigned)tid);
-    size_t rcnt = 0;
-    const platform_recent_cmd_t* recent = platform_get_recent_commands(&rcnt);
-    if (recent && rcnt > 0) {
+    DWORD pid=GetCurrentProcessId();
+    DWORD tid=GetCurrentThreadId();
+    LOG_ERROR("Process=%u Thread=%u",(unsigned)pid,(unsigned)tid);
+    size_t rcnt=0;
+    const platform_recent_cmd_t*recent=platform_get_recent_commands(&rcnt);
+    if(recent&&rcnt>0){
         LOG_ERROR("Recent commands (most recent first):");
-        for (size_t i = 0; i < rcnt; ++i) {
-            const platform_recent_cmd_t* r = &recent[i];
-            LOG_ERROR("  ts=%lld thread=%d cmd=%s", r->ts_ms, r->thread_id, r->cmd);
+        for(size_t i=0;i<rcnt;++i){
+            const platform_recent_cmd_t*r=&recent[i];
+            LOG_ERROR("  ts=%lld thread=%d cmd=%s",r->ts_ms,r->thread_id,r->cmd);
         }
     }
     write_process_memory_info();
     write_handles_and_modules();
-    // attempt graceful shutdown of worker threads to reduce resource races during crash handling
     stop_thread_pool();
     write_backtrace();
-    write_minidump(ep);
-    LOG_ERROR("Will wait up to 5 seconds for threads to exit cleanly, then force exit");
-    fflush(stderr);Sleep(5000);
+    write_minidump_with_filename(ep);
+    LOG_ERROR("Press Enter to exit the process due to unhandled exception...");
+    fflush(stderr);
+    getchar();
     LOG_ERROR("Exiting process due to unhandled exception");
     ExitProcess(1);
 }
@@ -82,6 +98,9 @@ void install_exception_handlers(void){
 #else
 #include <execinfo.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 static const char*signal_name(int sig){
     switch(sig){
         case SIGSEGV:return "SIGSEGV (Segmentation Fault)";
@@ -105,6 +124,14 @@ static void signal_handler(int sig){
     LOG_ERROR("Received signal %d (%s)",sig,signal_name(sig));
     const char* last = platform_get_last_command();
     if(last) LOG_ERROR("Last attempted command: %s", last);
+    unsigned int pid = (unsigned int)getpid();
+    unsigned long tid = 0;
+#if defined(__linux__)
+    tid = (unsigned long)syscall(SYS_gettid);
+#else
+    tid = (unsigned long)pthread_self();
+#endif
+    LOG_ERROR("Process=%u Thread=%lu", pid, tid);
     write_backtrace();
     LOG_ERROR("Press Enter to exit...");fflush(stderr);getchar();
     _exit(1);

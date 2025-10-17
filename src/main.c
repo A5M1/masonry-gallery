@@ -9,9 +9,7 @@
 #include "config.h"
 #include "thumbs.h"
 #include "exception_handler.h"
-
-
-
+#include "platform.h"
 #ifdef _WIN32
 #define INIT_NETWORK() do { WSADATA w; WSAStartup(MAKEWORD(2, 2), &w); } while (0)
 #define CLEANUP_NETWORK() do { WSACleanup(); } while (0)
@@ -61,7 +59,6 @@
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &sz, sizeof(sz)); \
 } while (0)
 #endif
-
 int main(int argc, char** argv) {
     log_init();
     install_exception_handlers();
@@ -73,7 +70,11 @@ int main(int argc, char** argv) {
     LOG_DEBUG("startup: after derive_paths");
     load_config();
     LOG_DEBUG("startup: after load_config");
-   
+    if (platform_maximize_window() == 0) {
+        LOG_DEBUG("startup: platform_maximize_window succeeded");
+    } else {
+        LOG_DEBUG("startup: platform_maximize_window not available or failed");
+    }
     LOG_INFO("Registering gallery folder watchers and starting thumbnail maintenance on startup...");
     LOG_DEBUG("startup: about to get_gallery_folders");
     {
@@ -91,7 +92,6 @@ int main(int argc, char** argv) {
             }
         }
     }
-
     LOG_DEBUG("startup: about to create_listen_socket");
     int port = 3000;
     int s = create_listen_socket(port);
@@ -125,10 +125,8 @@ int main(int argc, char** argv) {
         SET_KEEPALIVE(c);
         SET_NODELAY(c);
         SET_BUFFERS(c);
-
         enqueue_job(c);
     }
-
     CLEANUP_NETWORK();
     return 0;
 }

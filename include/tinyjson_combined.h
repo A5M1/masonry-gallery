@@ -1,9 +1,6 @@
 #ifndef _TINY_JSON_COMBINED_H_
 #define _TINY_JSON_COMBINED_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 #include "common.h"
 
 #define json_containerOf(ptr,type,member)((type*)((char*)ptr-offsetof(type,member)))
@@ -53,7 +50,4 @@ char*json_ulong(char*dest,char const*name,unsigned long int value,size_t*remLen)
 char*json_verylong(char*dest,char const*name,long long int value,size_t*remLen);
 char*json_double(char*dest,char const*name,double value,size_t*remLen);
 
-#ifdef __cplusplus
-}
-#endif
 #endif

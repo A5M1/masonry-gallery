@@ -1,10 +1,6 @@
 #pragma once
 #include "common.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 typedef enum {
     LOG_LEVEL_DEBUG,
     LOG_LEVEL_INFO,
@@ -20,6 +16,3 @@ void log_message(LogLevel level, const char* function, const char* format, ...);
 #define LOG_WARN(format, ...)   log_message(LOG_LEVEL_WARN,  __func__, format, ##__VA_ARGS__)
 #define LOG_ERROR(format, ...)  log_message(LOG_LEVEL_ERROR, __func__, format, ##__VA_ARGS__)
 
-#ifdef __cplusplus
-}
-#endif

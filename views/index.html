@@ -7,15 +7,19 @@
     <title>Gallery</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="/css/fb.css" type="text/css" />
-    <link rel="stylesheet" href="/css/style.css" type="text/css" />
+    <link rel="stylesheet" href="/css/style-copy.css" type="text/css" />
     <script src="/bundled"></script>
 </head>
 
 <body>
     <button class="sidebar-toggle-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
-   <!--<button class="scroll-to-top-btn" onclick="scrollToTopAndReset()">⬆️ Reset</button>--> 
+    <!--<button class="scroll-to-top-btn" onclick="scrollToTopAndReset()">⬆️ Reset</button>--> 
     <div class="sidebar">
         <div class="sidebar-header"></div>
+        <li class="folder-item" data-path="/">
+            <span class="folder-spacer"></span>
+            <a href="/" class="folder-link ">🏠<span class="folder-name">home</span></a>
+        </li>
         <div id="folder-tree-container"></div>
     </div>
 

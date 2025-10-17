@@ -22,6 +22,12 @@ static void sleep_ms(int ms) { platform_sleep_ms(ms); }
 
 static int execute_command_with_limits(const char* cmd, const char* out_log, int timeout, int uses_ffmpeg) {
     int ret;
+    if (!cmd) return -1;
+    size_t cmdlen = strlen(cmd);
+    if (cmdlen > 4096) {
+        LOG_ERROR("execute_command_with_limits: refusing to execute overly long command (len=%zu)", cmdlen);
+        return -1;
+    }
     if (uses_ffmpeg) {
         while (atomic_load(&ffmpeg_active) >= MAX_FFMPEG) sleep_ms(50);
         atomic_fetch_add(&ffmpeg_active, 1);

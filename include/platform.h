@@ -1,10 +1,6 @@
 #pragma once
 #include "common.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 void platform_sleep_ms(int ms);
 int platform_file_delete(const char* path);
 int platform_make_dir(const char* path);
@@ -31,6 +27,4 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
 int platform_stat(const char* path, struct stat* st);
 const char* platform_devnull(void);
 int platform_copy_file(const char* src, const char* dst);
-#ifdef __cplusplus
-}
-#endif
+int platform_maximize_window(void);

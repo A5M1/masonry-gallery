@@ -33,11 +33,13 @@ int platform_make_dir(const char* path) {
     return -1;
 #endif
 }
+#if 0
 #include <errno.h>
 #include <string.h>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#endif
 #endif
 
 int platform_copy_file(const char* src,const char* dst){
@@ -486,7 +488,6 @@ int platform_run_command_redirect(const char* cmd, const char* out_err_path, int
 #endif
 }
 
-/* Recent command ring buffer for diagnostics */
 #define PLATFORM_RECENT_CMDS_CAP 16
 static platform_recent_cmd_t g_recent_cmds[PLATFORM_RECENT_CMDS_CAP];
 static size_t g_recent_cmds_head = 0;
@@ -507,7 +508,6 @@ void platform_record_command(const char* cmd) {
     if (!cmd) return;
     size_t idx = (g_recent_cmds_head + g_recent_cmds_count) % PLATFORM_RECENT_CMDS_CAP;
     if (g_recent_cmds_count == PLATFORM_RECENT_CMDS_CAP) {
-        /* buffer full: overwrite oldest */
         idx = g_recent_cmds_head;
         g_recent_cmds_head = (g_recent_cmds_head + 1) % PLATFORM_RECENT_CMDS_CAP;
     } else {
@@ -527,4 +527,26 @@ void platform_record_command(const char* cmd) {
 const platform_recent_cmd_t* platform_get_recent_commands(size_t* out_count) {
     if (out_count) *out_count = g_recent_cmds_count;
     return g_recent_cmds_count ? g_recent_cmds : NULL;
+}
+
+int platform_maximize_window(void) {
+#ifdef _WIN32
+    HWND h = GetConsoleWindow();
+    if (h) {
+        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+        ShowWindow(h, SW_MAXIMIZE);
+        return 0;
+    }
+    return -1;
+#else
+#if defined(__APPLE__)
+    const char* cmd = "osascript -e 'tell application \"System Events\" to tell (first process whose frontmost is true) to keystroke \"m\" using {command down, control down}'";
+    return platform_run_command(cmd, 2) == 0 ? 0 : -1;
+#else
+    if (platform_run_command("wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz", 2) == 0) return 0;
+    if (platform_run_command("xdotool getactivewindow windowsize 100% 100%", 2) == 0) return 0;
+    if (platform_run_command("xdotool getactivewindow windowactivate --sync && xdotool getactivewindow windowstate --sync maximize", 2) == 0) return 0;
+    return -1;
+#endif
+#endif
 }

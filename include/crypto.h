@@ -1,10 +1,6 @@
 #pragma once
 #include "common.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #define MD5_DIGEST_LENGTH  16
 #define SHA1_DIGEST_LENGTH 20
 
@@ -22,6 +18,3 @@ size_t crypto_base64_decode_maxlen(size_t enc_len);
 size_t crypto_base64_encode(const void *data, size_t len, char *encoded_out, size_t out_size);
 size_t crypto_base64_decode(const char *encoded_in, size_t len, uint8_t *decoded_out, size_t out_size);
 
-#ifdef __cplusplus
-}
-#endif

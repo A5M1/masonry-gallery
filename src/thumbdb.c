@@ -6,9 +6,6 @@
 #include "thread_pool.h"
 #include "crypto.h"
 #include "common.h"
-#include <stdint.h>
-#include <assert.h>
-#include <sys/stat.h>
 
 #define DB_FILENAME "thumbs.db"
 #define LINE_MAX 4096

@@ -1,7 +1,6 @@
 #ifndef THUMBS_H
 #define THUMBS_H
 #include "common.h"
-#include <stdatomic.h>
 typedef struct skip_counter {
     char dir[PATH_MAX];
     int count;

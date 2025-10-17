@@ -1,9 +1,7 @@
 #pragma once
 #include "common.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+
 
 typedef struct {
     char dir_path[PATH_MAX];
@@ -31,6 +29,4 @@ void handle_api_list_folders(int c, bool keep_alive);
 void handle_api_regenerate_thumbs(int c, char* qs, bool keep_alive);
 void start_background_thumb_generation(const char* dir_path);
 void create_placeholder_thumbnails(void);
-#ifdef __cplusplus
-}
-#endif
+
