@@ -249,7 +249,10 @@ static int get_worker_count(void) {
 void start_thread_pool(int nworkers) {
 	if(nworkers<=0) nworkers=get_worker_count();
 	LOG_INFO("Starting thread pool with %d workers", nworkers);
-	job_ring=calloc(QUEUE_CAP, sizeof(int));
+    job_ring=calloc(QUEUE_CAP, sizeof(int));
+    if (job_ring) {
+        for (int i = 0; i < QUEUE_CAP; ++i) job_ring[i] = -1;
+    }
     thread_mutex_init(&job_mutex);
 #ifdef _WIN32
     job_not_empty=CreateSemaphore(NULL, 0, QUEUE_CAP, NULL);
@@ -286,6 +289,12 @@ void enqueue_job(int client_socket) {
         return;
     }
     thread_mutex_lock(&job_mutex);
+    if (!job_ring) {
+        thread_mutex_unlock(&job_mutex);
+        LOG_WARN("enqueue_job called but job_ring is NULL, closing socket %d", client_socket);
+        SOCKET_CLOSE(client_socket);
+        return;
+    }
     if (job_count == QUEUE_CAP) {
         LOG_WARN("Job queue is full, dropping connection %d", client_socket);
         thread_mutex_unlock(&job_mutex);
@@ -322,11 +331,12 @@ static int dequeue_job(void) {
         pthread_cond_wait(&job_not_empty, &job_mutex);
     }
 #endif
-    if (job_count == 0) {
+    if (job_ring == NULL || job_count == 0) {
         thread_mutex_unlock(&job_mutex);
         return -1;
     }
     c = job_ring[job_head];
+    job_ring[job_head] = -1;
     job_head=(job_head+1)%QUEUE_CAP;
     job_count--;
 #ifdef _WIN32

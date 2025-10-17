@@ -86,7 +86,8 @@
 			"CRYPTO.H": "cpp",
 			"exception_handler.h": "c",
 			"thumbs.h": "c",
-			"windows.h": "c"
+			"windows.h": "c",
+			"emmintrin.h": "c"
 		},
 		"prettier.bracketSpacing": false
 	}

@@ -1497,9 +1497,9 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
         if (!tname) continue;
         strncpy(tname_copy, tname, sizeof(tname_copy) - 1);
         tname_copy[sizeof(tname_copy) - 1] = '\0';
-        if (p_strcmp(tname_copy, ".") == 0 || p_strcmp(tname_copy, "..") == 0 ||
-            p_strcmp(tname_copy, "skipped.log") == 0 || p_strcmp(tname_copy, ".nogallery") == 0 ||
-            p_strcmp(tname_copy, ".thumbs.lock") == 0) continue;
+        if (ascii_stricmp(tname_copy, ".") == 0 || ascii_stricmp(tname_copy, "..") == 0 ||
+            ascii_stricmp(tname_copy, "skipped.log") == 0 || ascii_stricmp(tname_copy, ".nogallery") == 0 ||
+            ascii_stricmp(tname_copy, ".thumbs.lock") == 0) continue;
 
         if (strstr(tname_copy, "-small-") || strstr(tname_copy, "-large-")) {
             char thumb_full_m[PATH_MAX];
@@ -1514,7 +1514,7 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
 
         if (!strstr(tname_copy, "-small.") && !strstr(tname_copy, "-large.")) continue;
         bool found = false;
-        for (size_t ei = 0; ei < expect_count; ++ei) if (p_strcmp(tname, expects[ei]) == 0) { found = true; break; }
+        for (size_t ei = 0; ei < expect_count; ++ei) if (ascii_stricmp(tname, expects[ei]) == 0) { found = true; break; }
         if (!found) {
             char thumb_full[PATH_MAX];
             path_join(thumb_full, thumbs_path, tname_copy);

@@ -48,9 +48,10 @@ static void write_minidump(EXCEPTION_POINTERS* ep) {
 
 static void write_minidump_with_filename(EXCEPTION_POINTERS*ep){
     SYSTEMTIME st;GetLocalTime(&st);
+    char dir[MAX_PATH]="dmp";CreateDirectoryA(dir,NULL);
     char fname[MAX_PATH];
-    snprintf(fname,sizeof(fname),"crashdump_%04d%02d%02d_%02d%02d%02d.dmp",
-        st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond);
+    snprintf(fname,sizeof(fname),"%s\\crashdump_%04d%02d%02d_%02d%02d%02d.dmp",
+        dir,st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond);
     HANDLE hFile=CreateFileA(fname,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
     if(hFile==INVALID_HANDLE_VALUE){
         LOG_ERROR("Failed to create minidump file %s (err=%lu)",fname,GetLastError());

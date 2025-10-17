@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
         if (count == 0) {
             LOG_WARN("No gallery folders configured.");
         } else {
-            LOG_INFO("Registering directory watcher for %zu folder(s)", count);
+            LOG_DEBUG("Registering directory watcher for %zu folder(s)", count);
             for (size_t i = 0; i < count; ++i) {
                 LOG_DEBUG("startup: registering watcher for folder[%zu]=%s", i, folders[i]);
                 start_auto_thumb_watcher(folders[i]);

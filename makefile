@@ -1,20 +1,29 @@
 CC_x86=x86_64-w64-mingw32-gcc
 CC_arm=aarch64-w64-mingw32-gcc
+
 CFLAGS_COMMON=-std=c11 -Os -flto -Iinclude -s -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation
 CFLAGS_x86=$(CFLAGS_COMMON) -msse2
 CFLAGS_arm=$(CFLAGS_COMMON) -march=armv8-a+simd
+
 LDFLAGS=-flto -Wl,--gc-sections -Wl,--strip-all -Wl,-O1 -lws2_32 -lmswsock -lDbgHelp
+
 CFLAGS_DEBUG_COMMON=-std=c11 -g -O0 -Iinclude -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation -DDEBUG_DIAGNOSTIC
 CFLAGS_DEBUG_x86=$(CFLAGS_DEBUG_COMMON) -msse2
 CFLAGS_DEBUG_arm=$(CFLAGS_DEBUG_COMMON) -march=armv8-a+simd
+
 LDFLAGS_DEBUG=-Wl,--gc-sections -Wl,-O1 -lws2_32 -lmswsock -lDbgHelp
+LDFLAGS_DEBUG_ARM=-Wl,--gc-sections -Wl,-O1 -lws2_32 -lmswsock -lDbgHelp
+
 EXECUTABLE=galleria.exe
 EXECUTABLE_ARM=galleria_arm64.exe
 EXECUTABLE_DEBUG=galleria_debug.exe
 EXECUTABLE_ARM_DEBUG=galleria_arm64_debug.exe
+
 SRC_DIR=src
 BUILD_DIR=build
 ASM_DIR=asm
+SYMBOLS_DIR=symbols
+
 SRCS=$(shell find $(SRC_DIR) -name '*.c')
 OBJS=$(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 ASMS=$(patsubst $(SRC_DIR)/%.c,$(ASM_DIR)/%.s,$(SRCS))
@@ -25,6 +34,9 @@ $(BUILD_DIR):
 	@mkdir -p $@
 
 $(ASM_DIR):
+	@mkdir -p $@
+
+$(SYMBOLS_DIR):
 	@mkdir -p $@
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
@@ -47,11 +59,13 @@ arm: $(BUILD_DIR) $(EXECUTABLE_ARM)
 
 debug: CC=$(CC_x86)
 debug: CFLAGS=$(CFLAGS_DEBUG_x86)
-debug: $(BUILD_DIR) $(EXECUTABLE_DEBUG)
+debug: LDFLAGS=$(LDFLAGS_DEBUG)
+debug: $(BUILD_DIR) $(SYMBOLS_DIR) $(EXECUTABLE_DEBUG)
 
 debug-arm: CC=$(CC_arm)
 debug-arm: CFLAGS=$(CFLAGS_DEBUG_arm)
-debug-arm: $(BUILD_DIR) $(EXECUTABLE_ARM_DEBUG)
+debug-arm: LDFLAGS=$(LDFLAGS_DEBUG_ARM)
+debug-arm: $(BUILD_DIR) $(SYMBOLS_DIR) $(EXECUTABLE_ARM_DEBUG)
 
 thumbs-tool: CC=$(CC_x86)
 thumbs-tool: CFLAGS=$(CFLAGS_x86)
@@ -76,7 +90,7 @@ $(EXECUTABLE): $(OBJS)
 
 $(EXECUTABLE_DEBUG): $(OBJS)
 	@echo "[LD] $@"
-	@$(CC) -o $@ $(OBJS) $(LDFLAGS_DEBUG)
+	@$(CC) -o $@ $(OBJS) $(LDFLAGS_DEBUG) -Wl,--pdb=$(SYMBOLS_DIR)/$(basename $(notdir $@)).pdb
 
 $(EXECUTABLE_ARM): $(OBJS)
 	@echo "[LD] $@"
@@ -84,7 +98,7 @@ $(EXECUTABLE_ARM): $(OBJS)
 
 $(EXECUTABLE_ARM_DEBUG): $(OBJS)
 	@echo "[LD] $@"
-	@$(CC) -o $@ $(OBJS) $(LDFLAGS_DEBUG)
+	@$(CC) -o $@ $(OBJS) $(LDFLAGS_DEBUG_ARM) -Wl,--pdb=$(SYMBOLS_DIR)/$(basename $(notdir $@)).pdb
 
 upx-x64: $(EXECUTABLE)
 	@upx --best $@
@@ -98,11 +112,11 @@ smallest: x86
 
 clean:
 	@rm -f $(OBJS) $(ASMS) $(EXECUTABLE) $(EXECUTABLE_ARM) $(EXECUTABLE_DEBUG) $(EXECUTABLE_ARM_DEBUG)
-	@rm -rf $(BUILD_DIR) $(ASM_DIR)
+	@rm -rf $(BUILD_DIR) $(ASM_DIR) $(SYMBOLS_DIR)
 
 rebuild: clean all
 
 run: $(EXECUTABLE)
 	@./$(EXECUTABLE)
 
-.PHONY: all clean rebuild run x86 arm asm debug debug-arm upx-x64 upx-arm smallest
+.PHONY: all clean rebuild run x86 arm asm debug debug-arm upx-x64 upx-arm smallest thumbs-tool

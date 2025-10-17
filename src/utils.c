@@ -1,10 +1,11 @@
-#include "common.h"
 #include "utils.h"
 #include "platform.h"
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
+#include <emmintrin.h>
 #define USE_SSE2 1
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
 #define USE_NEON 1
 #else
 #define USE_SCALAR 1
