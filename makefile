@@ -3,11 +3,11 @@ CC_arm=aarch64-w64-mingw32-gcc
 CFLAGS_COMMON=-std=c11 -Os -flto -Iinclude -s -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation
 CFLAGS_x86=$(CFLAGS_COMMON) -msse2
 CFLAGS_arm=$(CFLAGS_COMMON) -march=armv8-a+simd
-LDFLAGS=-flto -Wl,--gc-sections -Wl,--strip-all -Wl,-O1 -lws2_32 -lmswsock
-CFLAGS_DEBUG_COMMON=-std=c11 -g -O0 -Iinclude -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation
+LDFLAGS=-flto -Wl,--gc-sections -Wl,--strip-all -Wl,-O1 -lws2_32 -lmswsock -lDbgHelp
+CFLAGS_DEBUG_COMMON=-std=c11 -g -O0 -Iinclude -ffunction-sections -fdata-sections -Wno-format-truncation -Wno-misleading-indentation -DDEBUG_DIAGNOSTIC
 CFLAGS_DEBUG_x86=$(CFLAGS_DEBUG_COMMON) -msse2
 CFLAGS_DEBUG_arm=$(CFLAGS_DEBUG_COMMON) -march=armv8-a+simd
-LDFLAGS_DEBUG=-Wl,--gc-sections -Wl,-O1 -lws2_32 -lmswsock
+LDFLAGS_DEBUG=-Wl,--gc-sections -Wl,-O1 -lws2_32 -lmswsock -lDbgHelp
 EXECUTABLE=galleria.exe
 EXECUTABLE_ARM=galleria_arm64.exe
 EXECUTABLE_DEBUG=galleria_debug.exe

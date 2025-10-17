@@ -83,7 +83,8 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	normalize_path(target);
 	char target_real[PATH_MAX]; char base_real[PATH_MAX];
 	if (!resolve_and_validate_target(base_dir, dirparam, target_real, sizeof(target_real), base_real, sizeof(base_real))) { if (out_len) *out_len = 0; return NULL; }
-	if (dir_has_missing_thumbs_shallow(target_real, 0)) start_background_thumb_generation(target_real);
+	/* Always start background generation/cleanup for the requested directory so the front-end action triggers cleanup */
+	start_background_thumb_generation(target_real);
 
 	char** files = NULL; size_t n = 0, alloc = 0;
 	diriter it; if (dir_open(&it, target_real)) {
@@ -97,7 +98,7 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		dir_close(&it);
 	}
 	if (n == 0) { if (files) free(files); if (out_len) *out_len = 0; return NULL; }
-	qsort(files, n, sizeof(char*), ci_cmp);
+	qsort(files, n, sizeof(char*), p_strcmp);
 	int total = (int)n; int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE; if (totalPages == 0) totalPages = 1; if (page < 1) page = 1; if (page > totalPages) page = totalPages;
 	int start = (page - 1) * ITEMS_PER_PAGE; int end = start + ITEMS_PER_PAGE; if (end > total) end = total;
 
@@ -140,12 +141,11 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		char href_esc[PATH_MAX]; html_escape(href, href_esc, sizeof(href_esc));
 		char small_url[PATH_MAX] = ""; char large_url[PATH_MAX] = "";
 		if (small_exists || large_exists) {
-			if (dirparam && dirparam[0]) {
-				char safe_dir[PATH_MAX]; size_t sdi = 0; const char* dir_to_sanitize = target_real;
-				for (size_t sii = 0; dir_to_sanitize[sii] && sdi < sizeof(safe_dir) - 1; ++sii) { char ch = dir_to_sanitize[sii]; safe_dir[sdi++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir[sdi] = '\0';
-				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-			}
+				if (dirparam && dirparam[0]) {
+					char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
+				}
 			else {
 				char dirpart[PATH_MAX] = "";
 				const char* first_slash = strchr(relurl, '/');
@@ -163,11 +163,29 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 							if (!safe_under(folder_real, full_path)) continue;
 							size_t si = 0;
 							for (size_t ii = 0; folder_real[ii] && si < sizeof(dirpart) - 1; ++ii) {
-								char ch = folder_real[ii];
-								dirpart[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_');
+								char tmp_safe[PATH_MAX]; make_safe_dir_name_from(folder_real, tmp_safe, sizeof(tmp_safe));
+								size_t tlen = strlen(tmp_safe);
+								if (tlen >= sizeof(dirpart)) tlen = sizeof(dirpart) - 1;
+								memcpy(dirpart, tmp_safe, tlen);
+								dirpart[tlen] = '\0';
+								si = tlen;
+								break;
 							}
 							dirpart[si] = '\0';
 							break;
+						}
+						if (!dirpart[0]) {
+							char parent[PATH_MAX];
+							strncpy(parent, full_path, sizeof(parent)-1);
+							parent[sizeof(parent)-1] = '\0';
+							char* s1 = strrchr(parent, '/');
+							char* s2 = strrchr(parent, '\\');
+							char* last = NULL;
+							if (s1 && s2) last = (s1 > s2) ? s1 : s2;
+							else if (s1) last = s1;
+							else if (s2) last = s2;
+							if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
+							make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
 						}
 				}
 					if (dirpart[0]) {
@@ -316,7 +334,7 @@ static char* build_folder_tree_json(char** pbuf, size_t * cap, size_t * used, co
 		}
 		dir_close(&it);
 	}
-	qsort(names, n, sizeof(char*), ci_cmp);
+	qsort(names, n, sizeof(char*), p_strcmp);
 	for (size_t i = 0;i < n;i++) {
 		if (i > 0) {
 			ptr = *pbuf + *used;
@@ -390,7 +408,7 @@ void handle_api_folders(int c, char* qs, bool keep_alive) {
 		}
 		dir_close(&it);
 	}
-	qsort(names, n, sizeof(char*), ci_cmp);
+	qsort(names, n, sizeof(char*), p_strcmp);
 	size_t cap = 8192; char* buf = malloc(cap); size_t len = cap; char* ptr = buf;
 	ptr = json_objOpen(ptr, NULL, &len);
 	ptr = json_arrOpen(ptr, "content", &len);
@@ -460,7 +478,7 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 		}
 		dir_close(&it);
 	}
-	qsort(files, n, sizeof(char*), ci_cmp);
+	qsort(files, n, sizeof(char*), p_strcmp);
 	int total = (int)n;
 	int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
 	if (totalPages == 0) totalPages = 1;
@@ -469,17 +487,13 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 	int start = (page - 1) * ITEMS_PER_PAGE;
 	int end = start + ITEMS_PER_PAGE;
 	if (end > total) end = total;
-
 	if (render_html) {
 		char cache_dir[PATH_MAX];
 		snprintf(cache_dir, sizeof(cache_dir), "%s" DIR_SEP_STR "cache" DIR_SEP_STR "media", BASE_DIR);
 		if (!is_dir(cache_dir)) mk_dir(cache_dir);
 		char safe_name[PATH_MAX];
 		if (dirparam[0] == 0) strncpy(safe_name, "root", sizeof(safe_name)); else {
-			size_t si = 0; for (size_t ii = 0; dirparam[ii] && si < sizeof(safe_name) - 1; ii++) {
-				char ch = dirparam[ii]; safe_name[si++] = (ch == '/' || ch == '\\') ? '_' : ch;
-			}
-			safe_name[si] = '\0';
+			make_safe_dir_name_from(dirparam, safe_name, sizeof(safe_name));
 		}
 		char cache_path[PATH_MAX];
 		snprintf(cache_path, sizeof(cache_path), "%s" DIR_SEP_STR "%s-%d.html", cache_dir, safe_name, page);
@@ -544,24 +558,20 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			}
 			for (size_t k = 0; r[k] && j < PATH_MAX - 1; k++) relurl[j++] = (r[k] == '\\') ? '/' : r[k];
 			relurl[j] = '\0';
-
 			char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
 			get_thumb_rel_names(full_path, files[i], small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
 			char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 			make_thumb_fs_paths(full_path, files[i], small_fs, sizeof(small_fs), large_fs, sizeof(large_fs));
 			int small_exists = is_file(small_fs);
 			int large_exists = is_file(large_fs);
-
 			char href[PATH_MAX];
 			if (dirparam[0]) snprintf(href, sizeof(href), "/images/%s/%s", dirparam, relurl);
 			else snprintf(href, sizeof(href), "/images/%s", relurl);
 			char href_esc[PATH_MAX]; html_escape(href, href_esc, sizeof(href_esc));
-
 			char small_url[PATH_MAX] = ""; char large_url[PATH_MAX] = "";
 			if (small_exists || large_exists) {
 				if (dirparam[0]) {
-					char safe_dir[PATH_MAX]; size_t sdi = 0; const char* dir_to_sanitize = target_real;
-					for (size_t sii = 0; dir_to_sanitize[sii] && sdi < sizeof(safe_dir) - 1; ++sii) { char ch = dir_to_sanitize[sii]; safe_dir[sdi++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir[sdi] = '\0';
+					char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
 					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
 					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
 				}
@@ -580,12 +590,7 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 						for (size_t gi = 0; gi < gf_count; ++gi) {
 							if (!real_path(gfolders[gi], folder_real)) continue;
 							if (!safe_under(folder_real, full_path)) continue;
-							size_t si = 0;
-							for (size_t ii = 0; folder_real[ii] && si < sizeof(dirpart) - 1; ++ii) {
-								char ch = folder_real[ii];
-								dirpart[si++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_');
-							}
-							dirpart[si] = '\0';
+							make_safe_dir_name_from(folder_real, dirpart, sizeof(dirpart));
 							break;
 						}
 					}
@@ -601,42 +606,30 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			}
 			char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\"><a data-fancybox=\"gallery\" href=\"%s\">", href_esc);
-			if (small_exists) {
-				appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", small_esc, large_esc);
-			}
-			else {
-				appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" class=\"thumb-img\">");
-			}
+			if (small_exists) appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", small_esc, large_esc);
+			else appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" class=\"thumb-img\">");
 			appendf(&hbuf, &hcap, &hused, "</a></div>");
 		}
-
-
 		appendf(&hbuf, &hcap, &hused, "</div>");
-
-
 		char tmp_path[PATH_MAX];
 		snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path);
 		FILE* wf = fopen(tmp_path, "wb");
 		if (wf) {
 			fwrite(hbuf, 1, hused, wf);
 			fclose(wf);
-
 #ifdef _WIN32
 			MoveFileExA(tmp_path, cache_path, MOVEFILE_REPLACE_EXISTING);
 #else
 			rename(tmp_path, cache_path);
 #endif
 		}
-		else {
-			LOG_WARN("Failed to write cache file: %s", tmp_path);
-		}
+		else LOG_WARN("Failed to write cache file: %s", tmp_path);
 		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)hused, NULL, 0, keep_alive);
 		send(c, hbuf, (int)hused, 0);
 		free(hbuf);
 		free(files);
 		return;
 	}
-
 	size_t cap = 8192;
 	char* buf = malloc(cap);
 	if (!buf) {
@@ -652,11 +645,9 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 	ensure_json_buf(&buf, &cap, used, 4096);
 	ptr = buf + used; len = cap - used;
 	for (int i = start; i < end; i++) {
-
 		used = ptr - buf;
 		ensure_json_buf(&buf, &cap, used, 4096);
 		ptr = buf + used; len = cap - used;
-
 		if (i > start) ptr = json_comma_safe(ptr, &len);
 		char full_path[PATH_MAX];
 		path_join(full_path, target_real, files[i]);
@@ -704,23 +695,19 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 		else {
 			ptr = json_str(ptr, "type", "unknown", &len);
 		}
-
-
 		char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
 		get_thumb_rel_names(full_path, files[i], small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
 		char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 		make_thumb_fs_paths(full_path, files[i], small_fs, sizeof(small_fs), large_fs, sizeof(large_fs));
 		int small_exists = is_file(small_fs);
 		int large_exists = is_file(large_fs);
-
 		if (small_exists || large_exists) {
 			char small_url[PATH_MAX]; char large_url[PATH_MAX];
-			if (dirparam[0]) {
-				char safe_dir[PATH_MAX]; size_t sdi = 0; const char* dir_to_sanitize = target_real;
-				for (size_t sii = 0; dir_to_sanitize[sii] && sdi < sizeof(safe_dir) - 1; ++sii) { char ch = dir_to_sanitize[sii]; safe_dir[sdi++] = (ch == '/' || ch == '\\') ? '_' : (isalnum((unsigned char)ch) ? ch : '_'); } safe_dir[sdi] = '\0';
-				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-			}
+				if (dirparam[0]) {
+					char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
+				}
 			else {
 				char dirpart[PATH_MAX] = "";
 				const char* first_slash = strchr(relurl, '/');
@@ -734,17 +721,28 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 					size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
 					char folder_real[PATH_MAX]; char base_real_local[PATH_MAX];
 					if (real_path(BASE_DIR, base_real_local)) {
-						size_t base_len = strlen(base_real_local);
-						for (size_t gi = 0; gi < gf_count; ++gi) {
-							if (!real_path(gfolders[gi], folder_real)) continue;
-							if (!safe_under(folder_real, full_path)) continue;
-							const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
-							size_t j = 0;
-							for (size_t k = 0; r[k] && j < sizeof(dirpart) - 1; ++k) { char ch = r[k]; if (ch == '\\') ch = '/'; dirpart[j++] = ch; }
-							dirpart[j] = '\0';
-							break;
+							size_t base_len = strlen(base_real_local);
+							for (size_t gi = 0; gi < gf_count; ++gi) {
+								if (!real_path(gfolders[gi], folder_real)) continue;
+								if (!safe_under(folder_real, full_path)) continue;
+								const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
+								make_safe_dir_name_from(r, dirpart, sizeof(dirpart));
+								break;
+							}
 						}
-					}
+						if (!dirpart[0]) {
+							char parent[PATH_MAX];
+							strncpy(parent, full_path, sizeof(parent)-1);
+							parent[sizeof(parent)-1] = '\0';
+							char* s1 = strrchr(parent, '/');
+							char* s2 = strrchr(parent, '\\');
+							char* last = NULL;
+							if (s1 && s2) last = (s1 > s2) ? s1 : s2;
+							else if (s1) last = s1;
+							else if (s2) last = s2;
+							if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
+							make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
+						}
 				}
 				if (dirpart[0]) {
 					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", dirpart, small_rel);

@@ -4,16 +4,12 @@
 #include <strings.h>
 #include <stdlib.h>
 #endif
-
+#include "utils.h"
 bool has_ext(const char* name, const char* const exts[]) {
 	const char* dot = strrchr(name, '.');
 	if (!dot) return false;
 	for (int i = 0; exts[i]; ++i) {
-#ifdef _WIN32
-		if (_stricmp(dot, exts[i]) == 0) return true;
-#else
-		if (strcasecmp(dot, exts[i]) == 0) return true;
-#endif
+		if (ascii_stricmp(dot, exts[i]) == 0) return true;
 	}
 	return false;
 }

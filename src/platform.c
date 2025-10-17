@@ -34,6 +34,7 @@ int platform_make_dir(const char* path) {
 #endif
 }
 #include <errno.h>
+#include <string.h>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -68,10 +69,20 @@ int platform_file_exists(const char* path) {
 }
 
 FILE* platform_popen(const char* cmd, const char* mode) {
+#if 1
+    if (cmd) { platform_record_command(cmd); LOG_DEBUG("platform_popen: %s", cmd); }
+#endif
 #ifdef _WIN32
-    return _popen(cmd, mode);
+    FILE* f = _popen(cmd, mode);
+    if (!f) {
+        DWORD err = GetLastError();
+        LOG_WARN("platform_popen: _popen failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
+    }
+    return f;
 #else
-    return popen(cmd, mode);
+    FILE* f = popen(cmd, mode);
+    if (!f) LOG_WARN("platform_popen: popen failed for '%s' err=%s", cmd ? cmd : "(null)", strerror(errno));
+    return f;
 #endif
 }
 
@@ -83,51 +94,90 @@ int platform_pclose(FILE* f) {
 #endif
 }
 
-FILE* platform_popen_direct(const char* cmd, const char* mode) {
-#ifdef _WIN32
-    if (!cmd || !mode) return NULL;
-    SECURITY_ATTRIBUTES saAttr; ZeroMemory(&saAttr, sizeof(saAttr)); saAttr.nLength = sizeof(saAttr); saAttr.bInheritHandle = TRUE; saAttr.lpSecurityDescriptor = NULL;
-    HANDLE hRead = NULL, hWrite = NULL;
-    if (!CreatePipe(&hRead, &hWrite, &saAttr, 0)) return NULL;
-    if (!SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0)) { CloseHandle(hRead); CloseHandle(hWrite); return NULL; }
+typedef struct {FILE* f; HANDLE proc;} PHandleMap;
+static PHandleMap g_ph[32];
+static int g_phc=0;
 
-    STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = hWrite; si.hStdError = hWrite; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    ZeroMemory(&pi, sizeof(pi));
-    char* cmdline = strdup(cmd);
-    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    free(cmdline);
-    CloseHandle(hWrite);
-    if (!ok) { CloseHandle(hRead); return NULL; }
-    int fd = _open_osfhandle((intptr_t)hRead, _O_RDONLY | _O_BINARY);
-    if (fd == -1) { CloseHandle(hRead); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); return NULL; }
-    FILE* f = _fdopen(fd, mode);
-    if (!f) { _close(fd); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); return NULL; }
+FILE* platform_popen_direct(const char* cmd,const char* mode){
+    if (cmd) { platform_record_command(cmd); LOG_DEBUG("platform_popen_direct: %s", cmd); }
+#ifdef _WIN32
+    if(!cmd||!mode)return NULL;
+    SECURITY_ATTRIBUTES sa;ZeroMemory(&sa,sizeof(sa));sa.nLength=sizeof(sa);sa.bInheritHandle=TRUE;
+    HANDLE hR=NULL,hW=NULL;
+    if(!CreatePipe(&hR,&hW,&sa,0)){
+        DWORD err = GetLastError();
+        LOG_ERROR("platform_popen_direct: CreatePipe failed err=%lu", err);
+        return NULL;
+    }
+    if(!SetHandleInformation(hR,HANDLE_FLAG_INHERIT,0)){CloseHandle(hR);CloseHandle(hW);return NULL;}
+    STARTUPINFOA si;PROCESS_INFORMATION pi;
+    ZeroMemory(&si,sizeof(si));ZeroMemory(&pi,sizeof(pi));
+    si.cb=sizeof(si);si.dwFlags=STARTF_USESTDHANDLES;
+    si.hStdOutput=hW;si.hStdError=hW;si.hStdInput=GetStdHandle(STD_INPUT_HANDLE);
+    char* c=_strdup(cmd);
+    BOOL ok=CreateProcessA(NULL,c,NULL,NULL,TRUE,CREATE_NO_WINDOW,NULL,NULL,&si,&pi);
+    free(c);
+    CloseHandle(hW);
+    if(!ok){
+        DWORD err = GetLastError();
+        LOG_ERROR("platform_popen_direct: CreateProcessA failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
+        CloseHandle(hR);
+        return NULL;
+    }
+    int fd=_open_osfhandle((intptr_t)hR,_O_RDONLY|_O_BINARY);
+    if(fd==-1){
+        DWORD err = GetLastError();
+        LOG_ERROR("platform_popen_direct: _open_osfhandle failed err=%lu", err);
+        CloseHandle(hR);CloseHandle(pi.hProcess);CloseHandle(pi.hThread);return NULL;}
+    FILE* f=_fdopen(fd,mode);
+    if(!f){
+        LOG_ERROR("platform_popen_direct: _fdopen failed");
+        _close(fd);CloseHandle(pi.hProcess);CloseHandle(pi.hThread);return NULL;}
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    if(g_phc<32){g_ph[g_phc].f=f;g_ph[g_phc].proc=pi.hProcess;g_phc++;}
+    setvbuf(f,NULL,_IONBF,0);
     return f;
 #else
-    return popen(cmd, mode);
+    FILE* f = popen(cmd,mode);
+    if (!f) LOG_WARN("platform_popen_direct: popen failed for '%s' err=%s", cmd ? cmd : "(null)", strerror(errno));
+    return f;
 #endif
 }
 
-int platform_pclose_direct(FILE* f) {
+int platform_pclose_direct(FILE* f){
 #ifdef _WIN32
-    if (!f) return -1;
-    int rc = fclose(f);
-    return rc;
+    if(!f)return-1;
+    HANDLE hProc=NULL;
+    for(int i=0;i<g_phc;i++){
+        if(g_ph[i].f==f){hProc=g_ph[i].proc;
+            g_ph[i]=g_ph[--g_phc];break;}
+    }
+    fclose(f);
+    if(hProc){
+        WaitForSingleObject(hProc,INFINITE);
+        DWORD code=0;GetExitCodeProcess(hProc,&code);
+        CloseHandle(hProc);
+        return (int)code;
+    }
+    return 0;
 #else
     return pclose(f);
 #endif
 }
-
 int platform_run_command(const char* cmd, int timeout_seconds) {
     if (!cmd) return -1;
+    platform_record_command(cmd);
+    LOG_DEBUG("platform_run_command: %s", cmd);
 #ifdef _WIN32
     STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
     char cmdline[4096];
     if (snprintf(cmdline, sizeof(cmdline), "cmd.exe /C %s", cmd) >= (int)sizeof(cmdline)) return -1;
     BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (!ok) return -1;
+    if (!ok) {
+        DWORD err = GetLastError();
+        LOG_ERROR("platform_run_command: CreateProcessA failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
+        return -1;
+    }
     DWORD wait = WaitForSingleObject(pi.hProcess, (timeout_seconds > 0) ? (DWORD)timeout_seconds * 1000 : INFINITE);
     DWORD exit_code = -1;
     if (wait == WAIT_OBJECT_0) {
@@ -140,7 +190,10 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
     return (int)exit_code;
 #else
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        LOG_ERROR("platform_run_command: fork failed: %s", strerror(errno));
+        return -1;
+    }
     if (pid == 0) {
         execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
         _exit(127);
@@ -322,12 +375,25 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
     HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return -1;
     WSAPROTOCOL_INFO pi; int pi_len = sizeof(pi);
-    if (getsockopt(client_socket, SOL_SOCKET, SO_PROTOCOL_INFO, (char*)&pi, &pi_len) == 0) {
-        if (TransmitFile((SOCKET)client_socket, hFile, 0, 0, NULL, NULL, 0)) { CloseHandle(hFile); return 0; }
+    DWORD file_size = GetFileSize(hFile, NULL);
+    long rem = len;
+    if (rem <= 0) {
+        if (file_size > (DWORD)start) rem = (long)(file_size - (DWORD)start);
+        else rem = 0;
     }
-    char buf[65536]; long rem = len; if (rem <= 0) rem = (long)GetFileSize(hFile, NULL);
-    size_t total = 0;
+    if ((long)start >= (long)file_size) { CloseHandle(hFile); return -1; }
     SetFilePointer(hFile, (LONG)start, NULL, FILE_BEGIN);
+    WSAPROTOCOL_INFO pi2; int pi2_len = sizeof(pi2);
+    if (getsockopt(client_socket, SOL_SOCKET, SO_PROTOCOL_INFO, (char*)&pi2, &pi2_len) == 0) {
+        DWORD toWrite = (rem > 0 && rem <= (long)0xFFFFFFFF) ? (DWORD)rem : 0;
+        if (toWrite > 0) {
+            if (TransmitFile((SOCKET)client_socket, hFile, toWrite, 0, NULL, NULL, 0)) { CloseHandle(hFile); return 0; }
+        } else {
+            if (TransmitFile((SOCKET)client_socket, hFile, 0, 0, NULL, NULL, 0)) { CloseHandle(hFile); return 0; }
+        }
+    }
+    char buf[65536];
+    size_t total = 0;
     while (rem > 0) {
         DWORD toread = (rem < (long)sizeof(buf) ? (DWORD)rem : (DWORD)sizeof(buf));
         DWORD rd = 0; if (!ReadFile(hFile, buf, toread, &rd, NULL) || rd == 0) break;
@@ -367,28 +433,35 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
 #endif
 }
 
+#include <time.h>
+
 int platform_run_command_redirect(const char* cmd, const char* out_err_path, int timeout_seconds) {
     if (!cmd) return -1;
+    platform_record_command(cmd);
+    LOG_DEBUG("platform_run_command_redirect: %s -> %s", cmd, out_err_path ? out_err_path : "(null)");
 #ifdef _WIN32
     STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
     HANDLE hOut = CreateFileA(out_err_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hOut == INVALID_HANDLE_VALUE) return -1;
+    if (hOut == INVALID_HANDLE_VALUE) { DWORD err = GetLastError(); LOG_ERROR("platform_run_command_redirect: CreateFileA failed for '%s' err=%lu", out_err_path ? out_err_path : "(null)", err); return -1; }
     si.hStdOutput = hOut; si.hStdError = hOut; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     char cmdline[4096]; if (snprintf(cmdline, sizeof(cmdline), "%s", cmd) >= (int)sizeof(cmdline)) { CloseHandle(hOut); return -1; }
     BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (!ok) { CloseHandle(hOut); return -1; }
+    if (!ok) { DWORD err = GetLastError(); LOG_ERROR("platform_run_command_redirect: CreateProcessA failed for '%s' err=%lu", cmd ? cmd : "(null)", err); CloseHandle(hOut); return -1; }
     DWORD wait = WaitForSingleObject(pi.hProcess, (timeout_seconds > 0) ? (DWORD)timeout_seconds * 1000 : INFINITE);
     DWORD exit_code = -1;
     if (wait == WAIT_OBJECT_0) { GetExitCodeProcess(pi.hProcess, &exit_code); } else { TerminateProcess(pi.hProcess, 1); exit_code = -1; }
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hOut);
+    LOG_DEBUG("platform_run_command_redirect: exit_code=%d", (int)exit_code);
     return (int)exit_code;
 #else
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) { LOG_ERROR("platform_run_command_redirect: fork failed: %s", strerror(errno)); return -1; }
     if (pid == 0) {
         int fd = open(out_err_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
         if (fd >= 0) {
             dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd);
+        } else {
+            LOG_WARN("platform_run_command_redirect: open failed for '%s' err=%s", out_err_path ? out_err_path : "(null)", strerror(errno));
         }
         execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
         _exit(127);
@@ -408,6 +481,50 @@ int platform_run_command_redirect(const char* cmd, const char* out_err_path, int
         waitpid(pid, &status, 0);
     }
     if (WIFEXITED(status)) return WEXITSTATUS(status);
+    LOG_DEBUG("platform_run_command_redirect: child status not exited WIFEXITED(status)=%d", WIFEXITED(status));
     return -1;
 #endif
+}
+
+/* Recent command ring buffer for diagnostics */
+#define PLATFORM_RECENT_CMDS_CAP 16
+static platform_recent_cmd_t g_recent_cmds[PLATFORM_RECENT_CMDS_CAP];
+static size_t g_recent_cmds_head = 0;
+static size_t g_recent_cmds_count = 0;
+
+static long long now_ms(void){
+#if defined(_WIN32) || defined(_WIN64)
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);
+    unsigned long long t=((unsigned long long)ft.dwHighDateTime<<32)|ft.dwLowDateTime;
+    return (t-116444736000000000ULL)/10000ULL;
+#else
+    struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
+    return (long long)ts.tv_sec*1000LL+ts.tv_nsec/1000000LL;
+#endif
+}
+
+void platform_record_command(const char* cmd) {
+    if (!cmd) return;
+    size_t idx = (g_recent_cmds_head + g_recent_cmds_count) % PLATFORM_RECENT_CMDS_CAP;
+    if (g_recent_cmds_count == PLATFORM_RECENT_CMDS_CAP) {
+        /* buffer full: overwrite oldest */
+        idx = g_recent_cmds_head;
+        g_recent_cmds_head = (g_recent_cmds_head + 1) % PLATFORM_RECENT_CMDS_CAP;
+    } else {
+        g_recent_cmds_count++;
+    }
+    platform_recent_cmd_t* rc = &g_recent_cmds[idx];
+    rc->ts_ms = now_ms();
+#ifdef _WIN32
+    rc->thread_id = (int)GetCurrentThreadId();
+#else
+    rc->thread_id = (int)(uintptr_t)pthread_self();
+#endif
+    strncpy(rc->cmd, cmd, sizeof(rc->cmd) - 1);
+    rc->cmd[sizeof(rc->cmd) - 1] = '\0';
+}
+
+const platform_recent_cmd_t* platform_get_recent_commands(size_t* out_count) {
+    if (out_count) *out_count = g_recent_cmds_count;
+    return g_recent_cmds_count ? g_recent_cmds : NULL;
 }

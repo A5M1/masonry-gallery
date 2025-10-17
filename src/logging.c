@@ -3,8 +3,11 @@
 #include "thread_pool.h"
 #define LOG_DIR "logs"
 #define MAX_LOG_MESSAGE_LENGTH 256
-
+#ifdef DEBUG_DIAGNOSTIC
 LogLevel current_log_level=LOG_LEVEL_DEBUG;
+#else
+LogLevel current_log_level=LOG_LEVEL_INFO;
+#endif
 FILE* log_file=NULL;
 
 #ifdef _WIN32
@@ -53,7 +56,10 @@ void log_init(void) {
 }
 
 void log_message(LogLevel level, const char* function, const char* format, ...) {
-	if(level<current_log_level) return;
+	/* Only log messages at or above the current log level.
+	   e.g. when current_log_level == LOG_LEVEL_INFO we want to
+	   log INFO, WARN and ERROR but skip DEBUG. */
+	if (level < current_log_level) return;
 
 	thread_mutex_lock(&log_mutex);
 

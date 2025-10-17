@@ -41,7 +41,7 @@ static off_t db_last_size = 0;
 static int db_rebuilding = 0;
 
 static uint32_t ht_hash(const char* s) {
-    
+
     uint32_t h = 2166136261u;
     while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
     return h;
@@ -97,7 +97,8 @@ static int append_line_to_file(FILE* f, const char* key, const char* val) {
     if (!f) return -1;
     if (val) {
         if (fprintf(f, "%s\t%s\n", key, val) < 0) return -1;
-    } else {
+    }
+    else {
         if (fprintf(f, "%s\t\n", key) < 0) return -1;
     }
     return 0;
@@ -149,7 +150,7 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         thread_mutex_destroy(&db_mutex);
         return -1;
     }
-    strncpy(db_path, db_full_path, sizeof(db_path)-1); db_path[sizeof(db_path)-1] = '\0';
+    strncpy(db_path, db_full_path, sizeof(db_path) - 1); db_path[sizeof(db_path) - 1] = '\0';
 
     FILE* f = fopen(db_path, "a+");
     if (!f) {
@@ -166,7 +167,8 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         char* tab = strchr(line, '\t'); if (!tab) continue; *tab = '\0'; char* key = line; char* val = tab + 1;
         if (val[0] == '\0') {
             ht_set_internal(key, NULL);
-        } else {
+        }
+        else {
             ht_set_internal(key, val);
         }
     }
@@ -176,7 +178,8 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         if (stat(db_path, &st) == 0) {
             db_last_mtime = st.st_mtime;
             db_last_size = st.st_size;
-        } else {
+        }
+        else {
             db_last_mtime = 0; db_last_size = 0;
         }
     }
@@ -198,7 +201,8 @@ static int rebuild_index_locked(void) {
     }
     fclose(f);
     struct stat st;
-    if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; } else { db_last_mtime = 0; db_last_size = 0; }
+    if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+    else { db_last_mtime = 0; db_last_size = 0; }
     return 0;
 }
 
@@ -210,7 +214,11 @@ static void free_ht_table(ht_entry_t** table, size_t buckets) {
     }
     free(table);
 }
-
+#ifdef _WIN32
+#define PLATFORM_DEFAULT_RETURN 0
+#else
+#define PLATFORM_DEFAULT_RETURN NULL
+#endif
 #ifdef _WIN32
 static unsigned __stdcall rebuild_worker(void* arg) {
 #else
@@ -219,28 +227,17 @@ static void* rebuild_worker(void* arg) {
     (void)arg;
     struct stat st;
     if (stat(db_path, &st) != 0) {
-#ifdef _WIN32
-        return 0;
-#else
-        return NULL;
-#endif
+        return PLATFORM_DEFAULT_RETURN;
     }
     size_t new_buckets = INITIAL_BUCKETS;
     ht_entry_t** new_ht = calloc(new_buckets, sizeof(ht_entry_t*));
     if (!new_ht) {
-#ifdef _WIN32
-        return 0;
-#else
-        return NULL;
-#endif
+        return PLATFORM_DEFAULT_RETURN;
     }
     FILE* f = fopen(db_path, "r");
-    if (!f) { free(new_ht);
-#ifdef _WIN32
-        return 0;
-#else
-        return NULL;
-#endif
+    if (!f) {
+        free(new_ht);
+        return PLATFORM_DEFAULT_RETURN;
     }
     char line[LINE_MAX];
     while (fgets(line, sizeof(line), f)) {
@@ -266,11 +263,7 @@ static void* rebuild_worker(void* arg) {
     thread_mutex_unlock(&db_mutex);
 
     free_ht_table(old_ht, old_buckets);
-#ifdef _WIN32
-    return 0;
-#else
-    return NULL;
-#endif
+    return PLATFORM_DEFAULT_RETURN;
 }
 
 static int ensure_index_uptodate(void) {
@@ -279,7 +272,7 @@ static int ensure_index_uptodate(void) {
     if (db_last_mtime == st.st_mtime && db_last_size == st.st_size) return 0;
     if (db_rebuilding) return 0;
     db_rebuilding = 1;
-    if (thread_create_detached((void*(*)(void*))rebuild_worker, NULL) != 0) {
+    if (thread_create_detached((void* (*)(void*))rebuild_worker, NULL) != 0) {
         db_rebuilding = 0;
         return -1;
     }
@@ -377,7 +370,8 @@ int thumbdb_set(const char* key, const char* value) {
     }
     int r = ht_set_internal(key, value);
     FILE* f = fopen(db_path, "a");
-    if (f) { append_line_to_file(f, key, value); fflush(f);
+    if (f) {
+        append_line_to_file(f, key, value); fflush(f);
 #ifndef _WIN32
         int fd = fileno(f); if (fd >= 0) fsync(fd);
 #endif
@@ -411,7 +405,8 @@ int thumbdb_delete(const char* key) {
     }
     ht_set_internal(key, NULL);
     FILE* f = fopen(db_path, "a");
-    if (f) { append_line_to_file(f, key, NULL); fflush(f);
+    if (f) {
+        append_line_to_file(f, key, NULL); fflush(f);
 #ifndef _WIN32
         int fd = fileno(f); if (fd >= 0) fsync(fd);
 #endif
@@ -465,11 +460,12 @@ static void sweep_cb(const char* key, const char* value, void* ctx) {
         if (is_file(thumb_path)) {
             if (platform_file_delete(thumb_path) == 0) {
                 LOG_INFO("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
-            } else {
+            }
+            else {
                 LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
             }
         }
-    thumbdb_delete(key);
+        thumbdb_delete(key);
     }
 }
 

@@ -118,14 +118,30 @@ char* query_get(char* qs, const char* key) {
 	return NULL;
 }
 
-int ci_cmp(const void* a, const void* b) {
+int p_strcmp(const void* a, const void* b) {
 	const char* s1=*(const char* const*)a;
 	const char* s2=*(const char* const*)b;
-#ifdef _WIN32
-	return _stricmp(s1, s2);
-#else
-	return strcasecmp(s1, s2);
+	if (s1 == s2) return 0;
+	if (!s1) return -1;
+	if (!s2) return 1;
+#ifdef DEBUG_DIAGNOSTIC
+	return debug_ascii_stricmp(s1, s2);
 #endif
+	const unsigned char* p = (const unsigned char*)s1;
+	const unsigned char* q = (const unsigned char*)s2;
+	while (*p && *q) {
+		unsigned char ca = *p;
+		unsigned char cb = *q;
+		if (ca >= 'A' && ca <= 'Z') ca |= 0x20;
+		if (cb >= 'A' && cb <= 'Z') cb |= 0x20;
+		if (ca != cb) return (int)ca - (int)cb;
+		++p; ++q;
+	}
+	unsigned char ca = *p;
+	unsigned char cb = *q;
+	if (ca >= 'A' && ca <= 'Z') ca |= 0x20;
+	if (cb >= 'A' && cb <= 'Z') cb |= 0x20;
+	return (int)ca - (int)cb;
 }
 
 void sb_append(char** buf, size_t* cap, size_t* len, const char* s) {
@@ -183,3 +199,68 @@ void html_escape(const char* src, char* out, size_t outlen) {
 	}
 	out[i < outlen ? i : outlen - 1] = '\0';
 }
+
+int ascii_stricmp(const char* a, const char* b) {
+	unsigned char ca, cb;
+	if (a == b) return 0;
+	if (!a) return -((int)(unsigned char)*b);
+	if (!b) return (int)(unsigned char)*a;
+	while (*a && *b) {
+		ca = (unsigned char)*a++;
+		cb = (unsigned char)*b++;
+		if (ca >= 'A' && ca <= 'Z') ca |= 0x20;
+		if (cb >= 'A' && cb <= 'Z') cb |= 0x20;
+		if (ca != cb) return (int)ca - (int)cb;
+	}
+	ca = (unsigned char)*a;
+	cb = (unsigned char)*b;
+	if (ca >= 'A' && ca <= 'Z') ca |= 0x20;
+	if (cb >= 'A' && cb <= 'Z') cb |= 0x20;
+	return (int)ca - (int)cb;
+}
+
+#ifdef DEBUG_DIAGNOSTIC
+#include <stdio.h>
+#include <string.h>
+#include "logging.h"
+
+static int ascii_tolower(int c){return (c>='A'&&c<='Z')?c+32:c;}
+
+int debug_ascii_stricmp(const char*a,const char*b){
+	LOG_DEBUG("debug_ascii_stricmp: probe a=%p b=%p",(void*)a,(void*)b);
+#ifdef _WIN32
+	/* Use VirtualQuery to ensure the pointers refer to committed, non-noaccess memory
+	   so we avoid dereferencing tiny/invalid addresses (e.g. 0x2e) which would crash. */
+	int a_readable = 0, b_readable = 0;
+	if (a) {
+		MEMORY_BASIC_INFORMATION mbi;
+		if (VirtualQuery((LPCVOID)a, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+			if ((mbi.State & MEM_COMMIT) && !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD)) a_readable = 1;
+		}
+	}
+	if (b) {
+		MEMORY_BASIC_INFORMATION mbi2;
+		if (VirtualQuery((LPCVOID)b, &mbi2, sizeof(mbi2)) == sizeof(mbi2)) {
+			if ((mbi2.State & MEM_COMMIT) && !(mbi2.Protect & PAGE_NOACCESS) && !(mbi2.Protect & PAGE_GUARD)) b_readable = 1;
+		}
+	}
+	if (!a_readable || !b_readable) {
+		LOG_DEBUG("debug_ascii_stricmp: unreadable pointer a=%p readable=%d b=%p readable=%d", (void*)a, a_readable, (void*)b, b_readable);
+		if (a == b) return 0;
+		return (a < b) ? -1 : 1;
+	}
+	unsigned char probe_a[9] = {0};
+	unsigned char probe_b[9] = {0};
+	memcpy(probe_a, a, 8);
+	memcpy(probe_b, b, 8);
+	LOG_DEBUG("debug_ascii_stricmp: a_bytes=%.8s b_bytes=%.8s", (char*)probe_a, (char*)probe_b);
+	return ascii_stricmp(a, b);
+#else
+	unsigned char probe_a[9] = {0}, probe_b[9] = {0};
+	if (a) for (int i = 0; i < 8 && a[i]; ++i) probe_a[i] = (unsigned char)a[i];
+	if (b) for (int i = 0; i < 8 && b[i]; ++i) probe_b[i] = (unsigned char)b[i];
+	LOG_DEBUG("debug_ascii_stricmp: a_bytes=%.8s b_bytes=%.8s", (char*)probe_a, (char*)probe_b);
+	return ascii_stricmp(a, b);
+#endif
+}
+#endif

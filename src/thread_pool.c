@@ -9,14 +9,21 @@ static int* job_ring;
 static int job_head=0;
 static int job_tail=0;
 static int job_count=0;
+static int shutting_down = 0;
 
-static thread_mutex_t job_mutex;
 #ifdef _WIN32
+static thread_mutex_t job_mutex;
 static HANDLE job_not_empty;
 static HANDLE job_not_full;
+static HANDLE shutdown_event = NULL;
+static HANDLE *worker_handles = NULL;
+static int worker_count = 0;
 #else
+static thread_mutex_t job_mutex;
 static pthread_cond_t job_not_empty=PTHREAD_COND_INITIALIZER;
 static pthread_cond_t job_not_full=PTHREAD_COND_INITIALIZER;
+static pthread_t *worker_handles = NULL;
+static int worker_count = 0;
 #endif
 
 static int dequeue_job(void);
@@ -85,6 +92,7 @@ static void* worker_thread(void* arg) {
     }
     for (;;) {
         int c = dequeue_job();
+        if (c < 0) break;
         size_t total_read = 0;
         int content_length = 0;
         bool headers_done = false;
@@ -212,7 +220,7 @@ static void* worker_thread(void* arg) {
 
     free(buffer);
 #ifdef _WIN32
-    return 0; 
+    return 0;
 #else
     return NULL;
 #endif
@@ -246,17 +254,37 @@ void start_thread_pool(int nworkers) {
 #ifdef _WIN32
     job_not_empty=CreateSemaphore(NULL, 0, QUEUE_CAP, NULL);
     job_not_full=CreateSemaphore(NULL, QUEUE_CAP, QUEUE_CAP, NULL);
+    shutdown_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    worker_handles = calloc(nworkers, sizeof(HANDLE));
+    worker_count = nworkers;
     for(int i=0;i<nworkers;++i) {
-        thread_create_detached((void*(*)(void*))worker_thread, NULL);
+        uintptr_t th = _beginthreadex(NULL, 0, worker_thread, NULL, 0, NULL);
+        if (th == 0) {
+            LOG_ERROR("Failed to create worker thread %d", i);
+            worker_handles[i] = NULL;
+            continue;
+        }
+        worker_handles[i] = (HANDLE)th;
     }
 #else
+    worker_handles = calloc(nworkers, sizeof(pthread_t));
+    worker_count = nworkers;
     for(int i=0;i<nworkers;++i) {
-        thread_create_detached(worker_thread, NULL);
+        if (pthread_create(&worker_handles[i], NULL, worker_thread, NULL) != 0) {
+            LOG_ERROR("Failed to create worker thread %d", i);
+            worker_handles[i] = 0;
+            continue;
+        }
     }
 #endif
 }
 
 void enqueue_job(int client_socket) {
+    if (shutting_down) {
+        LOG_WARN("Attempt to enqueue while shutting down, closing socket %d", client_socket);
+        SOCKET_CLOSE(client_socket);
+        return;
+    }
     thread_mutex_lock(&job_mutex);
     if (job_count == QUEUE_CAP) {
         LOG_WARN("Job queue is full, dropping connection %d", client_socket);
@@ -280,16 +308,24 @@ static int dequeue_job(void) {
     int c;
     thread_mutex_lock(&job_mutex);
 #ifdef _WIN32
-    while (job_count == 0) {
+    while (job_count == 0 && !shutting_down) {
         thread_mutex_unlock(&job_mutex);
-        WaitForSingleObject(job_not_empty, INFINITE);
+        HANDLE hs[2] = { job_not_empty, shutdown_event };
+        DWORD idx = WaitForMultipleObjects(2, hs, FALSE, INFINITE);
         thread_mutex_lock(&job_mutex);
+        if (idx == WAIT_OBJECT_0 + 1) {
+            break;
+        }
     }
 #else
-    while(job_count==0) {
+    while(job_count==0 && !shutting_down) {
         pthread_cond_wait(&job_not_empty, &job_mutex);
     }
 #endif
+    if (job_count == 0) {
+        thread_mutex_unlock(&job_mutex);
+        return -1;
+    }
     c = job_ring[job_head];
     job_head=(job_head+1)%QUEUE_CAP;
     job_count--;
@@ -301,4 +337,46 @@ static int dequeue_job(void) {
     thread_mutex_unlock(&job_mutex);
 	LOG_DEBUG("Dequeued client socket %d", c);
 	return c;
+}
+
+void stop_thread_pool(void) {
+    LOG_INFO("Stopping thread pool");
+    shutting_down = 1;
+#ifdef _WIN32
+    if (shutdown_event) SetEvent(shutdown_event);
+    if (job_not_empty) ReleaseSemaphore(job_not_empty, worker_count, NULL);
+    for (int i = 0; i < worker_count; ++i) {
+        if (worker_handles && worker_handles[i]) {
+            DWORD wait = WaitForSingleObject(worker_handles[i], 5000);
+            if (wait != WAIT_OBJECT_0) {
+                LOG_WARN("Worker thread %d did not exit in time, forcing termination", i);
+                TerminateThread(worker_handles[i], 1);
+            }
+            CloseHandle(worker_handles[i]);
+            worker_handles[i] = NULL;
+        }
+    }
+    if (worker_handles) { free(worker_handles); worker_handles = NULL; }
+    if (shutdown_event) { CloseHandle(shutdown_event); shutdown_event = NULL; }
+    if (job_not_empty) { CloseHandle(job_not_empty); job_not_empty = NULL; }
+    if (job_not_full) { CloseHandle(job_not_full); job_not_full = NULL; }
+#else
+    pthread_cond_broadcast(&job_not_empty);
+    thread_mutex_lock(&job_mutex);
+    thread_mutex_unlock(&job_mutex);
+    if (worker_handles) {
+        for (int i = 0; i < worker_count; ++i) {
+            if (worker_handles[i]) {
+                pthread_join(worker_handles[i], NULL);
+                worker_handles[i] = 0;
+            }
+        }
+        free(worker_handles);
+        worker_handles = NULL;
+        worker_count = 0;
+    }
+#endif
+    if (job_ring) { free(job_ring); job_ring = NULL; }
+    thread_mutex_destroy(&job_mutex);
+    LOG_INFO("Thread pool stopped");
 }

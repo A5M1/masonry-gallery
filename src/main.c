@@ -65,17 +65,17 @@
 int main(int argc, char** argv) {
     log_init();
     install_exception_handlers();
-    LOG_INFO("startup: installed exception handlers");
-    LOG_INFO("startup: after log_init");
+    LOG_DEBUG("startup: installed exception handlers");
+    LOG_DEBUG("startup: after log_init");
     INIT_NETWORK();
-    LOG_INFO("startup: after INIT_NETWORK");
+    LOG_DEBUG("startup: after INIT_NETWORK");
     derive_paths(argc > 0 ? argv[0] : NULL);
-    LOG_INFO("startup: after derive_paths");
+    LOG_DEBUG("startup: after derive_paths");
     load_config();
-    LOG_INFO("startup: after load_config");
+    LOG_DEBUG("startup: after load_config");
    
-    LOG_INFO("Registering gallery folder watchers (no automatic generation on startup)...");
-    LOG_INFO("startup: about to get_gallery_folders");
+    LOG_INFO("Registering gallery folder watchers and starting thumbnail maintenance on startup...");
+    LOG_DEBUG("startup: about to get_gallery_folders");
     {
         size_t count = 0;
         char** folders = get_gallery_folders(&count);
@@ -85,31 +85,32 @@ int main(int argc, char** argv) {
         } else {
             LOG_INFO("Registering directory watcher for %zu folder(s)", count);
             for (size_t i = 0; i < count; ++i) {
-                LOG_INFO("startup: registering watcher for folder[%zu]=%s", i, folders[i]);
+                LOG_DEBUG("startup: registering watcher for folder[%zu]=%s", i, folders[i]);
                 start_auto_thumb_watcher(folders[i]);
-                LOG_INFO("startup: watcher registered for folder[%zu]", i);
+                LOG_DEBUG("startup: watcher registered for folder[%zu]", i);
             }
         }
     }
-    LOG_INFO("startup: about to create_listen_socket");
+
+    LOG_DEBUG("startup: about to create_listen_socket");
     int port = 3000;
     int s = create_listen_socket(port);
-    LOG_INFO("startup: create_listen_socket returned %d", s);
+    LOG_DEBUG("startup: create_listen_socket returned %d", s);
     if (s < 0) {
         LOG_ERROR("Failed to create listening socket on port %d", port);
         CLEANUP_NETWORK();
         return 1;
     }
     LOG_INFO("Gallery server running on http://localhost:%d", port);
-    LOG_INFO("startup: about to start_thread_pool");
+    LOG_DEBUG("startup: about to start_thread_pool");
     start_thread_pool(0);
-    LOG_INFO("startup: after start_thread_pool");
+    LOG_DEBUG("startup: after start_thread_pool");
     int wait_ct = 0;
     for (;;) {
         struct sockaddr_in ca;
         socklen_t calen = sizeof(ca);
         if (wait_ct % 10 == 0)
-            LOG_INFO("Waiting for a new client connection...");
+            LOG_DEBUG("Waiting for a new client connection...");
         wait_ct++;
         int c = accept(s, (struct sockaddr*)&ca, &calen);
         if (c < 0) {
@@ -119,7 +120,7 @@ int main(int argc, char** argv) {
         }
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(ca.sin_addr), ip, INET_ADDRSTRLEN);
-        LOG_INFO("Accepted connection from %s:%d (socket %d)", ip, ntohs(ca.sin_port), c);
+        LOG_DEBUG("Accepted connection from %s:%d (socket %d)", ip, ntohs(ca.sin_port), c);
         SET_SOCKET_TIMEOUTS(c);
         SET_KEEPALIVE(c);
         SET_NODELAY(c);

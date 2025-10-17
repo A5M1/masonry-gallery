@@ -1,32 +1,119 @@
 #include "exception_handler.h"
 #include "logging.h"
+#include "platform.h"
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "thread_pool.h"
 #ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
-static void write_backtrace(void) {
-    void* frames[64];
-    USHORT frames_c = CaptureStackBackTrace(0, 64, frames, NULL);
-    for (USHORT i = 0; i < frames_c; ++i) {
-        LOG_ERROR("backtrace: frame[%u]=%p", (unsigned)i, frames[i]);
+#include <psapi.h>
+
+static void write_backtrace(void){
+    void*frames[128];USHORT fcount=CaptureStackBackTrace(0,128,frames,NULL);
+    LOG_ERROR("Captured %u stack frames:",(unsigned)fcount);
+    for(USHORT i=0;i<fcount;++i)LOG_ERROR("  [%02u] %p",(unsigned)i,frames[i]);
+}
+static void write_process_memory_info(void) {
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        LOG_ERROR("Memory: PageFaultCount=%lu WorkingSetSize=%zu PeakWorkingSetSize=%zu PagefileUsage=%zu", pmc.PageFaultCount, (size_t)pmc.WorkingSetSize, (size_t)pmc.PeakWorkingSetSize, (size_t)pmc.PagefileUsage);
     }
 }
-static LONG WINAPI exception_filter(EXCEPTION_POINTERS* ep) {
-    LOG_ERROR("Unhandled exception code=0x%08x at address=%p", (unsigned)ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress);
-    write_backtrace();
-    return EXCEPTION_EXECUTE_HANDLER;
+
+static void write_handles_and_modules(void) {
+    HMODULE mods[1024];DWORD needed=0;
+    if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
+        int mcount = needed / sizeof(HMODULE);
+        LOG_ERROR("Loaded modules (%d):", mcount);
+        for (int i = 0; i < mcount; ++i) {
+            char name[512];
+            if (GetModuleFileNameA(mods[i], name, sizeof(name))) LOG_ERROR("  %s", name);
+        }
+    }
+    // list handles/counts via PSAPI: enumerate processes using this module instead to get some context
 }
-void install_exception_handlers(void) {
+
+static void write_minidump(EXCEPTION_POINTERS* ep) {
+    HANDLE fh = CreateFileA("galleria_crash.dmp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei;
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = ep;
+        mei.ClientPointers = FALSE;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), fh, MiniDumpWithDataSegs | MiniDumpWithHandleData, &mei, NULL, NULL);
+        CloseHandle(fh);
+        LOG_ERROR("Wrote minidump to galleria_crash.dmp");
+    } else {
+        LOG_ERROR("Failed to create minidump file");
+    }
+}
+
+static LONG WINAPI exception_filter(EXCEPTION_POINTERS*ep){
+    LOG_ERROR("=== UNHANDLED EXCEPTION ===");
+    LOG_ERROR("Code=0x%08x Address=%p",(unsigned)ep->ExceptionRecord->ExceptionCode,ep->ExceptionRecord->ExceptionAddress);
+    DWORD pid = GetCurrentProcessId();
+    DWORD tid = GetCurrentThreadId();
+    LOG_ERROR("Process=%u Thread=%u", (unsigned)pid, (unsigned)tid);
+    size_t rcnt = 0;
+    const platform_recent_cmd_t* recent = platform_get_recent_commands(&rcnt);
+    if (recent && rcnt > 0) {
+        LOG_ERROR("Recent commands (most recent first):");
+        for (size_t i = 0; i < rcnt; ++i) {
+            const platform_recent_cmd_t* r = &recent[i];
+            LOG_ERROR("  ts=%lld thread=%d cmd=%s", r->ts_ms, r->thread_id, r->cmd);
+        }
+    }
+    write_process_memory_info();
+    write_handles_and_modules();
+    // attempt graceful shutdown of worker threads to reduce resource races during crash handling
+    stop_thread_pool();
+    write_backtrace();
+    write_minidump(ep);
+    LOG_ERROR("Will wait up to 5 seconds for threads to exit cleanly, then force exit");
+    fflush(stderr);Sleep(5000);
+    LOG_ERROR("Exiting process due to unhandled exception");
+    ExitProcess(1);
+}
+void install_exception_handlers(void){
     SetUnhandledExceptionFilter(exception_filter);
 }
 #else
-static void signal_handler(int sig) {
-    LOG_ERROR("Received signal %d", sig);
+#include <execinfo.h>
+#include <unistd.h>
+static const char*signal_name(int sig){
+    switch(sig){
+        case SIGSEGV:return "SIGSEGV (Segmentation Fault)";
+        case SIGABRT:return "SIGABRT (Abort)";
+        case SIGFPE:return "SIGFPE (Floating Point Error)";
+        case SIGILL:return "SIGILL (Illegal Instruction)";
+        case SIGBUS:return "SIGBUS (Bus Error)";
+        default:return "Unknown Signal";
+    }
 }
-void install_exception_handlers(void) {
-    signal(SIGSEGV, signal_handler);
-    signal(SIGABRT, signal_handler);
-    signal(SIGFPE, signal_handler);
-    signal(SIGILL, signal_handler);
+static void write_backtrace(void){
+    void*array[128];int size=backtrace(array,128);
+    char**symbols=backtrace_symbols(array,size);
+    if(!symbols){LOG_ERROR("Failed to get backtrace symbols");return;}
+    LOG_ERROR("Captured %d stack frames:",size);
+    for(int i=0;i<size;i++)LOG_ERROR("  [%02d] %s",i,symbols[i]);
+    free(symbols);
+}
+static void signal_handler(int sig){
+    LOG_ERROR("=== SIGNAL HANDLER TRIGGERED ===");
+    LOG_ERROR("Received signal %d (%s)",sig,signal_name(sig));
+    const char* last = platform_get_last_command();
+    if(last) LOG_ERROR("Last attempted command: %s", last);
+    write_backtrace();
+    LOG_ERROR("Press Enter to exit...");fflush(stderr);getchar();
+    _exit(1);
+}
+void install_exception_handlers(void){
+    signal(SIGSEGV,signal_handler);
+    signal(SIGABRT,signal_handler);
+    signal(SIGFPE,signal_handler);
+    signal(SIGILL,signal_handler);
+    signal(SIGBUS,signal_handler);
 }
 #endif
