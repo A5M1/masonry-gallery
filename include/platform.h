@@ -18,14 +18,12 @@ int platform_pid_is_running(int pid);
 int platform_run_command(const char* cmd, int timeout_seconds);
 int platform_run_command_redirect(const char* cmd, const char* out_err_path, int timeout_seconds);
 typedef struct {
-	long long ts_ms; /* epoch ms */
+	long long ts_ms;
 	int thread_id;
 	char cmd[1024];
 } platform_recent_cmd_t;
 
-/* record a command being executed (stores into a ring buffer) */
 void platform_record_command(const char* cmd);
-/* retrieve pointer to internal buffer of recent commands and count */
 const platform_recent_cmd_t* platform_get_recent_commands(size_t* out_count);
 typedef void (*platform_watcher_callback_t)(const char* dir);
 int platform_start_dir_watcher(const char* dir, platform_watcher_callback_t cb);

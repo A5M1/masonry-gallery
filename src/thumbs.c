@@ -40,28 +40,29 @@ static int execute_command_with_limits(const char* cmd, const char* out_log, int
     return ret;
 }
 
-static void build_magick_resize_cmd(char* dst,size_t dstlen,const char* in_esc,int scale,int q,const char* out_esc){
-    if(!dst||dstlen==0)return;
-    snprintf(dst,dstlen,"magick %s -resize %dx -quality %d %s",in_esc,scale,q,out_esc);
-    LOG_DEBUG("Magick CMD: %s",dst);
+static void build_magick_resize_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, const char* out_esc) {
+    if (!dst || dstlen == 0)return;
+    snprintf(dst, dstlen, "magick %s -resize %dx -quality %d %s", in_esc, scale, q, out_esc);
+    LOG_DEBUG("Magick CMD: %s", dst);
 }
 
-static void build_ffmpeg_extract_png_cmd(char* dst,size_t dstlen,const char* in_esc,const char* tmp_esc,int scale){
-    if(!dst||dstlen==0)return;
-    snprintf(dst,dstlen,"ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1\" -vframes 1 -f image2 -vcodec png %s",in_esc,scale,tmp_esc);
-    LOG_DEBUG("FFmpeg Extract CMD: %s",dst);
+static void build_ffmpeg_extract_png_cmd(char* dst, size_t dstlen, const char* in_esc, const char* tmp_esc, int scale) {
+    if (!dst || dstlen == 0)return;
+    snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1\" -vframes 1 -f image2 -vcodec png %s", in_esc, scale, tmp_esc);
+    LOG_DEBUG("FFmpeg Extract CMD: %s", dst);
 }
 
-static void build_ffmpeg_thumb_cmd(char* dst,size_t dstlen,const char* in_esc,int scale,int q,int to_webp,int add_format_rgb,const char* out_esc){
-    if(!dst||dstlen==0)return;
-    if(to_webp){
-        if(add_format_rgb)
-            snprintf(dst,dstlen,"ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp %s",in_esc,scale,q,out_esc);
+static void build_ffmpeg_thumb_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, int to_webp, int add_format_rgb, const char* out_esc) {
+    if (!dst || dstlen == 0)return;
+    if (to_webp) {
+        if (add_format_rgb)
+            snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp %s", in_esc, scale, q, out_esc);
         else
-            snprintf(dst,dstlen,"ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1\" -vframes 1 -q:v %d -c:v libwebp %s",in_esc,scale,q,out_esc);
-    }else
-        snprintf(dst,dstlen,"ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d %s",in_esc,scale,q,out_esc);
-    LOG_DEBUG("FFmpeg Thumb CMD: %s",dst);
+            snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1\" -vframes 1 -q:v %d -c:v libwebp %s", in_esc, scale, q, out_esc);
+    }
+    else
+        snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d %s", in_esc, scale, q, out_esc);
+    LOG_DEBUG("FFmpeg Thumb CMD: %s", dst);
 }
 
 static int is_path_safe(const char* path) {
@@ -467,8 +468,6 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
     if (ext && ascii_stricmp(ext, ".webp") == 0) {
         input_is_animated_webp = is_animated_webp(in_path);
     }
-    /* For animated GIF inputs, explicitly select the first frame so ImageMagick
-       doesn't write multiple numbered output files (e.g. out-0.jpg, out-1.jpg). */
     char in_path_with_frame[PATH_MAX];
     if (ext && ascii_stricmp(ext, ".gif") == 0) {
         snprintf(in_path_with_frame, sizeof(in_path_with_frame), "%s[0]", in_path);
@@ -477,16 +476,13 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
         strncpy(in_path_with_frame, in_path, sizeof(in_path_with_frame) - 1);
         in_path_with_frame[sizeof(in_path_with_frame) - 1] = '\0';
     }
-     char esc_in[PATH_MAX * 2], esc_out[PATH_MAX * 2];
-     esc_in[0] = '\0'; esc_out[0] = '\0';
-     escape_path_for_cmd(in_path, esc_in, sizeof(esc_in));
-     escape_path_for_cmd(out_path, esc_out, sizeof(esc_out));
-     /* Also prepare an escaped variant of the "first frame" path for GIFs so
-         ImageMagick commands receive a properly quoted/escaped path (handles
-         spaces and the [0] suffix). */
-     char esc_in_with_frame[PATH_MAX * 2];
-     esc_in_with_frame[0] = '\0';
-     escape_path_for_cmd(in_path_with_frame, esc_in_with_frame, sizeof(esc_in_with_frame));
+    char esc_in[PATH_MAX * 2], esc_out[PATH_MAX * 2];
+    esc_in[0] = '\0'; esc_out[0] = '\0';
+    escape_path_for_cmd(in_path, esc_in, sizeof(esc_in));
+    escape_path_for_cmd(out_path, esc_out, sizeof(esc_out));
+    char esc_in_with_frame[PATH_MAX * 2];
+    esc_in_with_frame[0] = '\0';
+    escape_path_for_cmd(in_path_with_frame, esc_in_with_frame, sizeof(esc_in_with_frame));
     if (ext && ascii_stricmp(ext, ".webp") == 0) {
         if (input_is_animated_webp) {
             LOG_DEBUG("[%d/%d] Animated webp detected, using ffmpeg extraction: %s", index, total, in_path);
@@ -1190,7 +1186,6 @@ void add_skip(progress_t * prog, const char* reason, const char* path) {
     if (prog && prog->thumbs_dir[0])
         path_join(log_path, prog->thumbs_dir, "skipped.log");
     else {
-        /* Fall back to global logs directory when prog is NULL or thumbs_dir empty */
         char thumbs_root[PATH_MAX];
         get_thumbs_root(thumbs_root, sizeof(thumbs_root));
         path_join(log_path, thumbs_root, "skipped.log");
@@ -1500,9 +1495,6 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
             p_strcmp(tname_copy, "skipped.log") == 0 || p_strcmp(tname_copy, ".nogallery") == 0 ||
             p_strcmp(tname_copy, ".thumbs.lock") == 0) continue;
 
-        /* If filename contains an extra '-' after -small or -large (e.g. abc-small-extra.jpg),
-           treat it as malformed and delete it immediately. We must check this before
-           requiring the exact "-small."/"-large." suffix so malformed names are removed. */
         if (strstr(tname_copy, "-small-") || strstr(tname_copy, "-large-")) {
             char thumb_full_m[PATH_MAX];
             path_join(thumb_full_m, thumbs_path, tname_copy);
@@ -1514,7 +1506,6 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
             continue;
         }
 
-        /* Only process expected thumb patterns (small/large with extension). Skip anything else. */
         if (!strstr(tname_copy, "-small.") && !strstr(tname_copy, "-large.")) continue;
         bool found = false;
         for (size_t ei = 0; ei < expect_count; ++ei) if (p_strcmp(tname, expects[ei]) == 0) { found = true; break; }
@@ -1522,17 +1513,14 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
             char thumb_full[PATH_MAX];
             path_join(thumb_full, thumbs_path, tname_copy);
             char* bn_del = tname_copy;
-            /* bn_del is the base name of the thumb file */
             char mapped_media[PATH_MAX];
             int r = thumbdb_get(bn_del, mapped_media, sizeof(mapped_media));
             if (r != 0) {
-                /* No mapping in DB -> delete this orphan thumb */
                 if (platform_file_delete(thumb_full) != 0) LOG_WARN("Failed to delete orphan thumb: %s", thumb_full);
                 else LOG_INFO("Removed orphan thumb (no DB entry): %s", thumb_full);
                 add_skip(prog, "ORPHAN_REMOVED", thumb_full);
             }
             else {
-                /* Has DB mapping; if it maps to this gallery but media is missing -> delete and remove DB entry */
                 size_t dlen = strlen(dir);
                 if (strncmp(mapped_media, dir, dlen) == 0 &&
                     (mapped_media[dlen] == '\0' || mapped_media[dlen] == '/' || mapped_media[dlen] == '\\')) {
