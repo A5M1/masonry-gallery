@@ -29,6 +29,7 @@
 			"vdupq",
 			"vorrq",
 			"Wextra",
+			"winres",
 			"Woverride",
 			"WSADATA"
 		],
