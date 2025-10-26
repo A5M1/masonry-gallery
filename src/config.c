@@ -51,7 +51,7 @@ void save_config(void) {
 	}
 
 	fclose(f);
-	LOG_INFO("Config saved with %zu gallery folders", gallery_folder_count);
+	LOG_DEBUG("Config saved with %zu gallery folders", gallery_folder_count);
 }
 
 void add_gallery_folder(const char* path) {
@@ -64,7 +64,7 @@ void add_gallery_folder(const char* path) {
 	gallery_folder_count++;
 	gallery_folders = realloc(gallery_folders, gallery_folder_count * sizeof(char*));
 	gallery_folders[gallery_folder_count - 1] = strdup(path);
-	LOG_INFO("Added gallery folder: %s", path);
+	LOG_DEBUG("Added gallery folder: %s", path);
 
 	save_config();
 }

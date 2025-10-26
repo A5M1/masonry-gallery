@@ -87,7 +87,9 @@
 			"exception_handler.h": "c",
 			"thumbs.h": "c",
 			"windows.h": "c",
-			"emmintrin.h": "c"
+			"emmintrin.h": "c",
+			"directory.h": "c",
+			"platform.h": "c"
 		},
 		"prettier.bracketSpacing": false
 	}

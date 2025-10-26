@@ -9,7 +9,7 @@
 
 #define DB_FILENAME "thumbs.db"
 #define LINE_MAX 4096
-#define INITIAL_BUCKETS 1024
+#define INITIAL_BUCKETS 65536
 
 typedef struct ht_entry {
     char* key;
@@ -111,16 +111,7 @@ static int persist_tx_ops(tx_op_t* ops) {
         cur = cur->next;
     }
     fflush(f);
-#ifdef _WIN32
-    int fd = _fileno(f);
-    if (fd >= 0) {
-        intptr_t h = _get_osfhandle(fd);
-        if (h != -1) FlushFileBuffers((HANDLE)h);
-    }
-#else
-    int fd = fileno(f);
-    if (fd >= 0) fsync(fd);
-#endif
+    platform_fsync(fileno(f));
     fclose(f);
     return 0;
 }
@@ -182,6 +173,8 @@ int thumbdb_open_for_dir(const char* db_full_path) {
     }
     db_inited = 1;
     LOG_INFO("thumbdb: opened %s (buckets=%zu)", db_path, ht_buckets);
+    thumbdb_sweep_orphans();
+    thumbdb_compact();
     return 0;
 }
 
@@ -211,30 +204,21 @@ static void free_ht_table(ht_entry_t** table, size_t buckets) {
     }
     free(table);
 }
-#ifdef _WIN32
-#define PLATFORM_DEFAULT_RETURN 0
-#else
-#define PLATFORM_DEFAULT_RETURN NULL
-#endif
-#ifdef _WIN32
-static unsigned __stdcall rebuild_worker(void* arg) {
-#else
 static void* rebuild_worker(void* arg) {
-#endif
     (void)arg;
     struct stat st;
     if (stat(db_path, &st) != 0) {
-        return PLATFORM_DEFAULT_RETURN;
+        return NULL;
     }
     size_t new_buckets = INITIAL_BUCKETS;
     ht_entry_t** new_ht = calloc(new_buckets, sizeof(ht_entry_t*));
     if (!new_ht) {
-        return PLATFORM_DEFAULT_RETURN;
+        return NULL;
     }
     FILE* f = fopen(db_path, "r");
     if (!f) {
         free(new_ht);
-        return PLATFORM_DEFAULT_RETURN;
+        return NULL;
     }
     char line[LINE_MAX];
     while (fgets(line, sizeof(line), f)) {
@@ -260,7 +244,7 @@ static void* rebuild_worker(void* arg) {
     thread_mutex_unlock(&db_mutex);
 
     free_ht_table(old_ht, old_buckets);
-    return PLATFORM_DEFAULT_RETURN;
+    return NULL;
 }
 
 static int ensure_index_uptodate(void) {
@@ -333,9 +317,7 @@ int thumbdb_tx_commit(void) {
         cur = cur->next;
     }
     fflush(f);
-#ifndef _WIN32
-    int fd = fileno(f); if (fd >= 0) fsync(fd);
-#endif
+    platform_fsync(fileno(f));
     fclose(f);
     {
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
@@ -369,9 +351,7 @@ int thumbdb_set(const char* key, const char* value) {
     FILE* f = fopen(db_path, "a");
     if (f) {
         append_line_to_file(f, key, value); fflush(f);
-#ifndef _WIN32
-        int fd = fileno(f); if (fd >= 0) fsync(fd);
-#endif
+        platform_fsync(fileno(f));
         fclose(f);
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
@@ -404,9 +384,7 @@ int thumbdb_delete(const char* key) {
     FILE* f = fopen(db_path, "a");
     if (f) {
         append_line_to_file(f, key, NULL); fflush(f);
-#ifndef _WIN32
-        int fd = fileno(f); if (fd >= 0) fsync(fd);
-#endif
+        platform_fsync(fileno(f));
         fclose(f);
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
@@ -434,12 +412,13 @@ int thumbdb_compact(void) {
     if (!f) { thread_mutex_unlock(&db_mutex); return -1; }
     for (size_t i = 0; i < ht_buckets; ++i) {
         ht_entry_t* e = ht[i];
-        while (e) { if (e->key) append_line_to_file(f, e->key, e->val); e = e->next; }
+        while (e) {
+            if (e->key && e->val) append_line_to_file(f, e->key, e->val);
+            e = e->next;
+        }
     }
     fflush(f);
-#ifndef _WIN32
-    int fd = fileno(f); if (fd >= 0) fsync(fd);
-#endif
+    platform_fsync(fileno(f));
     fclose(f);
     platform_file_delete(db_path);
     if (rename(tmp, db_path) != 0) { LOG_WARN("thumbdb: compaction rename failed"); thread_mutex_unlock(&db_mutex); return -1; }
@@ -452,37 +431,189 @@ static void sweep_cb(const char* key, const char* value, void* ctx) {
     (void)ctx;
     if (!value || value[0] == '\0') return;
     if (!is_file(value)) {
-        char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-        char thumb_path[PATH_MAX]; snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumbs_root, key);
+        char thumb_dir[PATH_MAX];
+        thumb_dir[0] = '\0';
+        if (db_path[0]) {
+            strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1);
+            thumb_dir[sizeof(thumb_dir) - 1] = '\0';
+            char* last = strrchr(thumb_dir, DIR_SEP);
+            if (last) *last = '\0';
+            else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
+        }
+        else {
+            get_thumbs_root(thumb_dir, sizeof(thumb_dir));
+        }
+
+        char thumb_path[PATH_MAX];
+        bool removed = false;
+
+        snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, key);
         if (is_file(thumb_path)) {
             if (platform_file_delete(thumb_path) == 0) {
-                LOG_INFO("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                removed = true;
             }
             else {
                 LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
             }
         }
+
+        if (!removed) {
+            char thumbs_root[PATH_MAX];
+            get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+            snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumbs_root, key);
+            if (is_file(thumb_path)) {
+                if (platform_file_delete(thumb_path) == 0) {
+                    LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                    removed = true;
+                } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
+            }
+            else {
+                diriter dit;
+                if (dir_open(&dit, thumbs_root)) {
+                    const char* dname;
+                    while ((dname = dir_next(&dit))) {
+                        if (!strcmp(dname, ".") || !strcmp(dname, "..")) continue;
+                        char sub[PATH_MAX];
+                        path_join(sub, thumbs_root, dname);
+                        if (!is_dir(sub)) continue;
+                        snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", sub, key);
+                        if (is_file(thumb_path)) {
+                            if (platform_file_delete(thumb_path) == 0) {
+                                LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                                removed = true;
+                            } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
+                            break;
+                        }
+                    }
+                    dir_close(&dit);
+                }
+            }
+        }
+
         thumbdb_delete(key);
     }
 }
 
 int thumbdb_sweep_orphans(void) {
     if (!db_inited) { if (thumbdb_open() != 0) return -1; }
+
+    if (ensure_index_uptodate() != 0) return -1;
     thread_mutex_lock(&db_mutex);
-    size_t cap = 128; size_t count = 0; ht_entry_t** arr = malloc(cap * sizeof(ht_entry_t*));
+    size_t cap = 128; size_t count = 0;
+    struct kv { char* key; char* val; } *arr = malloc(cap * sizeof(*arr));
+    if (!arr) { thread_mutex_unlock(&db_mutex); return -1; }
     for (size_t i = 0; i < ht_buckets; ++i) {
         ht_entry_t* e = ht[i];
         while (e) {
-            if (count + 1 > cap) { size_t nc = cap * 2; ht_entry_t** tmp = realloc(arr, nc * sizeof(ht_entry_t*)); if (!tmp) break; arr = tmp; cap = nc; }
-            arr[count++] = e;
+            if (count + 1 > cap) {
+                size_t nc = cap * 2;
+                struct kv* tmp = realloc(arr, nc * sizeof(*arr));
+                if (!tmp) break;
+                arr = tmp; cap = nc;
+            }
+            arr[count].key = e->key ? strdup(e->key) : NULL;
+            arr[count].val = e->val ? strdup(e->val) : NULL;
+            if (!arr[count].key) {
+                for (size_t j = 0; j < count; ++j) { free(arr[j].key); free(arr[j].val); }
+                free(arr); thread_mutex_unlock(&db_mutex); return -1;
+            }
+            count++;
             e = e->next;
         }
     }
     thread_mutex_unlock(&db_mutex);
+
+    size_t del_cap = 64; size_t del_count = 0; char** dels = malloc(del_cap * sizeof(char*));
+    if (!dels) { for (size_t j = 0; j < count; ++j) { free(arr[j].key); free(arr[j].val); } free(arr); return -1; }
+
     for (size_t i = 0; i < count; ++i) {
-        ht_entry_t* e = arr[i];
-        sweep_cb(e->key, e->val, NULL);
+        char* key = arr[i].key; char* value = arr[i].val;
+        if (!value || value[0] == '\0') { free(key); free(value); continue; }
+
+        bool removed = false;
+        char thumb_dir[PATH_MAX]; thumb_dir[0] = '\0';
+        if (db_path[0]) {
+            strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1);
+            thumb_dir[sizeof(thumb_dir) - 1] = '\0';
+            char* last = strrchr(thumb_dir, DIR_SEP);
+            if (last) *last = '\0'; else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
+        } else {
+            get_thumbs_root(thumb_dir, sizeof(thumb_dir));
+        }
+
+        char thumb_path[PATH_MAX];
+        snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, key);
+        if (!is_file(value)) {
+            if (is_file(thumb_path)) {
+                if (platform_file_delete(thumb_path) == 0) {
+                    LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                    removed = true;
+                } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
+            }
+
+            if (!removed) {
+                char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+                snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumbs_root, key);
+                if (is_file(thumb_path)) {
+                    if (platform_file_delete(thumb_path) == 0) {
+                        LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                        removed = true;
+                    } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
+                } else {
+                    diriter dit; if (dir_open(&dit, thumbs_root)) {
+                        const char* dname;
+                        while ((dname = dir_next(&dit))) {
+                            if (!strcmp(dname, ".") || !strcmp(dname, "..")) continue;
+                            char sub[PATH_MAX]; path_join(sub, thumbs_root, dname);
+                            if (!is_dir(sub)) continue;
+                            snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", sub, key);
+                            if (is_file(thumb_path)) {
+                                if (platform_file_delete(thumb_path) == 0) {
+                                    LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, value);
+                                    removed = true; break;
+                                } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
+                            }
+                        }
+                        dir_close(&dit);
+                    }
+                }
+            }
+
+            if (del_count + 1 > del_cap) {
+                size_t nc = del_cap * 2; char** tmp = realloc(dels, nc * sizeof(char*)); if (!tmp) { }
+                else { dels = tmp; del_cap = nc; }
+            }
+            dels[del_count++] = strdup(key);
+        }
+
+        free(key); free(value);
     }
     free(arr);
+
+    if (del_count == 0) { free(dels); return 0; }
+
+    thread_mutex_lock(&db_mutex);
+    for (size_t i = 0; i < del_count; ++i) {
+        ht_set_internal(dels[i], NULL);
+    }
+    FILE* f = fopen(db_path, "a");
+    if (f) {
+        for (size_t i = 0; i < del_count; ++i) {
+            append_line_to_file(f, dels[i], NULL);
+        }
+        fflush(f);
+        platform_fsync(fileno(f));
+        fclose(f);
+        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+    } else {
+        LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
+    }
+    thread_mutex_unlock(&db_mutex);
+
+    for (size_t i = 0; i < del_count; ++i) free(dels[i]); free(dels);
+
+    thumbdb_compact();
+
     return 0;
 }

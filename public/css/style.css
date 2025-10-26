@@ -326,7 +326,6 @@ video::-webkit-media-controls.sizing-small
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 	opacity: 0;
 	visibility: hidden;
-	/* Removed top and left properties to use bottom and right instead */
 }
 
 .hidden {

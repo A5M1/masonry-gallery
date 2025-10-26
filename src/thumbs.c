@@ -10,6 +10,8 @@
 #include "config.h"
 #include "common.h"
 atomic_int ffmpeg_active = ATOMIC_VAR_INIT(0);
+static atomic_int magick_active = ATOMIC_VAR_INIT(0);
+#define MAX_MAGICK 2
 typedef struct {
     char input[PATH_MAX];
     char output[PATH_MAX];
@@ -19,6 +21,7 @@ typedef struct {
     int total;
 } thumb_job_t;
 static void sleep_ms(int ms) { platform_sleep_ms(ms); }
+static atomic_int thumb_workers_active = ATOMIC_VAR_INIT(0);
 
 static int execute_command_with_limits(const char* cmd, const char* out_log, int timeout, int uses_ffmpeg) {
     int ret;
@@ -39,35 +42,57 @@ static int execute_command_with_limits(const char* cmd, const char* out_log, int
         atomic_fetch_sub(&ffmpeg_active, 1);
     }
     else {
-        platform_record_command(cmd);
-        ret = platform_run_command_redirect(cmd, out_log ? out_log : platform_devnull(), timeout);
-        LOG_DEBUG("execute_command_with_limits: command rc=%d cmd=%s", ret, cmd);
+        int is_magick = 0;
+        if (cmd && strstr(cmd, "magick") != NULL) is_magick = 1;
+        if (is_magick) {
+            while (atomic_load(&magick_active) >= MAX_MAGICK) sleep_ms(50);
+            atomic_fetch_add(&magick_active, 1);
+            const char* final_out = out_log ? out_log : platform_devnull();
+            platform_record_command(cmd);
+            LOG_DEBUG("execute_command_with_limits: executing (magick): %s", cmd);
+            ret = platform_run_command_redirect(cmd, final_out, timeout);
+            LOG_DEBUG("execute_command_with_limits: magick rc=%d cmd=%s", ret, cmd);
+            atomic_fetch_sub(&magick_active, 1);
+        } else {
+            platform_record_command(cmd);
+            ret = platform_run_command_redirect(cmd, out_log ? out_log : platform_devnull(), timeout);
+            LOG_DEBUG("execute_command_with_limits: command rc=%d cmd=%s", ret, cmd);
+        }
     }
     return ret;
 }
 
 static void build_magick_resize_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, const char* out_esc) {
     if (!dst || dstlen == 0)return;
-    snprintf(dst, dstlen, "magick %s -resize %dx -quality %d %s", in_esc, scale, q, out_esc);
+    int threads = platform_get_cpu_count();
+    if (threads < 1) threads = 1;
+    long mem_mb = platform_get_physical_memory_mb();
+    if (mem_mb <= 0) mem_mb = 512;
+    long per_proc_mb = mem_mb / (MAX_MAGICK > 0 ? MAX_MAGICK : 1);
+    if (per_proc_mb < 256) per_proc_mb = 256;
+    snprintf(dst, dstlen, "magick -limit thread %d -limit memory %ldMB -limit map %ldMB %s -resize %dx -quality %d %s",
+        threads, per_proc_mb, per_proc_mb, in_esc, scale, q, out_esc);
     LOG_DEBUG("Magick CMD: %s", dst);
 }
 
-static void build_ffmpeg_extract_png_cmd(char* dst, size_t dstlen, const char* in_esc, const char* tmp_esc, int scale) {
+static void build_ffmpeg_extract_jpg_cmd(char* dst, size_t dstlen, const char* in_esc, const char* tmp_esc, int scale) {
     if (!dst || dstlen == 0)return;
-    snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1\" -vframes 1 -f image2 -vcodec png %s", in_esc, scale, tmp_esc);
+    int threads = platform_get_cpu_count(); if (threads < 1) threads = 1;
+    snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1\" -vframes 1 -f image2 -c:v mjpeg %s", threads, in_esc, scale, tmp_esc);
     LOG_DEBUG("FFmpeg Extract CMD: %s", dst);
 }
 
 static void build_ffmpeg_thumb_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, int to_webp, int add_format_rgb, const char* out_esc) {
     if (!dst || dstlen == 0)return;
+    int threads = platform_get_cpu_count(); if (threads < 1) threads = 1;
     if (to_webp) {
         if (add_format_rgb)
-            snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp %s", in_esc, scale, q, out_esc);
+            snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp %s", threads, in_esc, scale, q, out_esc);
         else
-            snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1\" -vframes 1 -q:v %d -c:v libwebp %s", in_esc, scale, q, out_esc);
+            snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1\" -vframes 1 -q:v %d -c:v libwebp %s", threads, in_esc, scale, q, out_esc);
     }
     else
-        snprintf(dst, dstlen, "ffmpeg -y -threads 1 -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d %s", in_esc, scale, q, out_esc);
+        snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d %s", threads, in_esc, scale, q, out_esc);
     LOG_DEBUG("FFmpeg Thumb CMD: %s", dst);
 }
 
@@ -80,166 +105,40 @@ static int is_path_safe(const char* path) {
     }
     return 1;
 }
-static void escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
-    if (!src || !dst || dstlen == 0) return;
-    size_t di = 0;
-#ifdef _WIN32
-    if (di < dstlen - 1) dst[di++] = '"';
-    for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
-        char c = src[i];
-        if (c == '"') continue;
-        if (c == '%') {
-            if (di + 1 < dstlen) dst[di++] = '%'; else break;
-        }
-        dst[di++] = c;
-    }
-    if (di < dstlen - 1) dst[di++] = '"';
-#else
-    if (di < dstlen - 1) dst[di++] = '"';
-    for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
-        char c = src[i];
-        if (c == '\\' || c == '"' || c == '$' || c == '`') {
-            if (di + 1 < dstlen) dst[di++] = '\\'; else break;
-        }
-        dst[di++] = c;
-    }
-    if (di < dstlen - 1) dst[di++] = '"';
-#endif
-    dst[di] = '\0';
-}
+
 static void strip_trailing_sep(char* p) {
     if (!p) return;
     size_t len = strlen(p);
-    while (len > 0) {
-#ifdef _WIN32
-        if (p[len - 1] == '\\' || p[len - 1] == '/') { p[len - 1] = '\0'; len--; continue; }
-#else
-        if (p[len - 1] == '/') { p[len - 1] = '\0'; len--; continue; }
-#endif
-        break;
+    while (len > 0 && (p[len - 1] == '/' || p[len - 1] == '\\')) {
+        p[--len] = '\0';
     }
 }
 static void get_parent_dir(const char* path, char* out, size_t outlen) {
     if (!path || !out || outlen == 0) return;
-    strncpy(out, path, outlen - 1);
-    out[outlen - 1] = '\0';
-    char* s1 = strrchr(out, '/');
-    char* s2 = strrchr(out, '\\');
+    char tmp[PATH_MAX];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    normalize_path(tmp);
+    strip_trailing_sep(tmp);
+    char* s1 = strrchr(tmp, '/');
+    char* s2 = strrchr(tmp, '\\');
     char* last = NULL;
     if (s1 && s2) last = (s1 > s2) ? s1 : s2;
     else if (s1) last = s1;
     else if (s2) last = s2;
-    if (last) *last = '\0';
-    else { out[0] = '.'; out[1] = '\0'; }
-}
-static int get_image_dimensions_from_file(const char* path, int* width, int* height) {
-    if (!path || !width || !height) return 0;
-
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-
-    unsigned char hdr[32];
-    size_t n = fread(hdr, 1, sizeof(hdr), f);
-    if (n < 10) { fclose(f); return 0; }
-    if (memcmp(hdr, "\x89PNG\r\n\x1a\n", 8) == 0) {
-        if (n < 24) { fclose(f); return 0; }
-        unsigned char* p = hdr + 16;
-        unsigned int w = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
-        unsigned int h = (p[4] << 24) | (p[5] << 16) | (p[6] << 8) | p[7];
-        *width = (int)w; *height = (int)h; fclose(f); return 1;
+    if (last) {
+        size_t blen = (size_t)(last - tmp);
+        if (blen >= outlen) blen = outlen - 1;
+        memcpy(out, tmp, blen);
+        out[blen] = '\0';
     }
-    if (memcmp(hdr, "GIF87a", 6) == 0 || memcmp(hdr, "GIF89a", 6) == 0) {
-        unsigned int w = hdr[6] | (hdr[7] << 8);
-        unsigned int h = hdr[8] | (hdr[9] << 8);
-        *width = (int)w; *height = (int)h; fclose(f); return 1;
-    }
-    if (hdr[0] == 0xFF && hdr[1] == 0xD8) {
-        fseek(f, 2, SEEK_SET);
-        for (;;) {
-            int c = fgetc(f);
-            if (c == EOF) break;
-            while (c != 0xFF) { c = fgetc(f); if (c == EOF) break; }
-            if (c == EOF) break;
-            int marker = fgetc(f);
-            if (marker == EOF) break;
-            while (marker == 0xFF) marker = fgetc(f);
-            if (marker == 0xD9 || marker == 0xDA) break;
-
-            unsigned char lenbuf[2];
-            if (fread(lenbuf, 1, 2, f) != 2) break;
-            int seglen = (lenbuf[0] << 8) | lenbuf[1];
-            if (seglen < 2) break;
-
-            /* SOF markers */
-            if ((marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) ||
-                (marker >= 0xC9 && marker <= 0xCB) || (marker >= 0xCD && marker <= 0xCF)) {
-                unsigned char sof[5];
-                if (fread(sof, 1, 5, f) != 5) break;
-                unsigned int h = (sof[1] << 8) | sof[2];
-                unsigned int w = (sof[3] << 8) | sof[4];
-                *width = (int)w; *height = (int)h; fclose(f); return 1;
-            }
-
-            if (fseek(f, seglen - 2, SEEK_CUR) != 0) break;
+    else {
+        if (outlen > 1) {
+            out[0] = '.'; out[1] = '\0';
+        } else if (outlen > 0) {
+            out[0] = '\0';
         }
-        fclose(f); return 0;
     }
-
-    /* BMP */
-    if (hdr[0] == 'B' && hdr[1] == 'M') {
-        if (n < 26) {
-            unsigned char tmp[26];
-            size_t got = fread(tmp, 1, 26 - n, f);
-            if (got + n < 26) { fclose(f); return 0; }
-            memcpy(hdr + n, tmp, got);
-        }
-        unsigned char* p = hdr + 18;
-        unsigned int w = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
-        unsigned int h = p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24);
-        *width = (int)w; *height = (int)h; fclose(f); return 1;
-    }
-
-    fclose(f);
-    return 0;
-}
-static int get_webp_dimensions(const char* path, int* w, int* h) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-
-    unsigned char hdr[30];
-    if (fread(hdr, 1, 30, f) < 30) { fclose(f); return 0; }
-
-    if (memcmp(hdr, "RIFF", 4) || memcmp(hdr + 8, "WEBP", 4)) { fclose(f); return 0; }
-
-    unsigned char* chunk = hdr + 12;
-    char t[5];
-    memcpy(t, chunk, 4);
-    t[4] = 0;
-    if (!memcmp(t, "VP8 ", 4)) {
-        unsigned char buf[10];
-        fseek(f, 20, SEEK_SET);
-        if (fread(buf, 1, 10, f) < 10) { fclose(f); return 0; }
-        int w0 = (buf[7] << 8) | buf[6], h0 = (buf[9] << 8) | buf[8];
-        *w = w0 & 0x3FFF; *h = h0 & 0x3FFF; fclose(f); return 1;
-    }
-    if (!memcmp(t, "VP8L", 4)) {
-        unsigned char buf[5];
-        fseek(f, 21, SEEK_SET);
-        if (fread(buf, 1, 5, f) < 5) { fclose(f); return 0; }
-        unsigned int bits = buf[1] | (buf[2] << 8) | (buf[3] << 16) | (buf[4] << 24);
-        *w = (bits & 0x3FFF) + 1; *h = ((bits >> 14) & 0x3FFF) + 1; fclose(f); return 1;
-    }
-    if (!memcmp(t, "VP8X", 4)) {
-        unsigned char buf[10];
-        fseek(f, 24, SEEK_SET);
-        if (fread(buf, 1, 10, f) < 10) { fclose(f); return 0; }
-        *w = 1 + (buf[4] | (buf[5] << 8) | (buf[6] << 16));
-        *h = 1 + (buf[7] | (buf[8] << 8) | (buf[9] << 16));
-        fclose(f); return 1;
-    }
-
-    fclose(f);
-    return 0;
 }
 static int is_animated_webp(const char* path) {
     if (!path) return 0;
@@ -279,20 +178,36 @@ void make_safe_dir_name_from(const char* dir, char* out, size_t outlen) {
     char tmp[PATH_MAX];
     strncpy(tmp, dir, sizeof(tmp) - 1);
     tmp[sizeof(tmp) - 1] = '\0';
+    normalize_path(tmp);
     strip_trailing_sep(tmp);
+
+    bool has_alpha = false;
+    bool all_upper = true;
+    for (size_t ii = 0; tmp[ii]; ++ii) {
+        unsigned char uc = (unsigned char)tmp[ii];
+        if (isalpha(uc)) {
+            has_alpha = true;
+            if (islower(uc)) { all_upper = false; break; }
+        }
+    }
+
+    int to_lower = 1;
+    if (has_alpha && all_upper) to_lower = 0;
 
     size_t si = 0;
     bool last_was_dash = false;
 
     for (size_t ii = 0; tmp[ii] && si < outlen - 1; ++ii) {
-        char ch = tmp[ii];
-        if (ch == '/' || ch == '\\' || !isalnum((unsigned char)ch)) {
+        unsigned char uc = (unsigned char)tmp[ii];
+        char ch = (char)uc;
+        if (ch == '/' || ch == '\\' || !isalnum(uc)) {
             if (!last_was_dash && si < outlen - 1) {
                 out[si++] = '-';
                 last_was_dash = true;
             }
         }
         else {
+            if (to_lower) ch = (char)tolower(uc);
             out[si++] = ch;
             last_was_dash = false;
         }
@@ -393,7 +308,7 @@ const char* get_ffprobe_cmd_for_ext(const char* ext) {
     };
     for (size_t i = 0; video_exts[i]; ++i) {
         if (ascii_stricmp(ext, video_exts[i]) == 0) {
-            return "ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 %s";
+            return "ffprobe -nostdin -hwaccel none -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 %s";
         }
     }
     return NULL;
@@ -412,7 +327,7 @@ int is_decodable(const char* path) {
         return 0;
     }
     char esc_path[PATH_MAX * 2];
-    escape_path_for_cmd(path, esc_path, sizeof(esc_path));
+    platform_escape_path_for_cmd(path, esc_path, sizeof(esc_path));
     char cmd[PATH_MAX * 3];
     snprintf(cmd, sizeof(cmd), format_cmd, esc_path);
     FILE* f = platform_popen_direct(cmd, "r");
@@ -426,19 +341,13 @@ int is_decodable(const char* path) {
 
 int is_valid_media(const char* path) {
     struct stat st;
-    if (platform_stat(path, &st) != 0 || st.st_size < 16) return 0;
+    if (platform_stat(path, &st) != 0) return 0;
     if (!is_path_safe(path)) return 0;
-
-    const char* ext = strrchr(path, '.');
-    if (ext) {
-        if (ascii_stricmp(ext, ".jpg") == 0 || ascii_stricmp(ext, ".jpeg") == 0 || ascii_stricmp(ext, ".png") == 0) {
-            int w = 0, h = 0;
-            if (get_image_dimensions_from_file(path, &w, &h)) return 1;
-            return 0;
-        }
-    }
-
-    return is_decodable(path);
+    const char* name = path;
+    const char* dot = strrchr(name, '.');
+    if (!dot) return 0;
+    if (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS)) return 1;
+    return 0;
 }
 int is_newer(const char* src, const char* dst) {
     struct stat s, d;
@@ -457,12 +366,9 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
         LOG_WARN("[%d/%d] Invalid media (stat/size) or not present: %s", index, total, input);
         return;
     }
-    if (!is_decodable(input)) {
-        LOG_WARN("[%d/%d] Not decodable (ffprobe failed): %s", index, total, input);
-        return;
-    }
+    (void)0;
 
-    LOG_INFO("[%d/%d] Processing: %s", index, total, input);
+    LOG_DEBUG("[%d/%d] Processing: %s", index, total, input);
 
     char in_path[PATH_MAX], out_path[PATH_MAX];
     strncpy(in_path, input, PATH_MAX - 1); in_path[PATH_MAX - 1] = '\0';
@@ -484,23 +390,23 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
     }
     char esc_in[PATH_MAX * 2], esc_out[PATH_MAX * 2];
     esc_in[0] = '\0'; esc_out[0] = '\0';
-    escape_path_for_cmd(in_path, esc_in, sizeof(esc_in));
-    escape_path_for_cmd(out_path, esc_out, sizeof(esc_out));
+    platform_escape_path_for_cmd(in_path, esc_in, sizeof(esc_in));
+    platform_escape_path_for_cmd(out_path, esc_out, sizeof(esc_out));
     char esc_in_with_frame[PATH_MAX * 2];
     esc_in_with_frame[0] = '\0';
-    escape_path_for_cmd(in_path_with_frame, esc_in_with_frame, sizeof(esc_in_with_frame));
+    platform_escape_path_for_cmd(in_path_with_frame, esc_in_with_frame, sizeof(esc_in_with_frame));
     if (ext && ascii_stricmp(ext, ".webp") == 0) {
         if (input_is_animated_webp) {
             LOG_DEBUG("[%d/%d] Animated webp detected, using ffmpeg extraction: %s", index, total, in_path);
 
-            char tmp_png[PATH_MAX];
-            snprintf(tmp_png, sizeof(tmp_png), "%s.tmp.png", out_path);
+            char tmp_jpg[PATH_MAX];
+            snprintf(tmp_jpg, sizeof(tmp_jpg), "%s.tmp.jpg", out_path);
 
             char esc_tmp[PATH_MAX * 2];
             esc_tmp[0] = '\0';
-            escape_path_for_cmd(tmp_png, esc_tmp, sizeof(esc_tmp));
+            platform_escape_path_for_cmd(tmp_jpg, esc_tmp, sizeof(esc_tmp));
             char ffcmd[1024];
-            build_ffmpeg_extract_png_cmd(ffcmd, sizeof(ffcmd), esc_in, esc_tmp, scale);
+            build_ffmpeg_extract_jpg_cmd(ffcmd, sizeof(ffcmd), esc_in, esc_tmp, scale);
 
             LOG_DEBUG("generate_thumb_c: executing webp ffmpeg cmd: %s", ffcmd);
             int ret_png = execute_command_with_limits(ffcmd, NULL, 30, 1);
@@ -518,17 +424,17 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
 
                 LOG_DEBUG("generate_thumb_c: executing png conversion cmd: %s", convert_cmd);
                 int cret = execute_command_with_limits(convert_cmd, NULL, 20, 0);
-                platform_file_delete(tmp_png);
+                platform_file_delete(tmp_jpg);
 
                 if (cret == 0) return;
                 LOG_WARN("[%d/%d] conversion failed rc=%d", index, total, cret);
             }
             else {
                 LOG_WARN("[%d/%d] ffmpeg (png) failed rc=%d", index, total, ret_png);
-                platform_file_delete(tmp_png);
+                platform_file_delete(tmp_jpg);
             }
         }
-        LOG_DEBUG("[%d/%d] Using magick for static webp or after ffmpeg failure: %s", index, total, in_path);
+        LOG_DEBUG("[%d/%d] Using CPU/image commands for webp: %s", index, total, in_path);
 
         char magick_cmd[1024];
         build_magick_resize_cmd(magick_cmd, sizeof(magick_cmd), esc_in_with_frame, scale, q, esc_out);
@@ -571,16 +477,16 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
     char* cmd = NULL;
 
     if (is_video) {
-        char tmp_png[PATH_MAX];
-        snprintf(tmp_png, sizeof(tmp_png), "%s.tmp.png", out_path);
+        char tmp_jpg[PATH_MAX];
+        snprintf(tmp_jpg, sizeof(tmp_jpg), "%s.tmp.jpg", out_path);
 
         char esc_tmp[PATH_MAX * 2];
         esc_tmp[0] = '\0';
-        escape_path_for_cmd(tmp_png, esc_tmp, sizeof(esc_tmp));
+        platform_escape_path_for_cmd(tmp_jpg, esc_tmp, sizeof(esc_tmp));
 
         {
             char extract_cmd[1024];
-            build_ffmpeg_extract_png_cmd(extract_cmd, sizeof(extract_cmd), esc_in, esc_tmp, scale);
+            build_ffmpeg_extract_jpg_cmd(extract_cmd, sizeof(extract_cmd), esc_in, esc_tmp, scale);
             LOG_DEBUG("generate_thumb_c: executing video extraction cmd: %s", extract_cmd);
             int ret_png = execute_command_with_limits(extract_cmd, NULL, 60, 1);
 
@@ -589,20 +495,19 @@ void generate_thumb_c(const char* input, const char* output, int scale, int q, i
                 if (output_is_webp(out_path) && input_is_animated_webp) {
                     build_ffmpeg_thumb_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, 1, 1, esc_out);
                 }
-                else {
-                    build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
-                }
-
-                LOG_DEBUG("generate_thumb_c: executing video conversion cmd: %s", convert_cmd);
+        else {
+            build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
+        }
+        LOG_DEBUG("generate_thumb_c: executing video conversion cmd: %s", convert_cmd);
                 int cret = execute_command_with_limits(convert_cmd, NULL, 20, 0);
-                platform_file_delete(tmp_png);
+                platform_file_delete(tmp_jpg);
 
                 if (cret == 0) return;
                 LOG_WARN("[%d/%d] conversion failed rc=%d", index, total, cret);
             }
             else {
-                LOG_WARN("[%d/%d] ffmpeg extraction failed rc=%d", index, total, ret_png);
-                platform_file_delete(tmp_png);
+                LOG_WARN("[%d/%d] ffmpeg jpg extraction failed rc=%d", index, total, ret_png);
+                platform_file_delete(tmp_jpg);
             }
         }
     }
@@ -733,6 +638,61 @@ typedef struct watcher_node {
 static watcher_node_t* watcher_head = NULL;
 static thread_mutex_t watcher_mutex;
 static int watcher_mutex_inited = 0;
+
+typedef struct running_node {
+    char dir[PATH_MAX];
+    struct running_node* next;
+} running_node_t;
+static running_node_t* running_head = NULL;
+static thread_mutex_t running_mutex;
+static int running_mutex_inited = 0;
+typedef struct warn_node {
+    char dir[PATH_MAX];
+    time_t last_log;
+    struct warn_node* next;
+} warn_node_t;
+static warn_node_t* warn_head = NULL;
+static thread_mutex_t warn_mutex;
+static int warn_mutex_inited = 0;
+
+#ifndef LOG_SUPPRESS_SECONDS
+#define LOG_SUPPRESS_SECONDS 60
+#endif
+
+static void warn_maybe_log_already_running(const char* dir) {
+    if (!dir) return;
+    if (!warn_mutex_inited) {
+        if (thread_mutex_init(&warn_mutex) == 0) warn_mutex_inited = 1;
+    }
+    time_t now = time(NULL);
+    if (warn_mutex_inited) {
+        thread_mutex_lock(&warn_mutex);
+        warn_node_t* cur = warn_head;
+        while (cur) {
+            if (strcmp(cur->dir, dir) == 0) break;
+            cur = cur->next;
+        }
+        if (!cur) {
+            cur = malloc(sizeof(warn_node_t));
+            if (cur) {
+                strncpy(cur->dir, dir, PATH_MAX - 1);
+                cur->dir[PATH_MAX - 1] = '\0';
+                cur->last_log = 0;
+                cur->next = warn_head;
+                warn_head = cur;
+            }
+        }
+        if (cur) {
+            if (now - cur->last_log >= LOG_SUPPRESS_SECONDS) {
+                LOG_INFO("Thumbnail generation already running for: %s", dir);
+                cur->last_log = now;
+            }
+        }
+        thread_mutex_unlock(&warn_mutex);
+    } else {
+        LOG_INFO("Thumbnail generation already running for: %s", dir);
+    }
+}
 static void remove_watcher_node(const char* dir) {
     thread_mutex_lock(&watcher_mutex);
     watcher_node_t* prev = NULL;
@@ -791,18 +751,10 @@ static void thumb_watcher_cb(const char* dir) {
     }
 }
 
-#ifdef _WIN32
-static unsigned __stdcall debounce_generation_thread(void* args) {
-#else
 static void* debounce_generation_thread(void* args) {
-#endif
     char* dcopy = (char*)args;
     if (!dcopy) {
-#ifdef _WIN32
-        return 0;
-#else
         return NULL;
-#endif
     }
 
     platform_sleep_ms(DEBOUNCE_MS);
@@ -819,66 +771,49 @@ static void* debounce_generation_thread(void* args) {
     thread_mutex_unlock(&watcher_mutex);
     free(dcopy);
 
-#ifdef _WIN32
-    return 0;
-#else
     return NULL;
-#endif
 }
 
-#ifdef _WIN32
-static unsigned __stdcall thumbnail_generation_thread(void* args) {
-#else
 static void* thumbnail_generation_thread(void* args) {
-#endif
     thread_args_t* thread_args = (thread_args_t*)args;
     char dir_path[PATH_MAX];
     strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
     dir_path[PATH_MAX - 1] = '\0';
     free(args);
-
     LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
     run_thumb_generation(dir_path);
     LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
-
-#ifdef _WIN32
-    return 0;
-#else
+    if (!running_mutex_inited && thread_mutex_init(&running_mutex) == 0) running_mutex_inited = 1;
+    if (running_mutex_inited) {
+        thread_mutex_lock(&running_mutex);
+        running_node_t* prev = NULL;
+        running_node_t* cur = running_head;
+        while (cur) {
+            if (strcmp(cur->dir, dir_path) == 0) {
+                if (prev) prev->next = cur->next; else running_head = cur->next;
+                free(cur);
+                break;
+            }
+            prev = cur;
+            cur = cur->next;
+        }
+        thread_mutex_unlock(&running_mutex);
+    }
     return NULL;
-#endif
 }
 
-#ifdef _WIN32
-static unsigned __stdcall thumb_job_thread(void* args) {
-#else
 static void* thumb_job_thread(void* args) {
-#endif
-    if (!args) {
-#ifdef _WIN32
-        return 0;
-#else
-        return NULL;
-#endif
-    }
+    if (!args) return NULL;
     thumb_job_t* job = (thumb_job_t*)args;
     generate_thumb_c(job->input, job->output, job->scale, job->q, job->index, job->total);
     char* bn = strrchr(job->output, DIR_SEP);
     if (bn) bn = bn + 1; else bn = job->output;
     thumbdb_set(bn, job->input);
-
     free(job);
-
-#ifdef _WIN32
-    return 0;
-#else
+    atomic_fetch_sub(&thumb_workers_active, 1);
     return NULL;
-#endif
 }
-#ifdef _WIN32
-static unsigned __stdcall thumb_maintenance_thread(void* args) {
-#else
 static void* thumb_maintenance_thread(void* args) {
-#endif
     int interval = args ? *((int*)args) : 300;
     int ival = interval;
     free(args);
@@ -895,23 +830,15 @@ static void* thumb_maintenance_thread(void* args) {
             char* gallery = gfolders[gi];
             char thumbs_root[PATH_MAX];
             get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-
             char safe_dir_name[PATH_MAX];
             make_safe_dir_name_from(gallery, safe_dir_name, sizeof(safe_dir_name));
-
             char per_thumbs_root[PATH_MAX];
             snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
-
-            if (!is_dir(per_thumbs_root))
-                platform_make_dir(per_thumbs_root);
-
+            if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
             char per_db[PATH_MAX];
             snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
             thumbdb_open_for_dir(per_db);
-
-            if (thumbdb_tx_begin() != 0) {
-                LOG_WARN("thumbs: failed to start tx for gallery %s", gallery);
-            }
+            if (thumbdb_tx_begin() != 0) LOG_WARN("thumbs: failed to start tx for gallery %s", gallery);
 
             diriter it;
             if (!dir_open(&it, gallery)) {
@@ -953,11 +880,7 @@ static void* thumb_maintenance_thread(void* args) {
         thumbdb_sweep_orphans();
         thumbdb_compact();
     }
-#ifdef _WIN32
-    return 0;
-#else
     return NULL;
-#endif
 }
 void start_periodic_thumb_maintenance(int interval_seconds) {
     int* arg = malloc(sizeof(int));
@@ -967,12 +890,8 @@ void start_periodic_thumb_maintenance(int interval_seconds) {
 }
 void start_auto_thumb_watcher(const char* dir_path) {
     if (!dir_path) return;
-
-    if (!watcher_mutex_inited) {
-        if (thread_mutex_init(&watcher_mutex) == 0)
-            watcher_mutex_inited = 1;
-    }
-
+    if (!watcher_mutex_inited && thread_mutex_init(&watcher_mutex) == 0) watcher_mutex_inited = 1;
+    
     thread_mutex_lock(&watcher_mutex);
     watcher_node_t* cur = watcher_head;
     while (cur) {
@@ -1062,7 +981,7 @@ void run_thumb_generation(const char* dir) {
     }
 
     if (lock_ret == 1) {
-        LOG_INFO("Thumbnail generation already running for: %s", dir);
+        LOG_DEBUG("Thumbnail generation already running for: %s", dir);
         return;
     }
 
@@ -1169,10 +1088,81 @@ void start_background_thumb_generation(const char* dir_path) {
         return;
     }
 
+    char thumbs_root[PATH_MAX];
+    get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+    if (!is_dir(thumbs_root)) platform_make_dir(thumbs_root);
+
+    char safe_dir_name[PATH_MAX];
+    make_safe_dir_name_from(dir_path, safe_dir_name, sizeof(safe_dir_name));
+
+    char per_thumbs_root[PATH_MAX];
+    snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+    if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
+
+    char lock_path[PATH_MAX];
+    snprintf(lock_path, sizeof(lock_path), "%s" DIR_SEP_STR ".thumbs.lock", per_thumbs_root);
+
+    if (is_file(lock_path)) {
+        struct stat st;
+        if (platform_stat(lock_path, &st) == 0) {
+            time_t now = time(NULL);
+            int owner_pid = 0;
+            FILE* lf = fopen(lock_path, "r");
+            if (lf) {
+                if (fscanf(lf, "%d", &owner_pid) != 1) owner_pid = 0;
+                fclose(lf);
+            }
+
+            int owner_alive = 0;
+            if (owner_pid > 0) owner_alive = platform_pid_is_running(owner_pid);
+
+            if (owner_alive) {
+                if (now > st.st_mtime && (now - st.st_mtime) > STALE_LOCK_SECONDS) {
+                    LOG_WARN("Stale lock file detected %s age=%llds (owner pid %d still alive), removing", lock_path, (long long)(now - st.st_mtime), owner_pid);
+                    platform_file_delete(lock_path);
+                }
+                else {
+                    warn_maybe_log_already_running(dir_path);
+                    start_auto_thumb_watcher(dir_path);
+                    return;
+                }
+            }
+            else {
+                LOG_WARN("Lockfile %s owned by dead PID %d or unreadable; removing", lock_path, owner_pid);
+                platform_file_delete(lock_path);
+            }
+        }
+    }
+
     thread_args_t* args = malloc(sizeof(thread_args_t));
     if (!args) {
         LOG_ERROR("Failed to allocate memory for thread arguments");
         return;
+    }
+
+    if (!running_mutex_inited) {
+        if (thread_mutex_init(&running_mutex) == 0) running_mutex_inited = 1;
+    }
+    if (running_mutex_inited) {
+        thread_mutex_lock(&running_mutex);
+        running_node_t* cur = running_head;
+        while (cur) {
+            if (strcmp(cur->dir, dir_path) == 0) {
+                thread_mutex_unlock(&running_mutex);
+                start_auto_thumb_watcher(dir_path);
+                free(args);
+                return;
+            }
+            cur = cur->next;
+        }
+        running_node_t* rn = malloc(sizeof(running_node_t));
+        if (rn) {
+            strncpy(rn->dir, dir_path, PATH_MAX - 1);
+            rn->dir[PATH_MAX - 1] = '\0';
+            rn->next = running_head;
+            running_head = rn;
+        }
+        thread_mutex_unlock(&running_mutex);
     }
 
     strncpy(args->dir_path, dir_path, PATH_MAX - 1);
@@ -1225,7 +1215,7 @@ void print_skips(progress_t * prog) {
     skip_counter_t* curr = prog->skip_head;
     while (curr) {
         if (curr->count > 0)
-            printf("[SKIPPED] %d files skipped in thumbs_dir: %s\n", curr->count, curr->dir);
+            LOG_DEBUG("[SKIPPED] %d files skipped in thumbs_dir: %s\n", curr->count, curr->dir);
         skip_counter_t* tmp = curr;
         curr = curr->next;
         free(tmp);
@@ -1233,64 +1223,8 @@ void print_skips(progress_t * prog) {
     prog->skip_head = NULL;
 }
 int get_media_dimensions(const char* path, int* width, int* height) {
-    if (!path || !width || !height) return 0;
-    if (!is_path_safe(path)) return 0;
-
-    char norm_path[PATH_MAX];
-    strncpy(norm_path, path, PATH_MAX - 1);
-    norm_path[PATH_MAX - 1] = '\0';
-    normalize_path(norm_path);
-
-    char esc_path[PATH_MAX * 2];
-    escape_path_for_cmd(norm_path, esc_path, sizeof(esc_path));
-
-    const char* ext = strrchr(norm_path, '.');
-    if (ext) {
-        if (!strcasecmp(ext, ".webp")) {
-            int w = 0, h = 0;
-            if (get_webp_dimensions(norm_path, &w, &h) && w > 0 && h > 0) {
-                *width = w; *height = h; return 1;
-            }
-            return 0;
-        }
-
-        if (!strcasecmp(ext, ".jpg") || !strcasecmp(ext, ".jpeg") || !strcasecmp(ext, ".png") ||
-            !strcasecmp(ext, ".gif") || !strcasecmp(ext, ".bmp") || !strcasecmp(ext, ".tif") ||
-            !strcasecmp(ext, ".tiff")) {
-            int w = 0, h = 0;
-            if (get_image_dimensions_from_file(norm_path, &w, &h) && w > 0 && h > 0) {
-                *width = w; *height = h; return 1;
-            }
-            return 0;
-        }
-    }
-
-    char dim_cmd[PATH_MAX * 3];
-    snprintf(dim_cmd, sizeof(dim_cmd), "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x \"%s\"", esc_path);
-
-
-    FILE* fp = platform_popen_direct(dim_cmd, "r");
-    if (!fp) return 0;
-
-    char buf[256];
-    buf[0] = '\0';
-    int found = 0, w = 0, h = 0;
-
-    while (fgets(buf, sizeof(buf), fp)) {
-        char* line = buf;
-        while (*line && (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n')) line++;
-        if (sscanf(line, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
-            found = 1;
-            break;
-        }
-    }
-
-    platform_pclose_direct(fp);
-    if (!found) return 0;
-
-    *width = w;
-    *height = h;
-    return 1;
+    (void)path; (void)width; (void)height;
+    return 0;
 }
 void count_media_in_dir(const char* dir, progress_t * prog) {
     diriter it;
@@ -1368,7 +1302,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
 
         if (need_small) {
             prog->processed_files++;
-            LOG_INFO("Scheduling small thumb for %s -> %s", full, thumb_small);
+            LOG_DEBUG("Scheduling small thumb for %s -> %s", full, thumb_small);
 
             thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
             if (job) {
@@ -1381,8 +1315,11 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
                 job->index = prog->processed_files;
                 job->total = (int)prog->total_files;
 
+                while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
+                atomic_fetch_add(&thumb_workers_active, 1);
                 if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
                     LOG_ERROR("Failed to spawn thumb worker thread, falling back to inline generation");
+                    atomic_fetch_sub(&thumb_workers_active, 1);
                     generate_thumb_c(full, thumb_small, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY, prog->processed_files, prog->total_files);
                     char* bn = strrchr(thumb_small, DIR_SEP);
                     if (bn) bn = bn + 1; else bn = thumb_small;
@@ -1400,8 +1337,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
         }
 
         if (need_large) {
-            LOG_INFO("Scheduling large thumb for %s -> %s", full, thumb_large);
-
+            LOG_DEBUG("Scheduling large thumb for %s -> %s", full, thumb_large);
             thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
             if (job) {
                 strncpy(job->input, full, PATH_MAX - 1);
@@ -1412,9 +1348,11 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
                 job->q = THUMB_LARGE_QUALITY;
                 job->index = prog->processed_files;
                 job->total = (int)prog->total_files;
-
+                while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
+                atomic_fetch_add(&thumb_workers_active, 1);
                 if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
                     LOG_ERROR("Failed to spawn thumb worker thread, falling back to inline generation");
+                    atomic_fetch_sub(&thumb_workers_active, 1);
                     generate_thumb_c(full, thumb_large, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY, prog->processed_files, prog->total_files);
                     char* bn = strrchr(thumb_large, DIR_SEP);
                     if (bn) bn = bn + 1; else bn = thumb_large;
@@ -1435,39 +1373,28 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
 }
 void clean_orphan_thumbs(const char* dir, progress_t * prog) {
     if (!dir) return;
-
     char thumbs_root[PATH_MAX];
     get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-
     char safe_dir_name[PATH_MAX];
     make_safe_dir_name_from(dir, safe_dir_name, sizeof(safe_dir_name));
-
     char thumbs_path[PATH_MAX];
     snprintf(thumbs_path, sizeof(thumbs_path), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
-
     if (!is_dir(thumbs_path)) return;
-
     diriter mit;
     if (!dir_open(&mit, dir)) return;
-
     size_t expect_cap = 256;
     size_t expect_count = 0;
     char** expects = malloc(expect_cap * sizeof(char*));
-
     const char* mname;
     while ((mname = dir_next(&mit))) {
         if (!strcmp(mname, ".") || !strcmp(mname, "..") || !strcmp(mname, "thumbs")) continue;
-
         char media_full[PATH_MAX];
         path_join(media_full, dir, mname);
-
         if (!is_file(media_full)) continue;
         if (!(has_ext(mname, IMAGE_EXTS) || has_ext(mname, VIDEO_EXTS))) continue;
-
         char small_rel[PATH_MAX];
         char large_rel[PATH_MAX];
         get_thumb_rel_names(media_full, mname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
-
         if (expect_count + 2 > expect_cap) {
             size_t nc = expect_cap * 2;
             char** tmp = realloc(expects, nc * sizeof(char*));
@@ -1475,13 +1402,10 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
             expects = tmp;
             expect_cap = nc;
         }
-
         expects[expect_count++] = strdup(small_rel);
         expects[expect_count++] = strdup(large_rel);
     }
-
     dir_close(&mit);
-
     diriter tit;
     if (!dir_open(&tit, thumbs_path)) {
         for (size_t i = 0; i < expect_count; ++i) free(expects[i]);
@@ -1500,18 +1424,16 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
         if (ascii_stricmp(tname_copy, ".") == 0 || ascii_stricmp(tname_copy, "..") == 0 ||
             ascii_stricmp(tname_copy, "skipped.log") == 0 || ascii_stricmp(tname_copy, ".nogallery") == 0 ||
             ascii_stricmp(tname_copy, ".thumbs.lock") == 0) continue;
-
         if (strstr(tname_copy, "-small-") || strstr(tname_copy, "-large-")) {
             char thumb_full_m[PATH_MAX];
             path_join(thumb_full_m, thumbs_path, tname_copy);
             if (platform_file_delete(thumb_full_m) != 0) LOG_WARN("Failed to delete malformed thumb: %s", thumb_full_m);
             else {
-                LOG_INFO("Removed malformed thumb: %s", thumb_full_m);
+                LOG_DEBUG("Removed malformed thumb: %s", thumb_full_m);
                 add_skip(prog, "MALFORMED_REMOVED", thumb_full_m);
             }
             continue;
         }
-
         if (!strstr(tname_copy, "-small.") && !strstr(tname_copy, "-large.")) continue;
         bool found = false;
         for (size_t ei = 0; ei < expect_count; ++ei) if (ascii_stricmp(tname, expects[ei]) == 0) { found = true; break; }
@@ -1545,8 +1467,25 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
                 }
             }
         }
+        size_t len = strlen(tname_copy);
+        if (len > 10 && strcmp(tname_copy + len - 10, "-small.jpg") != 0 && strcmp(tname_copy + len - 10, "-large.jpg") != 0) {
+            char thumb_full[PATH_MAX];
+            path_join(thumb_full, thumbs_path, tname_copy);
+            if (platform_file_delete(thumb_full) != 0) LOG_WARN("Failed to delete invalid thumb: %s", thumb_full);
+            else LOG_INFO("Removed invalid thumb: %s", thumb_full);
+            add_skip(prog, "INVALID_REMOVED", thumb_full);
+        }
     }
     dir_close(&tit);
     for (size_t i = 0; i < expect_count; ++i) free(expects[i]);
     free(expects);
+}
+void scan_and_generate_missing_thumbs(void) {
+    size_t count = 0;
+    char** folders = get_gallery_folders(&count);
+    if (!folders || count == 0) return;
+    for (size_t i = 0; i < count; ++i) {
+        LOG_INFO("Scanning and generating missing thumbs for: %s", folders[i]);
+        ensure_thumbs_in_dir(folders[i], NULL);
+    }
 }

@@ -1,5 +1,6 @@
 #include "utils.h"
 #include "platform.h"
+#include "directory.h"
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
@@ -177,6 +178,7 @@ void sb_append_esc(char** buf, size_t* cap, size_t* len, const char* s) {
 void get_thumbs_root(char* out, size_t outlen) {
 	if (!out || outlen == 0) return;
 	snprintf(out, outlen, "%s" DIR_SEP_STR "thumbs", BASE_DIR);
+	normalize_path(out);
 }
 
 void make_thumb_path(char* out, size_t outlen, const char* basename) {

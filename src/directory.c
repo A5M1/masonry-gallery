@@ -1,5 +1,6 @@
 #include "directory.h"
 #include "common.h"
+#include "platform.h"
 #include "utils.h"
 bool has_ext(const char* name, const char* const exts[]) {
 	const char* dot = strrchr(name, '.');
@@ -26,31 +27,15 @@ void path_join(char* out, const char* a, const char* b) {
 }
 
 bool is_file(const char* p) {
-#ifdef _WIN32
-	DWORD attr = GetFileAttributesA(p);
-	return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
-#else
-	struct stat st;
-	return stat(p, &st) == 0 && S_ISREG(st.st_mode);
-#endif
+	return platform_is_file(p);
 }
 
 bool is_dir(const char* p) {
-#ifdef _WIN32
-	DWORD attr = GetFileAttributesA(p);
-	return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
-#else
-	struct stat st;
-	return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-#endif
+	return platform_is_dir(p);
 }
 
 int mk_dir(const char* p) {
-#ifdef _WIN32
-	return _mkdir(p);
-#else
-	return mkdir(p, 0755);
-#endif
+	return platform_make_dir(p);
 }
 
 void normalize_path(char* p) {
@@ -72,22 +57,11 @@ void normalize_path(char* p) {
 }
 
 bool real_path(const char* in, char* out) {
-#ifdef _WIN32
-	if (!_fullpath(out, in, PATH_MAX)) return false;
-#else
-	if (!realpath(in, out)) return false;
-#endif
-	normalize_path(out);
-	return true;
+	return platform_real_path(in, out);
 }
 
 bool safe_under(const char* base_real, const char* path_real) {
-	size_t n = strlen(base_real);
-#ifdef _WIN32
-	return _strnicmp(base_real, path_real, n) == 0 && (path_real[n] == DIR_SEP || path_real[n] == '\0');
-#else
-	return strncmp(base_real, path_real, n) == 0 && (path_real[n] == DIR_SEP || path_real[n] == '\0');
-#endif
+	return platform_safe_under(base_real, path_real);
 }
 
 #ifdef _WIN32

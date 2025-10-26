@@ -16,6 +16,7 @@
 const char* IMAGE_EXTS[] = { ".jpg",".jpeg",".png",".gif",".webp",NULL };
 const char* VIDEO_EXTS[] = { ".mp4",".webm",".ogg",".webp",NULL };
 static char* g_request_headers = NULL;
+char g_request_url[PATH_MAX] = {0};
 static void appendf(char** pbuf, size_t* pcap, size_t* pused, const char* fmt, ...);
 static void ensure_json_buf(char** pbuf, size_t* pcap, size_t used, size_t need) {
 	if (*pcap - used < need + 1024) {
@@ -242,25 +243,17 @@ static int resolve_and_validate_target(const char* base_dir, const char* dirpara
 	if (base_real_out && base_outlen > 0) { real_path(base_dir, base_real_out); }
 	return 1;
 }
-#ifdef _WIN32
-static unsigned __stdcall thumbnail_generation_thread(void* args) {
-#else
-static void* thumbnail_generation_thread(void* args) {
-#endif
-	thread_args_t* thread_args = (thread_args_t*)args;
-	char dir_path[PATH_MAX];
-	strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
-	dir_path[PATH_MAX - 1] = '\0';
-	free(args);
-	LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
-	run_thumb_generation(dir_path);
-	LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
-#ifdef _WIN32
-	return 0;
-#else
-	return NULL;
-#endif
-}
+// static void* thumbnail_generation_thread(void* args) {
+// 	thread_args_t* thread_args = (thread_args_t*)args;
+// 	char dir_path[PATH_MAX];
+// 	strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
+// 	dir_path[PATH_MAX - 1] = '\0';
+// 	free(args);
+// 	LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
+// 	run_thumb_generation(dir_path);
+// 	LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
+// 	return NULL;
+// }
 
 void handle_api_regenerate_thumbs(int c, char* qs, bool keep_alive) {
 	char dirparam[PATH_MAX] = { 0 };
@@ -606,25 +599,23 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\"><a data-fancybox=\"gallery\" href=\"%s\">", href_esc);
 			if (small_exists) appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", small_esc, large_esc);
-			else appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" class=\"thumb-img\">");
+			else appendf(&hbuf, &hcap, &hused, "<img src=\"/https://i.postimg.cc/kGNSRbFX/loader.webp\" class=\"thumb-img\">");
 			appendf(&hbuf, &hcap, &hused, "</a></div>");
 		}
 		appendf(&hbuf, &hcap, &hused, "</div>");
-		char tmp_path[PATH_MAX];
-		snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path);
-		FILE* wf = fopen(tmp_path, "wb");
-		if (wf) {
-			fwrite(hbuf, 1, hused, wf);
-			fclose(wf);
-#ifdef _WIN32
-			MoveFileExA(tmp_path, cache_path, MOVEFILE_REPLACE_EXISTING);
-#else
-			rename(tmp_path, cache_path);
-#endif
-		}
-		else {
-			LOG_WARN("Failed to write cache file: %s", tmp_path);
-		}
+		// unsigned int pid = platform_get_pid();
+		// unsigned long tid = platform_get_tid();
+		// char tmp_path[PATH_MAX];
+		// snprintf(tmp_path, sizeof(tmp_path), "%s.%u.%lu.tmp", cache_path, pid, tid);
+		// FILE* wf = fopen(tmp_path, "wb");
+		// if (wf) {
+		// 	fwrite(hbuf, 1, hused, wf);
+		// 	fclose(wf);
+		// 	platform_move_file(tmp_path, cache_path);
+		// }
+		// else {
+		// 	LOG_WARN("Failed to write cache file: %s", tmp_path);
+		// }
 		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)hused, NULL, 0, keep_alive);
 		send(c, hbuf, (int)hused, 0);
 		free(hbuf);
@@ -866,6 +857,7 @@ void handle_single_request(int c, char* headers, char* body, size_t headers_len,
 	char* qs = strchr(url, '?');
 	if (qs) { *qs = '\0'; qs++; }
 	url_decode(url);
+	STRCPY(g_request_url, url);
 	char* range = get_header_value(headers, "Range:");
 
 

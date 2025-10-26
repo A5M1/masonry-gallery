@@ -123,13 +123,13 @@ static void* worker_thread(void* arg) {
 #ifdef _WIN32
                     int err = WSAGetLastError();
                     if (err == WSAETIMEDOUT) {
-                        LOG_WARN("Socket timeout on connection %d", c);
+                        LOG_DEBUG("Socket timeout on connection %d", c);
                     } else {
                         LOG_ERROR("recv error: %d", err);
                     }
 #else
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        LOG_WARN("Socket timeout on connection %d", c);
+                        LOG_DEBUG("Socket timeout on connection %d", c);
                     } else {
                         LOG_ERROR("recv error: %s", strerror(errno));
                     }

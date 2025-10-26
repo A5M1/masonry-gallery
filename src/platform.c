@@ -2,6 +2,7 @@
 #include "common.h"
 #include "thread_pool.h"
 #include "logging.h"
+#include "directory.h"
 
 void platform_sleep_ms(int ms) {
 #ifdef _WIN32
@@ -14,9 +15,33 @@ void platform_sleep_ms(int ms) {
 int platform_file_delete(const char* path) {
     if (!path) return -1;
 #ifdef _WIN32
-    return DeleteFileA(path) ? 0 : -1;
+    int attempts = 0;
+    while (attempts < 5) {
+        if (DeleteFileA(path)) return 0;
+        DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND) return 0;
+        if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
+            SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
+            if (DeleteFileA(path)) return 0;
+        }
+        platform_sleep_ms(50);
+        attempts++;
+    }
+    return -1;
 #else
-    return unlink(path) == 0 ? 0 : -1;
+    int attempts = 0;
+    while (attempts < 5) {
+        if (unlink(path) == 0) return 0;
+        if (errno == ENOENT) return 0;
+        if (errno == EACCES || errno == EPERM) {
+            chmod(path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+            if (unlink(path) == 0) return 0;
+        }
+        if (errno == EINTR) { attempts++; continue; }
+        platform_sleep_ms(50);
+        attempts++;
+    }
+    return -1;
 #endif
 }
 
@@ -96,9 +121,11 @@ int platform_pclose(FILE* f) {
 #endif
 }
 
-typedef struct {FILE* f; HANDLE proc;} PHandleMap;
+typedef struct {FILE* f; HANDLE proc; int is_ffprobe;} PHandleMap;
 static PHandleMap g_ph[32];
 static int g_phc=0;
+static atomic_int ffprobe_active = ATOMIC_VAR_INIT(0);
+#define MAX_FFPROBE 4
 
 FILE* platform_popen_direct(const char* cmd,const char* mode){
     if (cmd) { platform_record_command(cmd); LOG_DEBUG("platform_popen_direct: %s", cmd); }
@@ -136,12 +163,33 @@ FILE* platform_popen_direct(const char* cmd,const char* mode){
         LOG_ERROR("platform_popen_direct: _fdopen failed");
         _close(fd);CloseHandle(pi.hProcess);CloseHandle(pi.hThread);return NULL;}
     CloseHandle(pi.hThread);
-    if(g_phc<32){g_ph[g_phc].f=f;g_ph[g_phc].proc=pi.hProcess;g_phc++;}
+    {
+        int is_ff = (strstr(cmd, "ffprobe") != NULL) ? 1 : 0;
+        while (g_phc >= 32) platform_sleep_ms(10);
+        if (g_phc < 32) {
+            g_ph[g_phc].f = f;
+            g_ph[g_phc].proc = pi.hProcess;
+            g_ph[g_phc].is_ffprobe = is_ff ? 1 : 0;
+            g_phc++;
+            if (is_ff) atomic_fetch_add(&ffprobe_active, 1);
+        } else {
+            CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hR);
+            fclose(f); return NULL;
+        }
+    }
     setvbuf(f,NULL,_IONBF,0);
     return f;
 #else
+    int is_ff = (cmd && strstr(cmd, "ffprobe") != NULL) ? 1 : 0;
+    if (is_ff) {
+        while (atomic_load(&ffprobe_active) >= MAX_FFPROBE) platform_sleep_ms(50);
+        atomic_fetch_add(&ffprobe_active, 1);
+    }
     FILE* f = popen(cmd,mode);
-    if (!f) LOG_WARN("platform_popen_direct: popen failed for '%s' err=%s", cmd ? cmd : "(null)", strerror(errno));
+    if (!f) {
+        LOG_WARN("platform_popen_direct: popen failed for '%s' err=%s", cmd ? cmd : "(null)", strerror(errno));
+        if (is_ff) atomic_fetch_sub(&ffprobe_active, 1);
+    }
     return f;
 #endif
 }
@@ -151,8 +199,13 @@ int platform_pclose_direct(FILE* f){
     if(!f)return-1;
     HANDLE hProc=NULL;
     for(int i=0;i<g_phc;i++){
-        if(g_ph[i].f==f){hProc=g_ph[i].proc;
-            g_ph[i]=g_ph[--g_phc];break;}
+        if(g_ph[i].f==f){
+            hProc=g_ph[i].proc;
+            int was_ff = g_ph[i].is_ffprobe;
+            g_ph[i]=g_ph[--g_phc];
+            if (was_ff) atomic_fetch_sub(&ffprobe_active, 1);
+            break;
+        }
     }
     fclose(f);
     if(hProc){
@@ -279,7 +332,7 @@ static void watcher_trampoline(void* arg) {
     if (hDir == INVALID_HANDLE_VALUE) { LOG_ERROR("CreateFileA failed for watcher on %s", dir); cb(dir); free(dir); return; }
     for (;;) {
         BYTE buffer[8192]; DWORD bytesReturned = 0;
-        BOOL ok = ReadDirectoryChangesW(hDir, buffer, sizeof(buffer), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, &bytesReturned, NULL, NULL);
+        BOOL ok = ReadDirectoryChangesW(hDir, buffer, sizeof(buffer), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SECURITY, &bytesReturned, NULL, NULL);
         if (!ok) {
             DWORD err = GetLastError();
             LOG_WARN("ReadDirectoryChangesW failed for %s with %lu", dir, err);
@@ -298,7 +351,7 @@ static void watcher_trampoline(void* arg) {
             LOG_DEBUG("Watcher event action=%d name=%s dir=%s", action, fname_utf8[0] ? fname_utf8 : "(nil)", dir);
             if (fname_utf8[0] != '\0' && strcmp(fname_utf8, "thumbs") == 0) {
                 LOG_DEBUG("Ignoring watcher event for thumbs directory: %s", fname_utf8);
-            } else if (action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME || action == FILE_ACTION_MODIFIED) {
+            } else if (action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME || action == FILE_ACTION_MODIFIED || action == FILE_ACTION_REMOVED) {
                 cb(dir);
             }
             if (fni->NextEntryOffset == 0) break;
@@ -311,7 +364,7 @@ static void watcher_trampoline(void* arg) {
 #if defined(__linux__)
     int fd = inotify_init1(IN_NONBLOCK);
     if (fd < 0) { cb(dir); free(dir); return; }
-    int wd = inotify_add_watch(fd, dir, IN_CREATE | IN_MOVED_TO | IN_MODIFY);
+    int wd = inotify_add_watch(fd, dir, IN_CREATE | IN_MOVED_TO | IN_MODIFY | IN_DELETE | IN_MOVED_FROM | IN_CLOSE_WRITE | IN_ATTRIB);
     if (wd < 0) { close(fd); cb(dir); free(dir); return; }
     char buf[4096];
     for (;;) {
@@ -322,7 +375,7 @@ static void watcher_trampoline(void* arg) {
                 struct inotify_event* ev = (struct inotify_event*)(buf + off);
                 const char* name = (ev->len > 0) ? ev->name : NULL;
                 LOG_DEBUG("inotify event mask=%u name=%s dir=%s", ev->mask, name ? name : "(nil)", dir);
-                if ((ev->mask & (IN_CREATE | IN_MOVED_TO | IN_MODIFY))) {
+                if ((ev->mask & (IN_CREATE | IN_MOVED_TO | IN_MODIFY | IN_DELETE | IN_MOVED_FROM | IN_CLOSE_WRITE | IN_ATTRIB))) {
                     if (name && strcmp(name, "thumbs") == 0) {
                         LOG_DEBUG("Ignoring inotify event for thumbs directory: %s", name);
                     } else {
@@ -529,6 +582,46 @@ const platform_recent_cmd_t* platform_get_recent_commands(size_t* out_count) {
     return g_recent_cmds_count ? g_recent_cmds : NULL;
 }
 
+int platform_fsync(int fd) {
+#ifdef _WIN32
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        return FlushFileBuffers(h) ? 0 : -1;
+    }
+    return -1;
+#else
+    return fsync(fd);
+#endif
+}
+
+void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
+    if (!src || !dst || dstlen == 0) return;
+    size_t di = 0;
+#ifdef _WIN32
+    if (di < dstlen - 1) dst[di++] = '"';
+    for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
+        char c = src[i];
+        if (c == '"') continue;
+        if (c == '%') {
+            if (di + 1 < dstlen) dst[di++] = '%'; else break;
+        }
+        dst[di++] = c;
+    }
+    if (di < dstlen - 1) dst[di++] = '"';
+#else
+    if (di < dstlen - 1) dst[di++] = '"';
+    for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
+        char c = src[i];
+        if (c == '\\' || c == '"' || c == '$' || c == '`') {
+            if (di + 1 < dstlen) dst[di++] = '\\'; else break;
+        }
+        dst[di++] = c;
+    }
+    if (di < dstlen - 1) dst[di++] = '"';
+#endif
+    dst[di] = '\0';
+}
+
 int platform_maximize_window(void) {
 #ifdef _WIN32
     HWND h = GetConsoleWindow();
@@ -548,5 +641,176 @@ int platform_maximize_window(void) {
     if (platform_run_command("xdotool getactivewindow windowactivate --sync && xdotool getactivewindow windowstate --sync maximize", 2) == 0) return 0;
     return -1;
 #endif
+#endif
+}
+
+void platform_enable_console_colors(void) {
+#ifdef _WIN32
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, dwMode);
+        }
+    }
+    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    if (hErr != INVALID_HANDLE_VALUE) {
+        DWORD dwModeErr = 0;
+        if (GetConsoleMode(hErr, &dwModeErr)) {
+            dwModeErr |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hErr, dwModeErr);
+        }
+    }
+#endif
+}
+
+int platform_should_use_colors(void) {
+#ifdef _WIN32
+    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD dw = 0;
+    if (hErr != INVALID_HANDLE_VALUE && GetConsoleMode(hErr, &dw)) return 1;
+    return 0;
+#else
+    return isatty(fileno(stderr));
+#endif
+}
+
+int platform_move_file(const char* src, const char* dst) {
+#ifdef _WIN32
+    return MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+#else
+    return rename(src, dst);
+#endif
+}
+
+int platform_localtime(time_t t, struct tm* tm_buf) {
+#ifdef _WIN32
+    return localtime_s(tm_buf, &t) == 0 ? 0 : -1;
+#else
+    return localtime_r(&t, tm_buf) != NULL ? 0 : -1;
+#endif
+}
+
+unsigned int platform_get_pid(void) {
+#ifdef _WIN32
+    return (unsigned int)GetCurrentProcessId();
+#else
+    return (unsigned int)getpid();
+#endif
+}
+
+unsigned long platform_get_tid(void) {
+#ifdef _WIN32
+    return (unsigned long)GetCurrentThreadId();
+#else
+#if defined(__linux__)
+    return (unsigned long)syscall(SYS_gettid);
+#else
+    return (unsigned long)pthread_self();
+#endif
+#endif
+}
+
+void platform_init_network(void) {
+#ifdef _WIN32
+    WSADATA w;
+    WSAStartup(MAKEWORD(2, 2), &w);
+#endif
+}
+
+void platform_cleanup_network(void) {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+int platform_get_cpu_count(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si; GetSystemInfo(&si); return (int)si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return (n > 0) ? (int)n : 1;
+#endif
+}
+
+long platform_get_physical_memory_mb(void) {
+#ifdef _WIN32
+    MEMORYSTATUSEX st; st.dwLength = sizeof(st); if (GlobalMemoryStatusEx(&st)) return (long)(st.ullTotalPhys / (1024 * 1024)); return -1;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES); long page_size = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && page_size > 0) return (long)((pages * page_size) / (1024 * 1024));
+    return -1;
+#endif
+}
+
+void platform_set_socket_options(int sock) {
+#ifdef _WIN32
+    DWORD rcv = 30000, snd = 30000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcv, sizeof(rcv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&snd, sizeof(snd));
+    int ka = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&ka, sizeof(ka));
+    int nd = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&nd, sizeof(nd));
+    int sz = 256 * 1024;
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char*)&sz, sizeof(sz));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&sz, sizeof(sz));
+#else
+    struct timeval rcv, snd;
+    rcv.tv_sec = 30; rcv.tv_usec = 0;
+    snd.tv_sec = 30; snd.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+    int ka = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+    int idle = 60, intvl = 10, cnt = 3;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+    int nd = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd));
+    int sz = 256 * 1024;
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sz, sizeof(sz));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &sz, sizeof(sz));
+#endif
+}
+
+bool platform_is_file(const char* p) {
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(p);
+    return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+bool platform_is_dir(const char* p) {
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(p);
+    return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+bool platform_real_path(const char* in, char* out) {
+#ifdef _WIN32
+    if (!_fullpath(out, in, PATH_MAX)) return false;
+#else
+    if (!realpath(in, out)) return false;
+#endif
+    normalize_path(out);
+    return true;
+}
+
+bool platform_safe_under(const char* base_real, const char* path_real) {
+	size_t n = strlen(base_real);
+#ifdef _WIN32
+	return _strnicmp(base_real, path_real, n) == 0 && (path_real[n] == DIR_SEP || path_real[n] == '\0');
+#else
+	return strncmp(base_real, path_real, n) == 0 && (path_real[n] == DIR_SEP || path_real[n] == '\0');
 #endif
 }

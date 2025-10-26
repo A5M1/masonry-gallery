@@ -2,6 +2,7 @@
 #include "logging.h"
 #include "directory.h"
 #include "thread_pool.h"
+#include "platform.h"
 #define LOG_DIR "logs"
 #define MAX_LOG_MESSAGE_LENGTH 256
 #ifdef DEBUG_DIAGNOSTIC
@@ -11,11 +12,7 @@ LogLevel current_log_level=LOG_LEVEL_INFO;
 #endif
 FILE* log_file=NULL;
 
-#ifdef _WIN32
 thread_mutex_t log_mutex;
-#else
-thread_mutex_t log_mutex;
-#endif
 
 void log_init(void) {
 	if(mk_dir(LOG_DIR)!=0) {
@@ -33,27 +30,8 @@ void log_init(void) {
 	if(!log_file) {
 		fprintf(stderr, "WARN: Could not open log file %s\n", log_path);
 	}
-	#ifdef _WIN32
-	HANDLE hOut=GetStdHandle(STD_OUTPUT_HANDLE);
-	if(hOut!=INVALID_HANDLE_VALUE) {
-		DWORD dwMode=0;
-		if(GetConsoleMode(hOut, &dwMode)) {
-			dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-			SetConsoleMode(hOut, dwMode);
-		}
-	}
-	HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
-	if(hErr!=INVALID_HANDLE_VALUE) {
-		DWORD dwModeErr = 0;
-		if(GetConsoleMode(hErr, &dwModeErr)) {
-			dwModeErr |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-			SetConsoleMode(hErr, dwModeErr);
-		}
-	}
+	platform_enable_console_colors();
 	thread_mutex_init(&log_mutex);
-	#else
-	thread_mutex_init(&log_mutex);
-	#endif
 }
 
 void log_message(LogLevel level, const char* function, const char* format, ...) {
@@ -61,37 +39,16 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 	thread_mutex_lock(&log_mutex);
 	time_t t = time(NULL);
 	char time_str[32];
-#ifdef _WIN32
 	struct tm tm_buf;
-	if(localtime_s(&tm_buf, &t) == 0) {
+	if (platform_localtime(t, &tm_buf) == 0) {
 		strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
 	} else {
 		strncpy(time_str, "1970-01-01 00:00:00", sizeof(time_str));
 		time_str[sizeof(time_str)-1] = '\0';
 	}
-#else
-	struct tm tm_buf;
-	if(localtime_r(&t, &tm_buf) != NULL) {
-		strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
-	} else {
-		strncpy(time_str, "1970-01-01 00:00:00", sizeof(time_str));
-		time_str[sizeof(time_str)-1] = '\0';
-	}
-#endif
 
-	unsigned int pid = 0;
-	unsigned long tid = 0;
-#ifdef _WIN32
-	pid = (unsigned int)GetCurrentProcessId();
-	tid = (unsigned long)GetCurrentThreadId();
-#else
-	pid = (unsigned int)getpid();
-#if defined(__linux__)
-	tid = (unsigned long)syscall(SYS_gettid);
-#else
-	tid = (unsigned long)pthread_self();
-#endif
-#endif
+	unsigned int pid = platform_get_pid();
+	unsigned long tid = platform_get_tid();
 
 	const char* level_str;
 	const char* level_color_str=ANSI_COLOR_RESET;
@@ -129,16 +86,7 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 		message_buffer[sizeof(message_buffer)-2]='.';
 		message_buffer[sizeof(message_buffer)-1]='\0';
 	}
-	int use_color = 0;
-#ifdef _WIN32
-	{
-		HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
-		DWORD dw = 0;
-		if(hErr != INVALID_HANDLE_VALUE && GetConsoleMode(hErr, &dw)) use_color = 1;
-	}
-#else
-	if(isatty(fileno(stderr))) use_color = 1;
-#endif
+	int use_color = platform_should_use_colors();
 	const char* color_reset = use_color ? ANSI_COLOR_RESET : "";
 	const char* ts_color = use_color ? ANSI_COLOR_BRIGHT_BLUE : "";
 	const char* func_color = use_color ? ANSI_COLOR_MAGENTA : ""; 
@@ -146,6 +94,7 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 	const char* level_prefix = use_color ? level_color_str : "";
 	char outbuf[512 + MAX_LOG_MESSAGE_LENGTH];
 	int out_len = 0;
+#ifdef DEBUG_DIAGNOSTIC
 	if (use_color) {
 		out_len = snprintf(outbuf, sizeof(outbuf), "%s[%s]%s %s[%u:%lu]%s %s[%s]%s %s%s%s: %s\n",
 			ts_color, time_str, color_reset,
@@ -158,11 +107,29 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 		out_len = snprintf(outbuf, sizeof(outbuf), "[%s] [%u:%lu] [%s] %s: %s\n",
 			time_str, pid, tid, level_str, function, message_buffer);
 	}
+#else
+	if (use_color) {
+		//out_len = snprintf(outbuf, sizeof(outbuf), "%s[%s]%s %s[%s]%s %s%s%s: %s\n",
+		out_len = snprintf(outbuf, sizeof(outbuf), "%s[%s]%s %s[%s]%s %s\n",
+			ts_color, time_str, color_reset,
+			level_prefix, level_str, color_reset,
+			//func_color, function, color_reset,
+			message_buffer);
+	}
+	else {
+		out_len = snprintf(outbuf, sizeof(outbuf), "[%s] [%s] %s: %s\n",
+			time_str, level_str, function, message_buffer);
+	}
+#endif
 	if(out_len < 0) out_len = 0;
 	if((size_t)out_len >= sizeof(outbuf)) out_len = sizeof(outbuf) - 1;
 	fwrite(outbuf, 1, out_len, stderr);
 	if(log_file) {
+#ifdef DEBUG_DIAGNOSTIC
+		fprintf(log_file, "[%s] [%u:%lu] [%s] %s: %s\n", time_str, pid, tid, level_str, function, message_buffer);
+#else
 		fprintf(log_file, "[%s] [%s] %s: %s\n", time_str, level_str, function, message_buffer);
+#endif
 		fflush(log_file);
 	}
 

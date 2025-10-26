@@ -14,4 +14,6 @@ void send_text(int c,int status,const char* text,const char* body,int keep_alive
 range_t parse_range_header(const char* header_value,long file_size);
 void send_file_stream(int c,const char* fs_path,const char* range_header,int keep_alive);
 
+extern char g_request_url[PATH_MAX];
+
 

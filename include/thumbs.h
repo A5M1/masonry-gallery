@@ -25,8 +25,11 @@ void start_periodic_thumb_maintenance(int interval_seconds);
 void start_auto_thumb_watcher(const char* dir_path);
 void run_thumb_generation(const char* dir);
 #ifndef MAX_FFMPEG
-#define MAX_FFMPEG 2
+#define MAX_FFMPEG 4
 #endif
+ #ifndef MAX_THUMB_WORKERS
+ #define MAX_THUMB_WORKERS 4
+ #endif
 #define DEBOUNCE_MS 250
 #define STALE_LOCK_SECONDS 300
 #define MAX_SHALLOW_CHECK 25
@@ -34,19 +37,14 @@ void run_thumb_generation(const char* dir);
 #define THUMB_LARGE_SCALE 1280
 #define THUMB_SMALL_QUALITY 75
 #define THUMB_LARGE_QUALITY 85
-#ifdef _WIN32
-static unsigned __stdcall debounce_generation_thread(void* args);
-static unsigned __stdcall thumbnail_generation_thread(void* args);
-static unsigned __stdcall thumb_job_thread(void* args);
-static unsigned __stdcall thumb_maintenance_thread(void* args);
-#else
 static void* debounce_generation_thread(void* args);
 static void* thumbnail_generation_thread(void* args);
 static void* thumb_job_thread(void* args);
 static void* thumb_maintenance_thread(void* args);
-#endif
 void count_media_in_dir(const char* dir, progress_t* prog);
 void ensure_thumbs_in_dir(const char* dir, progress_t* prog);
-void clean_orphan_thumbs(const char* dir, progress_t* prog);
+void generate_folder_thumb(const char* dir);
 void print_skips(progress_t* prog);
+void clean_orphan_thumbs(const char* dir, progress_t * prog);
+void scan_and_generate_missing_thumbs(void);
 #endif // THUMBS_H

@@ -4,6 +4,13 @@
 #include "platform.h"
 #include "common.h"
 
+static void fmt_size(long b, char* out, size_t n) {
+	const char* units[] = {"B","KB","MB","GB","TB"};
+	double v = (double)b; int i = 0;
+	while (v >= 1024.0 && i < 4) { v /= 1024.0; i++; }
+	if (i == 0) snprintf(out, n, "%ld %s", b, units[i]); else snprintf(out, n, "%.2f %s", v, units[i]);
+}
+
 
 const char* mime_for(const char* p) {
 	const char* e=strrchr(p, '.');if(!e)return"application/octet-stream";e++;
@@ -139,7 +146,10 @@ range_t parse_range_header(const char* header_value, long file_size) {
 	range.is_range=1;
 	range.start=s_val;
 	range.end=e_val;
-	LOG_DEBUG("Parsed range: %ld-%ld/%ld", range.start, range.end, file_size);
+	{
+		char sfs[32]; fmt_size(file_size, sfs, sizeof(sfs));
+		LOG_DEBUG("Parsed range: %ld-%ld/%ld (%s)", range.start, range.end, file_size, sfs);
+	}
 	return range;
 }
 
@@ -157,6 +167,11 @@ void send_header(int c, int status, const char* text, const char* ctype, long le
 		off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Length: %ld\r\n", r->end-r->start+1);
 	}
 	else off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Length: %ld\r\n", len);
+	if (g_request_url[0] && strncmp(g_request_url, "/images/", 8) == 0) {
+		off += snprintf(hbuf+off, sizeof(hbuf)-off, "Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0\r\n");
+		off += snprintf(hbuf+off, sizeof(hbuf)-off, "Pragma: no-cache\r\n");
+		off += snprintf(hbuf+off, sizeof(hbuf)-off, "Expires: 0\r\n");
+	}
 	snprintf(hbuf+off, sizeof(hbuf)-off, "\r\n");
 	send(c, hbuf, (int)strlen(hbuf), 0);
 }
@@ -179,8 +194,25 @@ void send_file_stream(int c, const char* path, const char* range, int keep) {
 	const char* ctype=mime_for(path);
 	long start=0, sz=fsz;int code=200;const char* txt="OK";
 	if(r.is_range) {
+		if (r.start < 0) r.start = 0;
+		if (fsz <= 0) {
+			char hbuf[256];
+			int off = snprintf(hbuf, sizeof(hbuf), "HTTP/1.1 416 Range Not Satisfiable\r\nConnection: %s\r\nContent-Range: bytes */%ld\r\nContent-Length: 0\r\n\r\n", keep ? "keep-alive" : "close", fsz);
+			send(c, hbuf, (int)strlen(hbuf), 0);
+			return;
+		}
+		if (r.end >= fsz) r.end = fsz - 1;
+		if (r.start > r.end) {
+			char hbuf[256];
+			int off = snprintf(hbuf, sizeof(hbuf), "HTTP/1.1 416 Range Not Satisfiable\r\nConnection: %s\r\nContent-Range: bytes */%ld\r\nContent-Length: 0\r\n\r\n", keep ? "keep-alive" : "close", fsz);
+			send(c, hbuf, (int)strlen(hbuf), 0);
+			return;
+		}
 		start=r.start;sz=r.end-r.start+1;code=206;txt="Partial Content";
-		LOG_INFO("Range request: %ld-%ld (%ld bytes)", r.start, r.end, sz);
+		{
+			char ssz[32]; fmt_size(sz, ssz, sizeof(ssz));
+			LOG_INFO("Range request: %ld-%ld (%s)", r.start, r.end, ssz);
+		}
 	}
 	(void)0; 
 	send_header(c, code, txt, ctype, sz, r.is_range ? &r : NULL, fsz, keep);

@@ -1,0 +1,15 @@
+[package]
+name = "galleria"
+version = "0.1.0"
+edition = "2021"
+windows-subsystem = "console"
+
+[dependencies]
+wry = "0.28"
+winit = "0.28"
+anyhow = "1.0"
+dirs = "4.0"
+
+[[bin]]
+name = "galleria-view"
+path = "src/main.rs"
