@@ -21,7 +21,7 @@ void handle_api_tree(int c, bool keep_alive);
 char* generate_media_fragment(const char* base_dir, const char* dirparam, int page, size_t* out_len);
 void handle_api_folders(int c, char* qs, bool keep_alive);
 void handle_api_media(int c, char* qs, bool keep_alive);
-void handle_single_request(int c, char* headers, char* body, size_t headers_len, size_t body_len, bool keep_alive);
+int handle_single_request(int c, char* headers, char* body, size_t headers_len, size_t body_len, bool keep_alive);
 bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_path_len);
 void ensure_thumbs_for_dir(const char* dir);
 void handle_api_add_folder(int c, const char* request_body, bool keep_alive);

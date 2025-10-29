@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Swipe Sorter</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5/dist/fancybox/fancybox.css" />
+    <link rel="stylesheet" href="/css/mover.css" />
+</head>
+
+<body>
+    <div id="left">
+        <div class="sidebar-header">
+            <h3>📁 Source</h3>
+            <input id="folderSearch" type="text" placeholder="Search folders..." />
+        </div>
+        <div id="breadcrumbs"></div>
+        <div id="folderList"></div>
+    </div>
+
+    <div id="center">
+        <div id="preview">Loading...</div>
+        <div style="z-index: 99999;position: absolute; top: 94.1vh; display: flex; gap: 10px;">
+            <button onclick="goBack()">⬅ Back</button>
+            <button onclick="reject()">Reject</button>
+            <button onclick="accept()">Accept</button>
+            <button onclick="showAddFolderDialog()">Add Folder</button>
+        </div>
+    </div>
+    <div id="right">
+        <h3>Target</h3>
+        <input id="targetSearch" type="text" placeholder="Search targets..."
+            style="padding:0.4rem 0.6rem;border-radius:6px;border:none;background:#222;color:#ddd;font-size:0.9rem;outline:none;margin-bottom:0.6rem;" />
+        <div id="targetFolder"></div>
+
+        <div id="addFolderModal"
+            style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;">
+            <div
+                style="background:#1e1e1e;color:#eee;padding:20px;border-radius:12px;width:320px;box-shadow:0 0 20px #000;display:flex;flex-direction:column;gap:12px;">
+                <h2 style="margin:0;font-size:18px;color:#fff;">Add Folder</h2>
+                <input id="folderName" placeholder="Folder Name"
+                    style="padding:8px;border:none;border-radius:6px;background:#2e2e2e;color:#fff;outline:none;">
+                <input id="folderTarget" placeholder="Target (optional)"
+                    style="padding:8px;border:none;border-radius:6px;background:#2e2e2e;color:#fff;outline:none;">
+                <div style="display:flex;justify-content:flex-end;gap:10px;">
+                    <button onclick="hideAddFolderDialog()"
+                        style="padding:8px 14px;border:none;border-radius:6px;background:#444;color:#fff;cursor:pointer;">Cancel</button>
+                    <button onclick="submitAddFolder()"
+                        style="padding:8px 14px;border:none;border-radius:6px;background:#0078d7;color:#fff;cursor:pointer;">Create</button>
+                </div>
+                <div id="addFolderMsg" style="font-size:13px;color:#aaa;"></div>
+            </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5/dist/fancybox/fancybox.umd.js"></script>
+        <script src="/js/mover.js"></script>
+</body>
+
+</html>

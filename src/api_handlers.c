@@ -10,13 +10,14 @@
 #include "thumbs.h"
 #include "thread_pool.h"
 #include "platform.h"
+#include "websocket.h"
 
 
 
 const char* IMAGE_EXTS[] = { ".jpg",".jpeg",".png",".gif",".webp",NULL };
 const char* VIDEO_EXTS[] = { ".mp4",".webm",".ogg",".webp",NULL };
 static char* g_request_headers = NULL;
-char g_request_url[PATH_MAX] = {0};
+char g_request_url[PATH_MAX] = { 0 };
 static void appendf(char** pbuf, size_t* pcap, size_t* pused, const char* fmt, ...);
 static void ensure_json_buf(char** pbuf, size_t* pcap, size_t used, size_t need) {
 	if (*pcap - used < need + 1024) {
@@ -141,11 +142,11 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		char href_esc[PATH_MAX]; html_escape(href, href_esc, sizeof(href_esc));
 		char small_url[PATH_MAX] = ""; char large_url[PATH_MAX] = "";
 		if (small_exists || large_exists) {
-				if (dirparam && dirparam[0]) {
-					char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-				}
+			if (dirparam && dirparam[0]) {
+				char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
+			}
 			else {
 				char dirpart[PATH_MAX] = "";
 				const char* first_slash = strchr(relurl, '/');
@@ -156,39 +157,39 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 					dirpart[dlen] = '\0';
 				}
 				if (!dirpart[0]) {
-						size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-						char folder_real[PATH_MAX];
-						for (size_t gi = 0; gi < gf_count; ++gi) {
-							if (!real_path(gfolders[gi], folder_real)) continue;
-							if (!safe_under(folder_real, full_path)) continue;
-							size_t si = 0;
-							for (size_t ii = 0; folder_real[ii] && si < sizeof(dirpart) - 1; ++ii) {
-								char tmp_safe[PATH_MAX]; make_safe_dir_name_from(folder_real, tmp_safe, sizeof(tmp_safe));
-								size_t tlen = strlen(tmp_safe);
-								if (tlen >= sizeof(dirpart)) tlen = sizeof(dirpart) - 1;
-								memcpy(dirpart, tmp_safe, tlen);
-								dirpart[tlen] = '\0';
-								si = tlen;
-								break;
-							}
-							dirpart[si] = '\0';
+					size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
+					char folder_real[PATH_MAX];
+					for (size_t gi = 0; gi < gf_count; ++gi) {
+						if (!real_path(gfolders[gi], folder_real)) continue;
+						if (!safe_under(folder_real, full_path)) continue;
+						size_t si = 0;
+						for (size_t ii = 0; folder_real[ii] && si < sizeof(dirpart) - 1; ++ii) {
+							char tmp_safe[PATH_MAX]; make_safe_dir_name_from(folder_real, tmp_safe, sizeof(tmp_safe));
+							size_t tlen = strlen(tmp_safe);
+							if (tlen >= sizeof(dirpart)) tlen = sizeof(dirpart) - 1;
+							memcpy(dirpart, tmp_safe, tlen);
+							dirpart[tlen] = '\0';
+							si = tlen;
 							break;
 						}
-						if (!dirpart[0]) {
-							char parent[PATH_MAX];
-							strncpy(parent, full_path, sizeof(parent)-1);
-							parent[sizeof(parent)-1] = '\0';
-							char* s1 = strrchr(parent, '/');
-							char* s2 = strrchr(parent, '\\');
-							char* last = NULL;
-							if (s1 && s2) last = (s1 > s2) ? s1 : s2;
-							else if (s1) last = s1;
-							else if (s2) last = s2;
-							if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
-							make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
-						}
+						dirpart[si] = '\0';
+						break;
+					}
+					if (!dirpart[0]) {
+						char parent[PATH_MAX];
+						strncpy(parent, full_path, sizeof(parent) - 1);
+						parent[sizeof(parent) - 1] = '\0';
+						char* s1 = strrchr(parent, '/');
+						char* s2 = strrchr(parent, '\\');
+						char* last = NULL;
+						if (s1 && s2) last = (s1 > s2) ? s1 : s2;
+						else if (s1) last = s1;
+						else if (s2) last = s2;
+						if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
+						make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
+					}
 				}
-					if (dirpart[0]) {
+				if (dirpart[0]) {
 					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", dirpart, small_rel);
 					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", dirpart, large_rel);
 				}
@@ -262,24 +263,24 @@ void handle_api_regenerate_thumbs(int c, char* qs, bool keep_alive) {
 	normalize_path(target);
 	char target_real[PATH_MAX];
 	char base_real[PATH_MAX];
-		if (!resolve_and_validate_target(BASE_DIR, dirparam, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
-			const char* msg = "{\"error\":\"Invalid directory\"}";
-			send_header(c, 400, "Bad Request", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
-			send(c, msg, (int)strlen(msg), 0);
-			return;
-		}
+	if (!resolve_and_validate_target(BASE_DIR, dirparam, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
+		const char* msg = "{\"error\":\"Invalid directory\"}";
+		send_header(c, 400, "Bad Request", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
 	if (dir_has_missing_thumbs_shallow(target_real, 0)) start_background_thumb_generation(target_real);
 	const char* msg = "{\"status\":\"accepted\",\"message\":\"Thumbnail regeneration started.\"}";
 	send_header(c, 202, "Accepted", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
 	send(c, msg, (int)strlen(msg), 0);
 }
-static char* json_comma_safe(char* ptr, size_t * remLen) {
+static char* json_comma_safe(char* ptr, size_t* remLen) {
 	if (*remLen < 10) return ptr;
 	*ptr++ = ',';
 	(*remLen)--;
 	return ptr;
 }
-static char* build_folder_tree_json(char** pbuf, size_t * cap, size_t * used, const char* dir, const char* root) {
+static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, const char* dir, const char* root) {
 	ensure_json_buf(pbuf, cap, *used, 4096);
 	char* ptr = *pbuf + *used;
 	if (!is_dir(dir) || has_nogallery(dir) || !has_media_rec(dir)) {
@@ -701,11 +702,11 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 
 		if (small_exists || large_exists) {
 			char small_url[PATH_MAX]; char large_url[PATH_MAX];
-				if (dirparam[0]) {
-					char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-				}
+			if (dirparam[0]) {
+				char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
+			}
 			else {
 				char dirpart[PATH_MAX] = "";
 				const char* first_slash = strchr(relurl, '/');
@@ -719,28 +720,28 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 					size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
 					char folder_real[PATH_MAX]; char base_real_local[PATH_MAX];
 					if (real_path(BASE_DIR, base_real_local)) {
-							size_t base_len = strlen(base_real_local);
-							for (size_t gi = 0; gi < gf_count; ++gi) {
-								if (!real_path(gfolders[gi], folder_real)) continue;
-								if (!safe_under(folder_real, full_path)) continue;
-								const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
-								make_safe_dir_name_from(r, dirpart, sizeof(dirpart));
-								break;
-							}
+						size_t base_len = strlen(base_real_local);
+						for (size_t gi = 0; gi < gf_count; ++gi) {
+							if (!real_path(gfolders[gi], folder_real)) continue;
+							if (!safe_under(folder_real, full_path)) continue;
+							const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
+							make_safe_dir_name_from(r, dirpart, sizeof(dirpart));
+							break;
 						}
-						if (!dirpart[0]) {
-							char parent[PATH_MAX];
-							strncpy(parent, full_path, sizeof(parent)-1);
-							parent[sizeof(parent)-1] = '\0';
-							char* s1 = strrchr(parent, '/');
-							char* s2 = strrchr(parent, '\\');
-							char* last = NULL;
-							if (s1 && s2) last = (s1 > s2) ? s1 : s2;
-							else if (s1) last = s1;
-							else if (s2) last = s2;
-							if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
-							make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
-						}
+					}
+					if (!dirpart[0]) {
+						char parent[PATH_MAX];
+						strncpy(parent, full_path, sizeof(parent) - 1);
+						parent[sizeof(parent) - 1] = '\0';
+						char* s1 = strrchr(parent, '/');
+						char* s2 = strrchr(parent, '\\');
+						char* last = NULL;
+						if (s1 && s2) last = (s1 > s2) ? s1 : s2;
+						else if (s1) last = s1;
+						else if (s2) last = s2;
+						if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
+						make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
+					}
 				}
 				if (dirpart[0]) {
 					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", dirpart, small_rel);
@@ -822,6 +823,217 @@ void handle_api_list_folders(int c, bool keep_alive) {
 	send(c, buf, (int)(ptr - buf), 0);
 	free(buf);
 }
+void handle_legacy_folders(int c, bool keep_alive) {
+    LOG_INFO("handle_legacy_folders requested");
+	const int STACK_INIT = 64; const int SUBDIR_INIT = 32; const int STACK_GROW = 64;
+	char** stack = malloc(STACK_INIT * sizeof(char*));
+	if (!stack) { send_text(c, 500, "Internal Server Error", "Memory error", keep_alive); return; }
+	int sp = 0, stack_cap = STACK_INIT;
+	stack[sp++] = strdup(BASE_DIR);
+
+	size_t cap = 1024; char* out = malloc(cap); if (!out) { free(stack); send_text(c, 500, "Internal Server Error", "Memory error", keep_alive); return; }
+	size_t used = 0; out[used++] = '[';
+	int first = 1;
+
+	while (sp > 0) {
+		char* d = stack[--sp];
+		char nog[PATH_MAX]; path_join(nog, d, ".nogallery"); if (is_file(nog)) { free(d); continue; }
+
+		diriter it; if (!dir_open(&it, d)) { free(d); continue; }
+		const char* name; int has_media = 0;
+		char** subdirs = malloc(SUBDIR_INIT * sizeof(char*)); int subcap = SUBDIR_INIT, subcnt = 0;
+		while ((name = dir_next(&it))) {
+			if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+			char full[PATH_MAX]; path_join(full, d, name);
+			if (is_file(full)) {
+				if (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS)) has_media = 1;
+			}
+			else if (is_dir(full)) {
+				if (subcnt >= subcap) { subcap += STACK_GROW; char** tmp = realloc(subdirs, subcap * sizeof(char*)); if (!tmp) break; subdirs = tmp; }
+				subdirs[subcnt++] = strdup(name);
+			}
+		}
+		dir_close(&it);
+
+		if (has_media) {
+			const char* rel = d + strlen(BASE_DIR);
+			while (*rel == '/' || *rel == '\\') rel++;
+			if (*rel) {
+				if (!first) { ensure_json_buf(&out, &cap, used, 2); out[used++] = ','; }
+				first = 0;
+				ensure_json_buf(&out, &cap, used, strlen(rel) + 4);
+				out[used++] = '"';
+				for (const char* p = rel; *p; ++p) { out[used++] = (*p == '\\') ? '/' : *p; }
+				out[used++] = '"';
+			}
+		}
+
+		for (int i = subcnt - 1; i >= 0; --i) {
+			if (sp >= stack_cap) { stack_cap += STACK_GROW; char** tmp = realloc(stack, stack_cap * sizeof(char*)); if (!tmp) break; stack = tmp; }
+			char* child = malloc(PATH_MAX);
+			snprintf(child, PATH_MAX, "%s%s%s", d, DIR_SEP_STR, subdirs[i]);
+			normalize_path(child);
+			stack[sp++] = child;
+			free(subdirs[i]);
+		}
+		free(subdirs);
+		free(d);
+	}
+
+	ensure_json_buf(&out, &cap, used, 2);
+	out[used++] = ']';
+	send_header(c, 200, "OK", "application/json; charset=utf-8", (long)used, NULL, 0, keep_alive);
+	send(c, out, (int)used, 0);
+	free(out); free(stack);
+}
+
+void handle_legacy_files(int c, char* qs, bool keep_alive) {
+	char dirparam[PATH_MAX] = { 0 };
+	if (qs) { char* v = query_get(qs, "dir"); if (v) { strncpy(dirparam, v, PATH_MAX - 1); SAFE_FREE(v); } }
+	LOG_INFO("handle_legacy_files requested dir=%s", dirparam[0] ? dirparam : "/");
+	char search[PATH_MAX];
+	if (dirparam[0]) {
+		char dir_copy[PATH_MAX]; strncpy(dir_copy, dirparam, PATH_MAX - 1); dir_copy[PATH_MAX - 1] = 0; normalize_path(dir_copy);
+		while (*dir_copy == DIR_SEP) memmove(dir_copy, dir_copy + 1, strlen(dir_copy));
+		snprintf(search, sizeof(search), "%s%s%s", BASE_DIR, DIR_SEP_STR, dir_copy);
+	}
+	else snprintf(search, sizeof(search), "%s", BASE_DIR);
+	if (!is_dir(search)) { send_text(c, 400, "Bad Request", "Invalid directory", keep_alive); return; }
+
+	size_t cap = 1024; char* out = malloc(cap); size_t used = 0; out[used++] = '['; int first = 1;
+	diriter it; if (!dir_open(&it, search)) { free(out); send_text(c, 500, "Internal Server Error", "opendir failed", keep_alive); return; }
+	const char* name;
+	while ((name = dir_next(&it))) {
+		if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+		char full[PATH_MAX]; path_join(full, search, name);
+		if (!is_file(full)) continue;
+		if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) continue;
+		if (!first) { ensure_json_buf(&out, &cap, used, 2); out[used++] = ','; }
+		first = 0;
+		ensure_json_buf(&out, &cap, used, strlen(name) + strlen(dirparam) + 12);
+		out[used++] = '"';
+		out[used++] = '/'; out[used++] = 'm'; out[used++] = 'e'; out[used++] = 'd'; out[used++] = 'i'; out[used++] = 'a'; out[used++] = '/';
+		if (dirparam[0]) {
+			for (const char* p = dirparam; *p; ++p) out[used++] = (*p == '\\') ? '/' : *p;
+			out[used++] = '/';
+		}
+		for (const char* p = name; *p; ++p) out[used++] = *p;
+		out[used++] = '"';
+	}
+	dir_close(&it);
+	ensure_json_buf(&out, &cap, used, 2); out[used++] = ']';
+	send_header(c, 200, "OK", "application/json; charset=utf-8", (long)used, NULL, 0, keep_alive);
+	send(c, out, (int)used, 0);
+	free(out);
+}
+
+void handle_legacy_move(int c, const char* body, bool keep_alive) {
+	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
+	const char* f_start = strstr(body, "\"fromPath\":\"");
+	const char* t_start = strstr(body, "\"targetFolder\":\"");
+
+	{
+		const char* maybe_from = strstr(body, "\"fromPath\":\"");
+		const char* maybe_to = strstr(body, "\"targetFolder\":\"");
+		if (maybe_from && maybe_to) {
+			const char* mf = maybe_from + strlen("\"fromPath\":\"");
+			const char* mt = maybe_to + strlen("\"targetFolder\":\"");
+			const char* mfe = strchr(mf, '"');
+			const char* mte = strchr(mt, '"');
+			char lf[256] = {0}, lt[256] = {0};
+			if (mfe && (size_t)(mfe - mf) < sizeof(lf)) strncpy(lf, mf, (size_t)(mfe - mf));
+			if (mte && (size_t)(mte - mt) < sizeof(lt)) strncpy(lt, mt, (size_t)(mte - mt));
+			char *p, *q; char prev = 0;
+			p = lf; q = lf; prev = 0;
+			while (*p) { char c = *p++; if (c == '\\') c = '/'; if (c == '/' && prev == '/') continue; *q++ = c; prev = c; }
+			*q = '\0';
+			p = lt; q = lt; prev = 0;
+			while (*p) { char c = *p++; if (c == '\\') c = '/'; if (c == '/' && prev == '/') continue; *q++ = c; prev = c; }
+			*q = '\0';
+			LOG_INFO("handle_legacy_move requested from=%s target=%s", lf, lt);
+		}
+	}
+	if (!f_start || !t_start) { send_text(c, 400, "Bad Request", "missing fields", keep_alive); return; }
+	f_start += strlen("\"fromPath\":\""); t_start += strlen("\"targetFolder\":\"");
+	const char* f_end = strchr(f_start, '"'); const char* t_end = strchr(t_start, '"');
+	if (!f_end || !t_end) { send_text(c, 400, "Bad Request", "invalid data", keep_alive); return; }
+	char from[MAX_PATH]; char target[MAX_PATH]; size_t fl = (size_t)(f_end - f_start); size_t tl = (size_t)(t_end - t_start);
+	if (fl >= sizeof(from)) fl = sizeof(from) - 1; if (tl >= sizeof(target)) tl = sizeof(target) - 1;
+	strncpy(from, f_start, fl); from[fl] = '\0'; strncpy(target, t_start, tl); target[tl] = '\0'; url_decode(from); url_decode(target);
+
+	const char* rel = from;
+	if (strncmp(from, "/media/", 7) == 0) rel = from + 7;
+	char rel_copy[PATH_MAX]; strncpy(rel_copy, rel, sizeof(rel_copy) - 1); rel_copy[sizeof(rel_copy) - 1] = '\0';
+	while (*rel_copy == '/' || *rel_copy == '\\') memmove(rel_copy, rel_copy + 1, strlen(rel_copy));
+	char src[PATH_MAX]; snprintf(src, sizeof(src), "%s%s%s", BASE_DIR, DIR_SEP_STR, rel_copy); normalize_path(src);
+
+	char* fname = strrchr(src, DIR_SEP);
+	if (!fname || *(fname + 1) == '\0') { send_text(c, 400, "Bad Request", "invalid fromPath", keep_alive); return; }
+	fname++;
+	char target_copy[PATH_MAX]; strncpy(target_copy, target, sizeof(target_copy) - 1); target_copy[sizeof(target_copy) - 1] = 0;
+	while (*target_copy == '/' || *target_copy == '\\') memmove(target_copy, target_copy + 1, strlen(target_copy));
+	char destFolder[PATH_MAX]; if (strlen(target_copy) > 0) snprintf(destFolder, sizeof(destFolder), "%s%s%s", BASE_DIR, DIR_SEP_STR, target_copy); else snprintf(destFolder, sizeof(destFolder), "%s", BASE_DIR);
+	normalize_path(destFolder); mk_dir(destFolder);
+	char dest[PATH_MAX]; path_join(dest, destFolder, fname);
+
+	if (platform_move_file(src, dest) == 0) {
+		LOG_INFO("handle_legacy_move: renamed %s -> %s", src, dest);
+		const char* ok = "{\"status\":\"ok\"}";
+		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
+		send(c, ok, (int)strlen(ok), 0);
+		return;
+	}
+	if (platform_copy_file(src, dest) == 0) {
+		LOG_INFO("handle_legacy_move: copied %s -> %s", src, dest);
+		if (platform_file_delete(src) == 0) {
+			LOG_INFO("handle_legacy_move: deleted original %s", src);
+			const char* ok = "{\"status\":\"ok\"}";
+			send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
+			send(c, ok, (int)strlen(ok), 0);
+			return;
+		}
+		LOG_ERROR("handle_legacy_move: copied but failed to delete original %s", src);
+		const char* msg = "{\"error\":\"copied but delete failed\"}";
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
+	LOG_ERROR("handle_legacy_move: failed to move or copy %s -> %s", src, dest);
+	char emsg[128]; snprintf(emsg, sizeof(emsg), "{\"error\":\"move failed\"}");
+	send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(emsg), NULL, 0, keep_alive);
+	send(c, emsg, (int)strlen(emsg), 0);
+}
+
+void handle_legacy_addfolder(int c, const char* body, bool keep_alive) {
+	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
+	LOG_INFO("handle_legacy_addfolder request body=%s", body);
+	const char* n_start = strstr(body, "\"name\":\"");
+	if (!n_start) { send_text(c, 400, "Bad Request", "missing name", keep_alive); return; }
+	n_start += strlen("\"name\":\""); const char* n_end = strchr(n_start, '"'); if (!n_end) { send_text(c, 400, "Bad Request", "invalid name", keep_alive); return; }
+	char folder[PATH_MAX] = { 0 }; size_t nlen = (size_t)(n_end - n_start); if (nlen >= sizeof(folder)) nlen = sizeof(folder) - 1; strncpy(folder, n_start, nlen); folder[nlen] = '\0'; url_decode(folder);
+	char target[PATH_MAX] = { 0 }; const char* t_start = strstr(body, "\"target\":\""); if (t_start) { t_start += strlen("\"target\":\""); const char* t_end = strchr(t_start, '"'); if (t_end) { size_t tlen = (size_t)(t_end - t_start); if (tlen >= sizeof(target)) tlen = sizeof(target) - 1; strncpy(target, t_start, tlen); target[tlen] = '\0'; url_decode(target); } }
+	char target_copy[PATH_MAX]; strncpy(target_copy, target, sizeof(target_copy) - 1); target_copy[sizeof(target_copy) - 1] = 0; while (*target_copy == '/' || *target_copy == '\\') memmove(target_copy, target_copy + 1, strlen(target_copy));
+	char dest[PATH_MAX]; if (strlen(target_copy) > 0) snprintf(dest, sizeof(dest), "%s%s%s%s%s", BASE_DIR, DIR_SEP_STR, target_copy, DIR_SEP_STR, folder); else snprintf(dest, sizeof(dest), "%s%s%s", BASE_DIR, DIR_SEP_STR, folder);
+	normalize_path(dest); mk_dir(dest);
+	if (is_dir(dest)) {
+		LOG_INFO("handle_legacy_addfolder created folder: %s", dest);
+		char fg_path[PATH_MAX];
+		path_join(fg_path, dest, ".fg");
+		FILE* fgf = fopen(fg_path, "wb");
+		if (fgf) fclose(fgf);
+		char msg[1024];
+		int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folder_added\",\"path\":\"%s\"}", dest);
+		if (rr > 0) websocket_broadcast_topic(dest, msg);
+		const char* ok = "{\"status\":\"ok\"}";
+		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
+		send(c, ok, (int)strlen(ok), 0);
+		return;
+	}
+	LOG_ERROR("handle_legacy_addfolder mkdir failed for: %s", dest);
+	const char msg[128] = "{\"error\":\"mkdir failed\"}";
+	send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+	send(c, msg, (int)strlen(msg), 0);
+}
 typedef enum {
 	GET_SIMPLE, GET_QS, POST_BODY
 } handler_type_t;
@@ -844,14 +1056,23 @@ static void serve_file(int c, const char* base_dir, const char* sub_path, const 
 	else
 		send_text(c, 404, "Not Found", "Not found", keep_alive);
 }
-void handle_single_request(int c, char* headers, char* body, size_t headers_len, size_t body_len, bool keep_alive) {
+int handle_single_request(int c, char* headers, char* body, size_t headers_len, size_t body_len, bool keep_alive) {
 	(void)headers_len;
 
 	g_request_headers = headers;
 	char method[8] = { 0 }, url[PATH_MAX] = { 0 };
-	if (sscanf(headers, "%7s %4095s", method, url) != 2) {
-		send_text(c, 400, "Bad Request", "Malformed request", false);
-		return;
+	{
+		char* p = headers;
+		char* sp = strchr(p, ' ');
+		if (!sp) { send_text(c, 400, "Bad Request", "Malformed request", false); return 0; }
+		size_t mlen = (size_t)(sp - p);
+		if (mlen >= sizeof(method)) mlen = sizeof(method) - 1;
+		memcpy(method, p, mlen); method[mlen] = '\0';
+		char* p2 = sp + 1;
+		char* sp2 = strchr(p2, ' ');
+		size_t ulen = sp2 ? (size_t)(sp2 - p2) : strlen(p2);
+		if (ulen >= sizeof(url)) ulen = sizeof(url) - 1;
+		memcpy(url, p2, ulen); url[ulen] = '\0';
 	}
 
 	char* qs = strchr(url, '?');
@@ -860,8 +1081,21 @@ void handle_single_request(int c, char* headers, char* body, size_t headers_len,
 	STRCPY(g_request_url, url);
 	char* range = get_header_value(headers, "Range:");
 
+	char* upgrade = get_header_value(headers, "Upgrade:");
+
+	char* connection_hdr = get_header_value(headers, "Connection:");
+	if (upgrade && connection_hdr && strcasecmp(upgrade, "websocket") == 0) {
+		const char* p = connection_hdr; int found = 0;
+		while (*p) { if (tolower((unsigned char)*p) == 'u' && strncasecmp(p, "upgrade", 7) == 0) { found = 1; break; } p++; }
+		if (found) { if (websocket_register_socket(c, headers)) return 1; }
+	}
+
 
 	static const route_t routes[] = {
+		{ "/folders", GET_SIMPLE, handle_legacy_folders },
+		{ "/files", GET_QS, handle_legacy_files },
+		{ "/move", POST_BODY, handle_legacy_move },
+		{ "/addfolder", POST_BODY, handle_legacy_addfolder },
 		{ "/api/tree", GET_SIMPLE, handle_api_tree },
 		{ "/api/folders/list", GET_SIMPLE, handle_api_list_folders },
 		{ "/api/folders", GET_QS, handle_api_folders },
@@ -871,40 +1105,57 @@ void handle_single_request(int c, char* headers, char* body, size_t headers_len,
 	};
 	static const static_route_t static_routes[] = {
 		{ "/images/", BASE_DIR, true },
+		{ "/media/", BASE_DIR, true },
 		{ "/js/", JS_DIR, false },
 		{ "/css/", CSS_DIR, false },
 	};
+
+	if (strcmp(url, "/mover") == 0 || strcmp(url, "/mover/") == 0) {
+		char path[1024];
+		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "mover.html", VIEWS_DIR);
+		LOG_INFO("Serving mover page: %s", path);
+		if (!is_file(path)) { send_text(c, 404, "Not Found", "mover.html not found", keep_alive); return 0; }
+		FILE* f = fopen(path, "rb");
+		if (!f) { LOG_ERROR("Failed to open mover.html: %s", path); send_text(c, 500, "Internal Server Error", "failed to open mover.html", keep_alive); return 0; }
+		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
+		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); return 0; }
+		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
+		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
+		send(c, buf, (int)fsz, 0);
+		free(buf);
+		return 0;
+	}
 	for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
 		if (strcmp(url, routes[i].path) == 0) {
 			if (strcmp(method, "GET") == 0 && (routes[i].type == GET_SIMPLE || routes[i].type == GET_QS)) {
 				if (routes[i].type == GET_SIMPLE) ((void (*)(int, bool))routes[i].handler)(c, keep_alive);
 				else ((void (*)(int, char*, bool))routes[i].handler)(c, qs, keep_alive);
-				return;
+				return 0;
 			}
 			if (strcmp(method, "POST") == 0 && routes[i].type == POST_BODY) {
-				if (!body || body_len == 0) { send_text(c, 400, "Bad Request", "Empty POST body", false); return; }
+				if (!body || body_len == 0) { send_text(c, 400, "Bad Request", "Empty POST body", false); return 0; }
 				char* body_copy = malloc(body_len + 1);
 				memcpy(body_copy, body, body_len); body_copy[body_len] = '\0';
 				((void (*)(int, const char*, bool))routes[i].handler)(c, body_copy, keep_alive);
 				free(body_copy);
-				return;
+				return 0;
 			}
 			send_text(c, 405, "Method Not Allowed", "Method not supported for this endpoint", false);
-			return;
+			return 0;
 		}
 	}
 	if (strcmp(method, "GET") != 0) {
 		send_text(c, 405, "Method Not Allowed", "Only GET and POST supported", false);
-		return;
+		return 0;
 	}
 	if (strcmp(url, "/") == 0) {
 		char path[1024];
 		snprintf(path, sizeof(path), "%s/index.html", VIEWS_DIR);
-		if (!is_file(path)) { send_text(c, 404, "Not Found", "index.html not found", keep_alive); return; }
+		if (!is_file(path)) { send_text(c, 404, "Not Found", "index.html not found", keep_alive); return 0; }
 		FILE* f = fopen(path, "rb");
-		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open index.html", keep_alive); return; }
+		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open index.html", keep_alive); return 0; }
 		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); return; }
+		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); return 0; }
 		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
 		char dirparam[PATH_MAX] = { 0 }; int page = 1;
 		if (qs) {
@@ -936,25 +1187,26 @@ void handle_single_request(int c, char* headers, char* body, size_t headers_len,
 				send(c, buf, (int)fsz, 0);
 			}
 			free(frag);
+			return 0;
 		}
 		else {
 			send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 			send(c, buf, (int)fsz, 0);
 		}
 		free(buf);
-		return;
+		return 0;
 	}
 	for (size_t i = 0; i < sizeof(static_routes) / sizeof(static_routes[0]); i++) {
 		size_t len = strlen(static_routes[i].prefix);
 		if (strncmp(url, static_routes[i].prefix, len) == 0) {
 			serve_file(c, static_routes[i].base_dir, url + len, static_routes[i].allow_range ? range : NULL, keep_alive);
-			return;
+			return 0;
 		}
 	}
 	if (strcmp(url, "/bundled") == 0) {
 		if (is_file(BUNDLED_FILE)) send_file_stream(c, BUNDLED_FILE, NULL, keep_alive);
 		else send_text(c, 404, "Not Found", "Not found", keep_alive);
-		return;
+		return 0;
 	}
 
 

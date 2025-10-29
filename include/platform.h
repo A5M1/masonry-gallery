@@ -41,6 +41,6 @@ bool platform_is_file(const char* p);
 bool platform_is_dir(const char* p);
 bool platform_real_path(const char* in, char* out);
 bool platform_safe_under(const char* base_real, const char* path_real);
-
+int platform_copy_file(const char* src, const char* dst);
 int platform_get_cpu_count(void);
 long platform_get_physical_memory_mb(void);

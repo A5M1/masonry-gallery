@@ -95,6 +95,7 @@ static void* worker_thread(void* arg) {
         if (c < 0) break;
         size_t total_read = 0;
         int content_length = 0;
+        int keep_socket = 0;
         bool headers_done = false;
         char* headers_end = NULL;
         int broken = 0;
@@ -209,13 +210,13 @@ static void* worker_thread(void* arg) {
                 }
             }
 
-            handle_single_request(c, headers_copy, body, headers_len, content_length, true);
+            int keep_socket = handle_single_request(c, headers_copy, body, headers_len, content_length, true);
 
             if (headers_copy != stack_headers) free(headers_copy);
             if (body != stack_body && body != NULL) free(body);
         }
 
-        SOCKET_CLOSE(c);
+        if (!keep_socket) SOCKET_CLOSE(c);
     }
 
     free(buffer);

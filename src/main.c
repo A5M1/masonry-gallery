@@ -10,6 +10,7 @@
 #include "thumbs.h"
 #include "exception_handler.h"
 #include "platform.h"
+#include "websocket.h"
 
 int main(int argc, char** argv) {
     log_init();
@@ -18,6 +19,7 @@ int main(int argc, char** argv) {
     LOG_DEBUG("startup: after log_init");
     platform_init_network();
     LOG_DEBUG("startup: after INIT_NETWORK");
+    websocket_init();
     derive_paths(argc > 0 ? argv[0] : NULL);
     LOG_DEBUG("startup: after derive_paths");
     load_config();

@@ -9,6 +9,7 @@
 #include "api_handlers.h"
 #include "config.h"
 #include "common.h"
+#include "websocket.h"
 atomic_int ffmpeg_active = ATOMIC_VAR_INIT(0);
 static atomic_int magick_active = ATOMIC_VAR_INIT(0);
 #define MAX_MAGICK 2
@@ -809,6 +810,13 @@ static void* thumb_job_thread(void* args) {
     char* bn = strrchr(job->output, DIR_SEP);
     if (bn) bn = bn + 1; else bn = job->output;
     thumbdb_set(bn, job->input);
+    {
+        char parent[PATH_MAX]; parent[0] = '\0';
+        get_parent_dir(job->input, parent, sizeof(parent));
+        char msg[1024];
+        int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\"}", job->input, bn);
+        if (r > 0) websocket_broadcast_topic(parent[0] ? parent : NULL, msg);
+    }
     free(job);
     atomic_fetch_sub(&thumb_workers_active, 1);
     return NULL;
