@@ -264,7 +264,7 @@ int websocket_register_socket(int client_socket, char* request_headers) {
         return 0;
     }
 
-    LOG_INFO("WebSocket handshake received, Sec-WebSocket-Key=%.64s", key);
+    LOG_DEBUG("WebSocket handshake received, Sec-WebSocket-Key=%.64s", key);
 
     const char* guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     size_t total = strlen(key) + strlen(guid);
@@ -301,7 +301,7 @@ int websocket_register_socket(int client_socket, char* request_headers) {
         return 0;
     }
 
-    LOG_INFO("WebSocket handshake accepted, client_socket=%d", client_socket);
+    LOG_DEBUG("WebSocket handshake accepted, client_socket=%d", client_socket);
 
     int* arg = malloc(sizeof(int));
     if (!arg) { remove_client_socket(client_socket); SOCKET_CLOSE(client_socket); return 0; }
