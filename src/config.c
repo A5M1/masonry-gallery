@@ -7,6 +7,7 @@
 
 static char** gallery_folders = NULL;
 static size_t gallery_folder_count = 0;
+int server_port = 3000;
 
 void load_config(void) {
 	FILE* f = fopen(CONFIG_FILE, "r");
@@ -19,14 +20,31 @@ void load_config(void) {
 	char line[PATH_MAX];
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\n")] = '\0';
-		if (line[0] != '#' && line[0] != '\0') {
-			if (is_dir(line)) {
-				add_gallery_folder(line);
-				LOG_INFO("Loaded gallery folder: %s", line);
+		char* s = line;
+		while (*s && isspace((unsigned char)*s)) s++;
+		if (*s == '#' || *s == '\0') continue;
+		char* eq = strchr(s, '=');
+		if (eq) {
+			*eq = '\0';
+			char* key = s; char* val = eq + 1;
+			while (*key && isspace((unsigned char)*key)) key++;
+			while (*val && isspace((unsigned char)*val)) val++;
+			if (ascii_stricmp(key, "port") == 0) {
+				int p = atoi(val);
+				if (p > 0 && p < 65536) server_port = p;
+				LOG_INFO("Loaded server port from config: %d", server_port);
 			}
 			else {
-				LOG_WARN("Config contains invalid directory: %s", line);
+				LOG_WARN("Unknown config key: %s", key);
 			}
+			continue;
+		}
+		if (is_dir(s)) {
+			add_gallery_folder(s);
+			LOG_INFO("Loaded gallery folder: %s", s);
+		}
+		else {
+			LOG_WARN("Config contains invalid directory: %s", s);
 		}
 	}
 
@@ -44,7 +62,10 @@ void save_config(void) {
 	}
 
 	fprintf(f, "# Galleria configuration file\n");
-	fprintf(f, "# Each line should contain a path to a gallery folder\n\n");
+	fprintf(f, "# Key=value entries supported (e.g. port=3000)\n");
+	fprintf(f, "# Each other non-comment line should contain a path to a gallery folder\n\n");
+
+	fprintf(f, "port=%d\n", server_port);
 
 	for (size_t i = 0; i < gallery_folder_count; i++) {
 		fprintf(f, "%s\n", gallery_folders[i]);

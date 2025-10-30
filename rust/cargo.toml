@@ -3,13 +3,15 @@ name = "galleria"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
-windows-subsystem = "console"  
 
 [dependencies]
-wry = "0.28"
-winit = "0.28"
-anyhow = "1.0"
-dirs = "4.0"
+wry = "0.38"
+egui = { version = "0.32", features = ["serde"] }
+egui_winit_platform = "0.27"
+dirs = "5.0"
+tao = "0.34" 
+winit = "0.30"
+serde_json = "1.0"
 
 [build-dependencies]
 winres = "0.1"
@@ -17,3 +19,4 @@ winres = "0.1"
 [[bin]]
 name = "galleria-view"
 path = "src/main.rs"
+windows-subsystem = "console"

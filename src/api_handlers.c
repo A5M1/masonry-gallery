@@ -503,16 +503,30 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 				char* if_none = get_header_value(g_request_headers, "If-None-Match:");
 				if (if_none && strstr(if_none, etag)) {
 					send_header(c, 304, "Not Modified", "text/plain; charset=utf-8", 0, NULL, 0, keep_alive);
-					free(files);
+					if (files) {
+						for (size_t ii = 0; ii < n; ++ii) free(files[ii]);
+						free(files);
+						files = NULL;
+					}
+					SAFE_FREE(if_none);
 					return;
 				}
+				SAFE_FREE(if_none);
 				send_header(c, 200, "OK", "text/html; charset=utf-8", (long)stc.st_size, NULL, 0, keep_alive);
 				send_file_stream(c, cache_path, NULL, keep_alive);
-				free(files);
+				if (files) {
+					for (size_t ii = 0; ii < n; ++ii) free(files[ii]);
+					free(files);
+					files = NULL;
+				}
 				return;
 			}
 
-			free(files);
+			if (files) {
+				for (size_t ii = 0; ii < n; ++ii) free(files[ii]);
+				free(files);
+				files = NULL;
+			}
 			return;
 		}
 		size_t hcap = 8192;
@@ -829,7 +843,7 @@ void handle_api_list_folders(int c, bool keep_alive) {
 	free(buf);
 }
 void handle_legacy_folders(int c, bool keep_alive) {
-    LOG_INFO("handle_legacy_folders requested");
+    LOG_DEBUG("handle_legacy_folders requested");
 	const int STACK_INIT = 64; const int SUBDIR_INIT = 32; const int STACK_GROW = 64;
 	char** stack = malloc(STACK_INIT * sizeof(char*));
 	if (!stack) { send_text(c, 500, "Internal Server Error", "Memory error", keep_alive); return; }
@@ -895,7 +909,7 @@ void handle_legacy_folders(int c, bool keep_alive) {
 void handle_legacy_files(int c, char* qs, bool keep_alive) {
 	char dirparam[PATH_MAX] = { 0 };
 	if (qs) { char* v = query_get(qs, "dir"); if (v) { strncpy(dirparam, v, PATH_MAX - 1); SAFE_FREE(v); } }
-	LOG_INFO("handle_legacy_files requested dir=%s", dirparam[0] ? dirparam : "/");
+	LOG_DEBUG("handle_legacy_files requested dir=%s", dirparam[0] ? dirparam : "/");
 	char search[PATH_MAX];
 	if (dirparam[0]) {
 		char dir_copy[PATH_MAX]; strncpy(dir_copy, dirparam, PATH_MAX - 1); dir_copy[PATH_MAX - 1] = 0; normalize_path(dir_copy);
@@ -1037,7 +1051,7 @@ void handle_legacy_addfolder(int c, const char* body, bool keep_alive) {
 		FILE* fgf = fopen(fg_path, "wb");
 		if (fgf) fclose(fgf);
 		char msg[1024];
-		int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folder_added\",\"path\":\"%s\"}", dest);
+		int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folderAdded\",\"path\":\"%s\"}", dest);
 		if (rr > 0) websocket_broadcast_topic(dest, msg);
 		const char* ok = "{\"status\":\"ok\"}";
 		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
@@ -1101,13 +1115,21 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 	char* connection_hdr = get_header_value(headers, "Connection:");
 
 	if (upgrade || connection_hdr) {
-		LOG_INFO("Incoming request headers: Upgrade=%s Connection=%s", upgrade ? upgrade : "(null)", connection_hdr ? connection_hdr : "(null)");
+		LOG_DEBUG("Incoming request headers: Upgrade=%s Connection=%s", upgrade ? upgrade : "(null)", connection_hdr ? connection_hdr : "(null)");
 	}
 	if (upgrade && connection_hdr && strcasecmp(upgrade, "websocket") == 0) {
 		const char* p = connection_hdr; int found = 0;
 		while (*p) { if (tolower((unsigned char)*p) == 'u' && strncasecmp(p, "upgrade", 7) == 0) { found = 1; break; } p++; }
-		if (found) { if (websocket_register_socket(c, headers)) return 1; }
+		if (found) {
+			if (websocket_register_socket(c, headers)) {
+				SAFE_FREE(upgrade);
+				SAFE_FREE(connection_hdr);
+				return 1;
+			}
+		}
 	}
+	SAFE_FREE(upgrade);
+	SAFE_FREE(connection_hdr);
 
 
 	static const route_t routes[] = {
@@ -1133,15 +1155,16 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		char path[1024];
 		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "mover.html", VIEWS_DIR);
 		LOG_INFO("Serving mover page: %s", path);
-		if (!is_file(path)) { send_text(c, 404, "Not Found", "mover.html not found", keep_alive); return 0; }
+		if (!is_file(path)) { send_text(c, 404, "Not Found", "mover.html not found", keep_alive); SAFE_FREE(range); return 0; }
 		FILE* f = fopen(path, "rb");
-		if (!f) { LOG_ERROR("Failed to open mover.html: %s", path); send_text(c, 500, "Internal Server Error", "failed to open mover.html", keep_alive); return 0; }
+		if (!f) { LOG_ERROR("Failed to open mover.html: %s", path); send_text(c, 500, "Internal Server Error", "failed to open mover.html", keep_alive); SAFE_FREE(range); return 0; }
 		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); return 0; }
+		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); SAFE_FREE(range); return 0; }
 		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
 		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 		send(c, buf, (int)fsz, 0);
 		free(buf);
+		SAFE_FREE(range);
 		return 0;
 	}
 	for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
@@ -1149,10 +1172,11 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 			if (strcmp(method, "GET") == 0 && (routes[i].type == GET_SIMPLE || routes[i].type == GET_QS)) {
 				if (routes[i].type == GET_SIMPLE) ((void (*)(int, bool))routes[i].handler)(c, keep_alive);
 				else ((void (*)(int, char*, bool))routes[i].handler)(c, qs, keep_alive);
+				SAFE_FREE(range);
 				return 0;
 			}
 			if (strcmp(method, "POST") == 0 && routes[i].type == POST_BODY) {
-				if (!body || body_len == 0) { send_text(c, 400, "Bad Request", "Empty POST body", false); return 0; }
+				if (!body || body_len == 0) { send_text(c, 400, "Bad Request", "Empty POST body", false); SAFE_FREE(range); return 0; }
 				char* body_copy = malloc(body_len + 1);
 				memcpy(body_copy, body, body_len); body_copy[body_len] = '\0';
 				((void (*)(int, const char*, bool))routes[i].handler)(c, body_copy, keep_alive);
@@ -1160,21 +1184,23 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 				return 0;
 			}
 			send_text(c, 405, "Method Not Allowed", "Method not supported for this endpoint", false);
+			SAFE_FREE(range);
 			return 0;
 		}
 	}
 	if (strcmp(method, "GET") != 0) {
 		send_text(c, 405, "Method Not Allowed", "Only GET and POST supported", false);
+		SAFE_FREE(range);
 		return 0;
 	}
 	if (strcmp(url, "/") == 0) {
 		char path[1024];
 		snprintf(path, sizeof(path), "%s/index.html", VIEWS_DIR);
-		if (!is_file(path)) { send_text(c, 404, "Not Found", "index.html not found", keep_alive); return 0; }
+		if (!is_file(path)) { send_text(c, 404, "Not Found", "index.html not found", keep_alive); SAFE_FREE(range); return 0; }
 		FILE* f = fopen(path, "rb");
-		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open index.html", keep_alive); return 0; }
+		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open index.html", keep_alive); SAFE_FREE(range); return 0; }
 		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); return 0; }
+		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); SAFE_FREE(range); return 0; }
 		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
 		char dirparam[PATH_MAX] = { 0 }; int page = 1;
 		if (qs) {
@@ -1205,29 +1231,35 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 				send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 				send(c, buf, (int)fsz, 0);
 			}
-			free(frag);
-			return 0;
+					free(frag);
+					SAFE_FREE(range);
+					return 0;
 		}
 		else {
 			send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 			send(c, buf, (int)fsz, 0);
 		}
 		free(buf);
+		SAFE_FREE(range);
 		return 0;
 	}
 	for (size_t i = 0; i < sizeof(static_routes) / sizeof(static_routes[0]); i++) {
 		size_t len = strlen(static_routes[i].prefix);
 		if (strncmp(url, static_routes[i].prefix, len) == 0) {
 			serve_file(c, static_routes[i].base_dir, url + len, static_routes[i].allow_range ? range : NULL, keep_alive);
+			SAFE_FREE(range);
 			return 0;
 		}
 	}
 	if (strcmp(url, "/bundled") == 0) {
 		if (is_file(BUNDLED_FILE)) send_file_stream(c, BUNDLED_FILE, NULL, keep_alive);
 		else send_text(c, 404, "Not Found", "Not found", keep_alive);
+		SAFE_FREE(range);
 		return 0;
 	}
 
 
 	send_text(c, 404, "Not Found", "Not found", keep_alive);
+	SAFE_FREE(range);
+	return 0;
 }

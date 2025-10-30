@@ -4,12 +4,18 @@
 #include "http.h"
 #include "logging.h"
 #include "tinyjson_combined.h"
+#include "session_store.h"
+#include "utils.h"
+#include "directory.h"
+#include "platform.h"
 
 #define MAX_WS_CLIENTS 256
 
 typedef struct {
     int sock;
     char topic[PATH_MAX];
+    char session_id[64];
+    uint64_t last_sent_id;
 } ws_client_t;
 
 static ws_client_t ws_clients[MAX_WS_CLIENTS];
@@ -30,6 +36,8 @@ static int add_client(int s) {
         if (ws_clients[i].sock == -1) {
             ws_clients[i].sock = s;
             ws_clients[i].topic[0] = '\0';
+            ws_clients[i].session_id[0] = '\0';
+            ws_clients[i].last_sent_id = 0;
             ws_count++;
             ws_unlock();
             return 0;
@@ -197,8 +205,99 @@ static void* websocket_client_thread(void* arg) {
             if (payload != small_buf) free(payload);
 
             if (fin) {
-                if (strstr((char*)accum, "subscribe"))
-                    ws_update_topic(c, (char*)accum);
+                    if (strstr((char*)accum, "subscribe")) {
+                        ws_update_topic(c, (char*)accum);
+                        const char* sstart = strstr((char*)accum, "\"session\"");
+                        if (!sstart) sstart = strstr((char*)accum, "\"session_id\"");
+                        if (sstart) {
+                            const char* colon = strchr(sstart, ':');
+                            if (colon) {
+                                const char* v = colon + 1;
+                                while (*v && isspace((unsigned char)*v)) v++;
+                                if (*v == '"') {
+                                    v++;
+                                    const char* e = strchr(v, '"');
+                                    if (e) {
+                                        size_t L = (size_t)(e - v);
+                                        char sid[64]; if (L >= sizeof(sid)) L = sizeof(sid) - 1; memcpy(sid, v, L); sid[L] = '\0';
+                                        ws_lock();
+                                        for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
+                                            if (ws_clients[i].sock == c) {
+                                                strncpy(ws_clients[i].session_id, sid, sizeof(ws_clients[i].session_id)-1);
+                                                ws_clients[i].session_id[sizeof(ws_clients[i].session_id)-1] = '\0';
+                                                ws_clients[i].last_sent_id = session_get_last(sid);
+                                                break;
+                                            }
+                                        }
+                                        ws_unlock();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    /* handle addFolder action sent from client over websocket */
+                    if (strstr((char*)accum, "\"action\"") && strstr((char*)accum, "addFolder")) {
+                        const char* body = (char*)accum;
+                        const char* n_start = strstr(body, "\"name\":");
+                        if (n_start) {
+                            n_start = strchr(n_start, ':');
+                            if (n_start) {
+                                n_start++;
+                                while (*n_start && isspace((unsigned char)*n_start)) n_start++;
+                                if (*n_start == '"') {
+                                    n_start++;
+                                    const char* n_end = strchr(n_start, '"');
+                                    if (n_end) {
+                                        char folder[PATH_MAX] = {0};
+                                        size_t nlen = (size_t)(n_end - n_start);
+                                        if (nlen >= sizeof(folder)) nlen = sizeof(folder) - 1;
+                                        memcpy(folder, n_start, nlen);
+                                        folder[nlen] = '\0';
+                                        url_decode(folder);
+
+                                        char target[PATH_MAX] = {0};
+                                        const char* t_start = strstr(body, "\"target\":");
+                                        if (t_start) {
+                                            t_start = strchr(t_start, ':');
+                                            if (t_start) {
+                                                t_start++;
+                                                while (*t_start && isspace((unsigned char)*t_start)) t_start++;
+                                                if (*t_start == '"') {
+                                                    t_start++;
+                                                    const char* t_end = strchr(t_start, '"');
+                                                    if (t_end) {
+                                                        size_t tlen = (size_t)(t_end - t_start);
+                                                        if (tlen >= sizeof(target)) tlen = sizeof(target) - 1;
+                                                        memcpy(target, t_start, tlen);
+                                                        target[tlen] = '\0';
+                                                        url_decode(target);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        char target_copy[PATH_MAX]; strncpy(target_copy, target, sizeof(target_copy) - 1); target_copy[sizeof(target_copy) - 1] = '\0';
+                                        while (*target_copy == '/' || *target_copy == '\\') memmove(target_copy, target_copy + 1, strlen(target_copy));
+                                        char dest[PATH_MAX];
+                                        if (strlen(target_copy) > 0) snprintf(dest, sizeof(dest), "%s%s%s%s%s", BASE_DIR, DIR_SEP_STR, target_copy, DIR_SEP_STR, folder);
+                                        else snprintf(dest, sizeof(dest), "%s%s%s", BASE_DIR, DIR_SEP_STR, folder);
+                                        normalize_path(dest);
+                                        mk_dir(dest);
+                                        if (is_dir(dest)) {
+                                            char fg_path[PATH_MAX]; path_join(fg_path, dest, ".fg");
+                                            FILE* fgf = fopen(fg_path, "wb"); if (fgf) fclose(fgf);
+                                            char msg[1024]; int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folderAdded\",\"path\":\"%s\"}", dest);
+                                            if (rr > 0) websocket_broadcast(msg);
+                                        } else {
+                                            char emsg[256]; int rr = snprintf(emsg, sizeof(emsg), "{\"type\":\"folderAdded\",\"error\":\"mkdir failed\"}"); (void)rr;
+                                            websocket_broadcast(emsg);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                 free(accum);
                 accum = NULL;
@@ -227,6 +326,7 @@ int websocket_init(void) {
     }
     ws_count = 0;
     thread_mutex_init(&ws_mutex);
+    session_store_init();
     return 0;
 }
 
@@ -237,6 +337,8 @@ int websocket_register_socket(int client_socket, char* request_headers) {
     }
 
     char* key = get_header_value(request_headers, "Sec-WebSocket-Key:");
+    int key_alloc = 0;
+    if (key) key_alloc = 1;
     if (!key) {
         char* p = request_headers;
         while (*p) {
@@ -251,6 +353,7 @@ int websocket_register_socket(int client_socket, char* request_headers) {
                 memcpy(inline_key, v, len);
                 inline_key[len] = '\0';
                 key = inline_key;
+                key_alloc = 0;
                 break;
             }
             char* nl = strchr(p, '\n');
@@ -261,6 +364,7 @@ int websocket_register_socket(int client_socket, char* request_headers) {
 
     if (!key || !*key) {
         LOG_WARN("WebSocket register: Sec-WebSocket-Key not found in provided headers");
+        if (key_alloc) free(key);
         return 0;
     }
 
@@ -270,9 +374,13 @@ int websocket_register_socket(int client_socket, char* request_headers) {
     size_t total = strlen(key) + strlen(guid);
 
     char* combined = malloc(total + 1);
-    if (!combined) return 0;
+    if (!combined) {
+        if (key_alloc) free(key);
+        return 0;
+    }
 
     sprintf(combined, "%s%s", key, guid);
+    if (key_alloc) { free(key); key = NULL; key_alloc = 0; }
 
     uint8_t sha[20];
     if (crypto_sha1(combined, total, sha) != 0) {
@@ -308,14 +416,19 @@ int websocket_register_socket(int client_socket, char* request_headers) {
     *arg = client_socket;
     thread_create_detached(websocket_client_thread, arg);
 
-    char jb[128];
+    char* session = session_create();
+    if (!session) session = strdup("");
+    char jb[256];
     size_t rem = sizeof(jb);
     char* p = jb;
     p = json_objOpen(p, NULL, &rem);
     p = json_str(p, "type", "welcome", &rem);
     p = json_str(p, "message", "connected", &rem);
+    if (session && session[0]) p = json_str(p, "session", session, &rem);
     p = json_objClose(p, &rem);
     send_ws_frame_opcode(client_socket, 0x1, (const unsigned char*)jb, p - jb);
+
+    if (session) free(session);
 
     return 1;
 }
@@ -323,29 +436,69 @@ int websocket_register_socket(int client_socket, char* request_headers) {
 void websocket_broadcast_topic(const char* topic, const char* msg) {
     if (!msg) return;
 
-    size_t len = strlen(msg);
+    static _Atomic(uint64_t) g_msg_id = 0;
+    uint64_t id = atomic_fetch_add(&g_msg_id, 1) + 1;
+
+    char wrapped[4096];
+    const char* s = msg;
+    size_t len = 0;
+
+    // Skip leading whitespace
+    while (*s && isspace((unsigned char)*s)) s++;
+
+    if (*s == '{') {
+        const char* e = msg + strlen(msg) - 1;
+        while (e > s && isspace((unsigned char)*e)) e--;
+
+        if (*e == '}') {
+            size_t inner_len = (size_t)(e - s - 0);
+            if (inner_len + 128 < sizeof(wrapped)) {
+                size_t off = snprintf(wrapped, sizeof(wrapped), "{\"id\":%llu,", (unsigned long long)id);
+                size_t copy_len = (size_t)(e - s - 0);
+                if (copy_len > 1) {
+                    memcpy(wrapped + off, s + 1, copy_len - 1);
+                    off += copy_len - 1;
+                }
+                wrapped[off++] = '}';
+                wrapped[off] = '\0';
+                len = off;
+                s = wrapped;
+            }
+        }
+    }
+
+    if (len == 0) len = strlen(s); // fallback if not wrapped
+
     ws_lock();
 
     for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
-        int s = ws_clients[i].sock;
-        if (s == -1) continue;
+        int sock = ws_clients[i].sock;
+        if (sock == -1) continue;
 
+        // Check topic filter
         if (topic && ws_clients[i].topic[0]) {
-            if (!strstr(ws_clients[i].topic, topic) && !strstr(topic, ws_clients[i].topic))
+            if (!strstr(ws_clients[i].topic, topic) && !strstr(topic, ws_clients[i].topic)) {
                 continue;
+            }
         }
 
-        if (send_ws_frame_opcode(s, 0x1, (const unsigned char*)msg, len) != 0) {
-            SOCKET_CLOSE(s);
+        if (ws_clients[i].last_sent_id >= id) continue;
+
+        if (send_ws_frame_opcode(sock, 0x1, (const unsigned char*)s, len) != 0) {
+            SOCKET_CLOSE(sock);
             ws_clients[i].sock = -1;
             ws_clients[i].topic[0] = '\0';
+            ws_clients[i].session_id[0] = '\0';
+            ws_clients[i].last_sent_id = 0;
             ws_count--;
+        } else {
+            ws_clients[i].last_sent_id = id;
+            if (ws_clients[i].session_id[0]) session_set_last(ws_clients[i].session_id, id);
         }
     }
 
     ws_unlock();
 }
-
 void websocket_broadcast(const char* msg) {
     websocket_broadcast_topic(NULL, msg);
 }

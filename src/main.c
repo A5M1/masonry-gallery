@@ -26,7 +26,8 @@ int main(int argc, char** argv) {
     LOG_DEBUG("startup: after load_config");
     if (platform_maximize_window() == 0) {
         LOG_DEBUG("startup: platform_maximize_window succeeded");
-    } else {
+    }
+    else {
         LOG_DEBUG("startup: platform_maximize_window not available or failed");
     }
     LOG_DEBUG("Registering gallery folder watchers and starting thumbnail maintenance on startup...");
@@ -37,7 +38,8 @@ int main(int argc, char** argv) {
         LOG_DEBUG("startup: get_gallery_folders returned count=%zu", count);
         if (count == 0) {
             LOG_WARN("No gallery folders configured.");
-        } else {
+        }
+        else {
             LOG_DEBUG("Registering directory watcher for %zu folder(s)", count);
             for (size_t i = 0; i < count; ++i) {
                 LOG_DEBUG("startup: registering watcher for folder[%zu]=%s", i, folders[i]);

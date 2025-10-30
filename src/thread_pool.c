@@ -154,9 +154,11 @@ static void* worker_thread(void* arg) {
                                 content_length = atoi(cl);
                                 if (content_length < 0 || content_length > 10*1024*1024) {
                                     LOG_WARN("Invalid content length: %d", content_length);
+                                    SAFE_FREE(cl);
                                     broken = 1;
                                     break;
                                 }
+                                SAFE_FREE(cl);
                             }
                         }
                     }
