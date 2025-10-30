@@ -41,6 +41,11 @@ static int resolve_and_validate_target(const char* base_dir, const char* dirpara
 
 bool has_media_rec(const char* dir) {
 	if (has_nogallery(dir)) return false;
+	{
+		char fgpath[PATH_MAX];
+		path_join(fgpath, dir, ".fg");
+		if (is_file(fgpath)) return true;
+	}
 	diriter it;
 	if (!dir_open(&it, dir)) return false;
 	const char* name;
@@ -846,7 +851,7 @@ void handle_legacy_folders(int c, bool keep_alive) {
 			if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
 			char full[PATH_MAX]; path_join(full, d, name);
 			if (is_file(full)) {
-				if (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS)) has_media = 1;
+				if (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS) || strcmp(name, ".fg") == 0) has_media = 1;
 			}
 			else if (is_dir(full)) {
 				if (subcnt >= subcap) { subcap += STACK_GROW; char** tmp = realloc(subdirs, subcap * sizeof(char*)); if (!tmp) break; subdirs = tmp; }
@@ -914,8 +919,18 @@ void handle_legacy_files(int c, char* qs, bool keep_alive) {
 		out[used++] = '"';
 		out[used++] = '/'; out[used++] = 'm'; out[used++] = 'e'; out[used++] = 'd'; out[used++] = 'i'; out[used++] = 'a'; out[used++] = '/';
 		if (dirparam[0]) {
-			for (const char* p = dirparam; *p; ++p) out[used++] = (*p == '\\') ? '/' : *p;
-			out[used++] = '/';
+			char clean[PATH_MAX]; size_t wi = 0;
+			for (size_t i = 0; dirparam[i] && wi + 1 < sizeof(clean); ++i) {
+				char ch = dirparam[i]; if (ch == '\\') ch = '/';
+				if (ch == '/' && wi > 0 && clean[wi - 1] == '/') continue;
+				clean[wi++] = ch;
+			}
+			if (wi > 0 && clean[wi - 1] == '/') wi--;
+			clean[wi] = '\0';
+			if (wi > 0) {
+				for (size_t i = 0; clean[i]; ++i) out[used++] = clean[i];
+				out[used++] = '/';
+			}
 		}
 		for (const char* p = name; *p; ++p) out[used++] = *p;
 		out[used++] = '"';
@@ -1084,6 +1099,10 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 	char* upgrade = get_header_value(headers, "Upgrade:");
 
 	char* connection_hdr = get_header_value(headers, "Connection:");
+
+	if (upgrade || connection_hdr) {
+		LOG_INFO("Incoming request headers: Upgrade=%s Connection=%s", upgrade ? upgrade : "(null)", connection_hdr ? connection_hdr : "(null)");
+	}
 	if (upgrade && connection_hdr && strcasecmp(upgrade, "websocket") == 0) {
 		const char* p = connection_hdr; int found = 0;
 		while (*p) { if (tolower((unsigned char)*p) == 'u' && strncasecmp(p, "upgrade", 7) == 0) { found = 1; break; } p++; }

@@ -29,21 +29,36 @@ const char* mime_for(const char* p) {
 	return"application/octet-stream";
 }
 
-char* get_header_value(char* buf, const char* h) {
-	if (!buf) return NULL;
-	size_t hl=strlen(h);char* line=strstr(buf, "\r\n");
-	while(line) {
-		char* next=strstr(line+2, "\r\n");if(!next)break;
-		*next='\0';
-		if(!strncasecmp(line+2, h, hl)) {
-			char* v=line+2+hl;while(isspace(*v))v++;
-			char* end=v+strlen(v)-1;while(end>v&&isspace(*end))end--;
-			*(end+1)='\0';return v;
-		}
-		*next='\r';line=next;
-	}
-	return NULL;
+char* get_header_value(const char* buf, const char* header) {
+    if (!buf || !header) return NULL;
+    size_t hl = strlen(header);
+
+    const char* line = buf;
+    while (*line) {
+        const char* next = strstr(line, "\r\n");
+        size_t linelen = next ? (size_t)(next - line) : strlen(line);
+
+        if (linelen >= hl && strncasecmp(line, header, hl) == 0) {
+            const char* val = line + hl;
+            while (val < line + linelen && isspace((unsigned char)*val)) val++;
+
+            const char* end = line + linelen - 1;
+            while (end > val && isspace((unsigned char)*end)) end--;
+
+            size_t vlen = (size_t)(end - val + 1);
+            char* result = malloc(vlen + 1);
+            if (!result) return NULL;
+            memcpy(result, val, vlen);
+            result[vlen] = '\0';
+            return result;
+        }
+
+        if (!next) break;
+        line = next + 2;
+    }
+    return NULL;
 }
+
 
 static inline char* simd_strchr(const char* s, char c) {
 	__m256i set=_mm256_set1_epi8(c);const char* p=s;

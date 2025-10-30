@@ -260,8 +260,10 @@ async function submitAddFolder() {
     });
     const txt = await res.text();
     if (res.ok) {
-      document.getElementById("addFolderMsg").style.color = "#4caf50";
-      document.getElementById("addFolderMsg").innerText = "Folder created.";
+        document.getElementById("addFolderMsg").style.color = "#4caf50";
+        document.getElementById("addFolderMsg").innerText = "Folder created.";
+        hideAddFolderDialog();
+        try { await loadFolders(); } catch (e) { console.warn('Failed to reload folders after add:', e); }
     } else {
       document.getElementById("addFolderMsg").style.color = "#f44336";
       document.getElementById("addFolderMsg").innerText = txt;
@@ -365,21 +367,59 @@ init();
 function setupWebsocket() {
   try {
     const proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
-    const ws = new WebSocket(proto + '//' + location.host + '/');
-    ws.onopen = () => {
-      try { ws.send(JSON.stringify({ type: 'subscribe', path: '' })); } catch (e) {}
-    };
-    ws.onmessage = (ev) => {
+    let ws = null;
+    let reconnectDelay = 1000;
+    let reconnectTimer = null;
+
+    function connect() {
+      const url = proto + '//' + location.host + '/';
+      console.log('WebSocket: connecting to', url);
       try {
-        const o = JSON.parse(ev.data);
-        if (o && o.type === 'folder_added') {
-          loadFolders();
-        }
-      } catch (e) {}
-    };
-    ws.onclose = () => {};
-    ws.onerror = () => {};
-  } catch (e) {}
+        ws = new WebSocket(url);
+      } catch (err) {
+        console.warn('WebSocket: construction failed', err);
+        scheduleReconnect();
+        return;
+      }
+
+      ws.onopen = () => {
+        console.log('WebSocket: open');
+        reconnectDelay = 1000;
+        try { ws.send(JSON.stringify({ type: 'subscribe', path: '' })); } catch (e) { console.warn('WS subscribe failed', e); }
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const o = JSON.parse(ev.data);
+          if (o && o.type === 'folder_added') {
+            console.log('WebSocket: folder_added', o.path);
+            loadFolders();
+          }
+        } catch (e) { console.warn('WS message parse error', e); }
+      };
+
+      ws.onclose = (ev) => {
+        console.warn('WebSocket: closed', ev && ev.code, ev && ev.reason);
+        scheduleReconnect();
+      };
+
+      ws.onerror = (ev) => {
+        console.warn('WebSocket: error', ev);
+      };
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        reconnectDelay = Math.min(30000, reconnectDelay * 1.5);
+        connect();
+      }, reconnectDelay);
+      console.log('WebSocket: will reconnect in', reconnectDelay, 'ms');
+    }
+
+    connect();
+  } catch (e) { console.warn('setupWebsocket failed', e); }
 }
 
 function goBack() {

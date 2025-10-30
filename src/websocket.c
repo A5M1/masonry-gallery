@@ -86,16 +86,29 @@ static void ws_update_topic(int c, const char* msg) {
     const char* pathp = strstr(msg, "\"path\"");
     if (!pathp) return;
 
-    const char* q = strchr(pathp, '"');
-    if (!q || !(q = strchr(q + 1, '"'))) return;
-    const char* q2 = strchr(q + 1, '"');
-    if (!q2) return;
+    const char* colon = strchr(pathp, ':');
+    if (!colon) return;
 
-    size_t l = (size_t)(q2 - (q + 1));
+    const char* val = colon + 1;
+    while (*val && isspace((unsigned char)*val)) val++;
+
+    size_t l = 0;
+    const char* start = val;
+    if (*val == '"') {
+        start = val + 1;
+        const char* end = strchr(start, '"');
+        if (!end) return;
+        l = (size_t)(end - start);
+    }
+    else {
+        const char* end = start;
+        while (*end && *end != ',' && *end != '}' && !isspace((unsigned char)*end)) end++;
+        l = (size_t)(end - start);
+    }
     if (l >= PATH_MAX) l = PATH_MAX - 1;
 
     char topic[PATH_MAX];
-    memcpy(topic, q + 1, l);
+    if (l > 0) memcpy(topic, start, l);
     topic[l] = '\0';
 
     ws_lock();
@@ -218,8 +231,40 @@ int websocket_init(void) {
 }
 
 int websocket_register_socket(int client_socket, char* request_headers) {
+    if (!request_headers) {
+        LOG_WARN("websocket_register_socket called without headers for client_socket=%d", client_socket);
+        return 0;
+    }
+
     char* key = get_header_value(request_headers, "Sec-WebSocket-Key:");
-    if (!key) return 0;
+    if (!key) {
+        char* p = request_headers;
+        while (*p) {
+            if (!strncasecmp(p, "Sec-WebSocket-Key:", 18)) {
+                char* v = p + 18;
+                while (*v && isspace((unsigned char)*v)) v++;
+                char* e = v;
+                while (*e && *e != '\r' && *e != '\n') e++;
+                static char inline_key[256];
+                size_t len = (size_t)(e - v);
+                if (len >= sizeof(inline_key)) len = sizeof(inline_key) - 1;
+                memcpy(inline_key, v, len);
+                inline_key[len] = '\0';
+                key = inline_key;
+                break;
+            }
+            char* nl = strchr(p, '\n');
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
+
+    if (!key || !*key) {
+        LOG_WARN("WebSocket register: Sec-WebSocket-Key not found in provided headers");
+        return 0;
+    }
+
+    LOG_INFO("WebSocket handshake received, Sec-WebSocket-Key=%.64s", key);
 
     const char* guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     size_t total = strlen(key) + strlen(guid);
@@ -255,6 +300,8 @@ int websocket_register_socket(int client_socket, char* request_headers) {
         SOCKET_CLOSE(client_socket);
         return 0;
     }
+
+    LOG_INFO("WebSocket handshake accepted, client_socket=%d", client_socket);
 
     int* arg = malloc(sizeof(int));
     if (!arg) { remove_client_socket(client_socket); SOCKET_CLOSE(client_socket); return 0; }

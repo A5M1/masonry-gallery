@@ -26,14 +26,7 @@
             <button onclick="accept()">Accept</button>
             <button onclick="showAddFolderDialog()">Add Folder</button>
         </div>
-    </div>
-    <div id="right">
-        <h3>Target</h3>
-        <input id="targetSearch" type="text" placeholder="Search targets..."
-            style="padding:0.4rem 0.6rem;border-radius:6px;border:none;background:#222;color:#ddd;font-size:0.9rem;outline:none;margin-bottom:0.6rem;" />
-        <div id="targetFolder"></div>
-
-        <div id="addFolderModal"
+                <div id="addFolderModal"
             style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;">
             <div
                 style="background:#1e1e1e;color:#eee;padding:20px;border-radius:12px;width:320px;box-shadow:0 0 20px #000;display:flex;flex-direction:column;gap:12px;">
@@ -51,6 +44,16 @@
                 <div id="addFolderMsg" style="font-size:13px;color:#aaa;"></div>
             </div>
         </div>
+    </div>
+    <div id="right">
+        <div class="sidebar-header">
+            <h3>📁 Target</h3>
+            <input id="targetSearch" type="text" placeholder="Search folders..." />
+        </div>
+
+        <div id="targetFolder"></div>
+
+
 
         <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5/dist/fancybox/fancybox.umd.js"></script>
         <script src="/js/mover.js"></script>
