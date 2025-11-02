@@ -1154,7 +1154,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 	if (strcmp(url, "/mover") == 0 || strcmp(url, "/mover/") == 0) {
 		char path[1024];
 		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "mover.html", VIEWS_DIR);
-		LOG_INFO("Serving mover page: %s", path);
+		LOG_DEBUG("Serving mover page: %s", path);
 		if (!is_file(path)) { send_text(c, 404, "Not Found", "mover.html not found", keep_alive); SAFE_FREE(range); return 0; }
 		FILE* f = fopen(path, "rb");
 		if (!f) { LOG_ERROR("Failed to open mover.html: %s", path); send_text(c, 500, "Internal Server Error", "failed to open mover.html", keep_alive); SAFE_FREE(range); return 0; }

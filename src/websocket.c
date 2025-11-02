@@ -205,99 +205,99 @@ static void* websocket_client_thread(void* arg) {
             if (payload != small_buf) free(payload);
 
             if (fin) {
-                    if (strstr((char*)accum, "subscribe")) {
-                        ws_update_topic(c, (char*)accum);
-                        const char* sstart = strstr((char*)accum, "\"session\"");
-                        if (!sstart) sstart = strstr((char*)accum, "\"session_id\"");
-                        if (sstart) {
-                            const char* colon = strchr(sstart, ':');
-                            if (colon) {
-                                const char* v = colon + 1;
-                                while (*v && isspace((unsigned char)*v)) v++;
-                                if (*v == '"') {
-                                    v++;
-                                    const char* e = strchr(v, '"');
-                                    if (e) {
-                                        size_t L = (size_t)(e - v);
-                                        char sid[64]; if (L >= sizeof(sid)) L = sizeof(sid) - 1; memcpy(sid, v, L); sid[L] = '\0';
-                                        ws_lock();
-                                        for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
-                                            if (ws_clients[i].sock == c) {
-                                                strncpy(ws_clients[i].session_id, sid, sizeof(ws_clients[i].session_id)-1);
-                                                ws_clients[i].session_id[sizeof(ws_clients[i].session_id)-1] = '\0';
-                                                ws_clients[i].last_sent_id = session_get_last(sid);
-                                                break;
-                                            }
+                if (strstr((char*)accum, "subscribe")) {
+                    ws_update_topic(c, (char*)accum);
+                    const char* sstart = strstr((char*)accum, "\"session\"");
+                    if (!sstart) sstart = strstr((char*)accum, "\"session_id\"");
+                    if (sstart) {
+                        const char* colon = strchr(sstart, ':');
+                        if (colon) {
+                            const char* v = colon + 1;
+                            while (*v && isspace((unsigned char)*v)) v++;
+                            if (*v == '"') {
+                                v++;
+                                const char* e = strchr(v, '"');
+                                if (e) {
+                                    size_t L = (size_t)(e - v);
+                                    char sid[64]; if (L >= sizeof(sid)) L = sizeof(sid) - 1; memcpy(sid, v, L); sid[L] = '\0';
+                                    ws_lock();
+                                    for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
+                                        if (ws_clients[i].sock == c) {
+                                            strncpy(ws_clients[i].session_id, sid, sizeof(ws_clients[i].session_id) - 1);
+                                            ws_clients[i].session_id[sizeof(ws_clients[i].session_id) - 1] = '\0';
+                                            ws_clients[i].last_sent_id = session_get_last(sid);
+                                            break;
                                         }
-                                        ws_unlock();
                                     }
+                                    ws_unlock();
                                 }
                             }
                         }
                     }
+                }
 
-                    /* handle addFolder action sent from client over websocket */
-                    if (strstr((char*)accum, "\"action\"") && strstr((char*)accum, "addFolder")) {
-                        const char* body = (char*)accum;
-                        const char* n_start = strstr(body, "\"name\":");
+                if (strstr((char*)accum, "\"action\"") && strstr((char*)accum, "addFolder")) {
+                    const char* body = (char*)accum;
+                    const char* n_start = strstr(body, "\"name\":");
+                    if (n_start) {
+                        n_start = strchr(n_start, ':');
                         if (n_start) {
-                            n_start = strchr(n_start, ':');
-                            if (n_start) {
+                            n_start++;
+                            while (*n_start && isspace((unsigned char)*n_start)) n_start++;
+                            if (*n_start == '"') {
                                 n_start++;
-                                while (*n_start && isspace((unsigned char)*n_start)) n_start++;
-                                if (*n_start == '"') {
-                                    n_start++;
-                                    const char* n_end = strchr(n_start, '"');
-                                    if (n_end) {
-                                        char folder[PATH_MAX] = {0};
-                                        size_t nlen = (size_t)(n_end - n_start);
-                                        if (nlen >= sizeof(folder)) nlen = sizeof(folder) - 1;
-                                        memcpy(folder, n_start, nlen);
-                                        folder[nlen] = '\0';
-                                        url_decode(folder);
+                                const char* n_end = strchr(n_start, '"');
+                                if (n_end) {
+                                    char folder[PATH_MAX] = { 0 };
+                                    size_t nlen = (size_t)(n_end - n_start);
+                                    if (nlen >= sizeof(folder)) nlen = sizeof(folder) - 1;
+                                    memcpy(folder, n_start, nlen);
+                                    folder[nlen] = '\0';
+                                    url_decode(folder);
 
-                                        char target[PATH_MAX] = {0};
-                                        const char* t_start = strstr(body, "\"target\":");
+                                    char target[PATH_MAX] = { 0 };
+                                    const char* t_start = strstr(body, "\"target\":");
+                                    if (t_start) {
+                                        t_start = strchr(t_start, ':');
                                         if (t_start) {
-                                            t_start = strchr(t_start, ':');
-                                            if (t_start) {
+                                            t_start++;
+                                            while (*t_start && isspace((unsigned char)*t_start)) t_start++;
+                                            if (*t_start == '"') {
                                                 t_start++;
-                                                while (*t_start && isspace((unsigned char)*t_start)) t_start++;
-                                                if (*t_start == '"') {
-                                                    t_start++;
-                                                    const char* t_end = strchr(t_start, '"');
-                                                    if (t_end) {
-                                                        size_t tlen = (size_t)(t_end - t_start);
-                                                        if (tlen >= sizeof(target)) tlen = sizeof(target) - 1;
-                                                        memcpy(target, t_start, tlen);
-                                                        target[tlen] = '\0';
-                                                        url_decode(target);
-                                                    }
+                                                const char* t_end = strchr(t_start, '"');
+                                                if (t_end) {
+                                                    size_t tlen = (size_t)(t_end - t_start);
+                                                    if (tlen >= sizeof(target)) tlen = sizeof(target) - 1;
+                                                    memcpy(target, t_start, tlen);
+                                                    target[tlen] = '\0';
+                                                    url_decode(target);
                                                 }
                                             }
                                         }
+                                    }
 
-                                        char target_copy[PATH_MAX]; strncpy(target_copy, target, sizeof(target_copy) - 1); target_copy[sizeof(target_copy) - 1] = '\0';
-                                        while (*target_copy == '/' || *target_copy == '\\') memmove(target_copy, target_copy + 1, strlen(target_copy));
-                                        char dest[PATH_MAX];
-                                        if (strlen(target_copy) > 0) snprintf(dest, sizeof(dest), "%s%s%s%s%s", BASE_DIR, DIR_SEP_STR, target_copy, DIR_SEP_STR, folder);
-                                        else snprintf(dest, sizeof(dest), "%s%s%s", BASE_DIR, DIR_SEP_STR, folder);
-                                        normalize_path(dest);
-                                        mk_dir(dest);
-                                        if (is_dir(dest)) {
-                                            char fg_path[PATH_MAX]; path_join(fg_path, dest, ".fg");
-                                            FILE* fgf = fopen(fg_path, "wb"); if (fgf) fclose(fgf);
-                                            char msg[1024]; int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folderAdded\",\"path\":\"%s\"}", dest);
-                                            if (rr > 0) websocket_broadcast(msg);
-                                        } else {
-                                            char emsg[256]; int rr = snprintf(emsg, sizeof(emsg), "{\"type\":\"folderAdded\",\"error\":\"mkdir failed\"}"); (void)rr;
-                                            websocket_broadcast(emsg);
-                                        }
+                                    char target_copy[PATH_MAX]; strncpy(target_copy, target, sizeof(target_copy) - 1); target_copy[sizeof(target_copy) - 1] = '\0';
+                                    while (*target_copy == '/' || *target_copy == '\\') memmove(target_copy, target_copy + 1, strlen(target_copy));
+                                    char dest[PATH_MAX];
+                                    if (strlen(target_copy) > 0) snprintf(dest, sizeof(dest), "%s%s%s%s%s", BASE_DIR, DIR_SEP_STR, target_copy, DIR_SEP_STR, folder);
+                                    else snprintf(dest, sizeof(dest), "%s%s%s", BASE_DIR, DIR_SEP_STR, folder);
+                                    normalize_path(dest);
+                                    mk_dir(dest);
+                                    if (is_dir(dest)) {
+                                        char fg_path[PATH_MAX]; path_join(fg_path, dest, ".fg");
+                                        FILE* fgf = fopen(fg_path, "wb"); if (fgf) fclose(fgf);
+                                        char msg[1024]; int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folderAdded\",\"path\":\"%s\"}", dest);
+                                        if (rr > 0) websocket_broadcast(msg);
+                                    }
+                                    else {
+                                        char emsg[256]; int rr = snprintf(emsg, sizeof(emsg), "{\"type\":\"folderAdded\",\"error\":\"mkdir failed\"}"); (void)rr;
+                                        websocket_broadcast(emsg);
                                     }
                                 }
                             }
                         }
                     }
+                }
 
                 free(accum);
                 accum = NULL;
@@ -436,7 +436,7 @@ int websocket_register_socket(int client_socket, char* request_headers) {
 void websocket_broadcast_topic(const char* topic, const char* msg) {
     if (!msg) return;
 
-    static _Atomic(uint64_t) g_msg_id = 0;
+    static _Atomic(uint64_t)g_msg_id = 0;
     uint64_t id = atomic_fetch_add(&g_msg_id, 1) + 1;
 
     char wrapped[4096];
@@ -465,7 +465,7 @@ void websocket_broadcast_topic(const char* topic, const char* msg) {
         }
     }
 
-    if (len == 0) len = strlen(s); 
+    if (len == 0) len = strlen(s);
 
     ws_lock();
 
@@ -484,7 +484,8 @@ void websocket_broadcast_topic(const char* topic, const char* msg) {
             ws_clients[i].session_id[0] = '\0';
             ws_clients[i].last_sent_id = 0;
             ws_count--;
-        } else {
+        }
+        else {
             ws_clients[i].last_sent_id = id;
             if (ws_clients[i].session_id[0]) session_set_last(ws_clients[i].session_id, id);
         }

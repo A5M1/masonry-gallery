@@ -53,7 +53,13 @@ json_t const* json_create(char* str, json_t mem[], unsigned int qty) {
 }
 
 static char getEscape(char ch) {
-    static struct { char ch;char code; }const pair[] = { {'\"','\"'},{'\\','\\'},{'/','/'},{'b','\b'},{'f','\f'},{'n','\n'},{'r','\r'},{'t','\t'} };
+    static struct { 
+        char ch;
+        char code; 
+    } 
+    const pair[] = { 
+        {'\"','\"'},{'\\','\\'},{'/','/'},{'b','\b'},{'f','\f'},{'n','\n'},{'r','\r'},{'t','\t'} 
+    };
     for (unsigned int i = 0;i < sizeof pair / sizeof * pair;++i)
         if (pair[i].ch == ch)return pair[i].code;
     return '\0';

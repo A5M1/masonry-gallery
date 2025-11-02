@@ -1275,7 +1275,6 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
         char full[PATH_MAX];
         path_join(full, dir, name);
         if (is_dir(full)) continue;
-        /* Auto-convert .m4s segment files to .mp4 when present */
         const char* ext_check = strrchr(name, '.');
         if (ext_check && ascii_stricmp(ext_check, ".m4s") == 0) {
             char mp4path[PATH_MAX];
@@ -1283,7 +1282,6 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
             mp4path[sizeof(mp4path) - 1] = '\0';
             char* dotp = strrchr(mp4path, '.');
             if (dotp) strcpy(dotp, ".mp4"); else strncat(mp4path, ".mp4", sizeof(mp4path) - strlen(mp4path) - 1);
-            /* Only convert if .m4s is newer than .mp4 or .mp4 missing */
             if (is_newer(full, mp4path)) {
                 char esc_in[PATH_MAX * 2]; esc_in[0] = '\0';
                 char esc_out[PATH_MAX * 2]; esc_out[0] = '\0';
@@ -1291,7 +1289,6 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
                 platform_escape_path_for_cmd(mp4path, esc_out, sizeof(esc_out));
                 int threads = platform_get_cpu_count(); if (threads < 1) threads = 1;
                 char cmd[PATH_MAX * 3];
-                /* copy codec where possible to avoid re-encoding */
                 snprintf(cmd, sizeof(cmd), "ffmpeg -y -threads %d -i %s -c copy %s", threads, esc_in, esc_out);
                 LOG_INFO("Converting .m4s -> .mp4: %s -> %s", full, mp4path);
                 int rc = execute_command_with_limits(cmd, NULL, 120, 1);
@@ -1306,7 +1303,6 @@ void ensure_thumbs_in_dir(const char* dir, progress_t * prog) {
                     }
                 }
             }
-            /* continue to next entry; conversion (if any) created mp4 which will be processed as media */
             continue;
         }
         const char* ext = strrchr(name, '.');
