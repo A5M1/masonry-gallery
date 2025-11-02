@@ -55,11 +55,11 @@
                 ws.addEventListener('message', function (evt) {
                     try {
                         var data = evt.data;
-                        console.log('WS message', data);
+                        //console.log('WS message', data);
                     } catch (e) { console.error(e) }
                 });
                 ws.addEventListener('close', function () {
-                    console.log('WebSocket closed');
+                    //console.log('WebSocket closed');
                 });
             } catch (e) { console.error('WebSocket init failed', e) }
         })();
