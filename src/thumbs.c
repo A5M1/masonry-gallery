@@ -742,7 +742,6 @@ static void remove_watcher_node(const char* dir) {
 }
 static void thumb_watcher_cb(const char* dir) {
     if (!dir) return;
-
     thread_mutex_lock(&watcher_mutex);
     watcher_node_t* cur = watcher_head;
     while (cur) {
@@ -763,6 +762,118 @@ static void thumb_watcher_cb(const char* dir) {
 
     cur->scheduled = 1;
     thread_mutex_unlock(&watcher_mutex);
+
+    {
+        progress_t quick_prog;
+        memset(&quick_prog, 0, sizeof(quick_prog));
+
+        char thumbs_root[PATH_MAX];
+        get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+        if (!is_dir(thumbs_root)) platform_make_dir(thumbs_root);
+
+        char safe_dir_name[PATH_MAX];
+        make_safe_dir_name_from(dir, safe_dir_name, sizeof(safe_dir_name));
+        char per_thumbs_root[PATH_MAX];
+        snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+        if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
+
+        char per_db[PATH_MAX];
+        snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
+        thumbdb_open_for_dir(per_db);
+
+        count_media_in_dir(dir, &quick_prog);
+
+        diriter it;
+        if (dir_open(&it, dir)) {
+            const char* name;
+            while ((name = dir_next(&it))) {
+                if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "thumbs")) continue;
+                char full[PATH_MAX];
+                path_join(full, dir, name);
+                if (!is_file(full)) continue;
+                if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) continue;
+
+                char thumb_small_rel[PATH_MAX], thumb_large_rel[PATH_MAX];
+                get_thumb_rel_names(full, name, thumb_small_rel, sizeof(thumb_small_rel), thumb_large_rel, sizeof(thumb_large_rel));
+                char thumb_small[PATH_MAX], thumb_large[PATH_MAX];
+                snprintf(thumb_small, sizeof(thumb_small), "%s" DIR_SEP_STR "%s", per_thumbs_root, thumb_small_rel);
+                snprintf(thumb_large, sizeof(thumb_large), "%s" DIR_SEP_STR "%s", per_thumbs_root, thumb_large_rel);
+
+                struct stat st_media, st_small, st_large;
+                int need_small = 0, need_large = 0;
+                if (platform_stat(full, &st_media) == 0) {
+                    if (!is_file(thumb_small) || platform_stat(thumb_small, &st_small) != 0 || st_small.st_mtime < st_media.st_mtime)
+                        need_small = 1;
+                    if (!is_file(thumb_large) || platform_stat(thumb_large, &st_large) != 0 || st_large.st_mtime < st_media.st_mtime)
+                        need_large = 1;
+                } else {
+                    need_small = !is_file(thumb_small);
+                    need_large = !is_file(thumb_large);
+                }
+
+                if (need_small) {
+                    quick_prog.processed_files++;
+                    thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
+                    if (job) {
+                        strncpy(job->input, full, PATH_MAX - 1);
+                        job->input[PATH_MAX - 1] = '\0';
+                        strncpy(job->output, thumb_small, PATH_MAX - 1);
+                        job->output[PATH_MAX - 1] = '\0';
+                        job->scale = THUMB_SMALL_SCALE;
+                        job->q = THUMB_SMALL_QUALITY;
+                        job->index = quick_prog.processed_files;
+                        job->total = (int)quick_prog.total_files;
+                        while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
+                        atomic_fetch_add(&thumb_workers_active, 1);
+                        if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
+                            LOG_ERROR("Failed to spawn thumb worker thread (watcher), generating inline");
+                            atomic_fetch_sub(&thumb_workers_active, 1);
+                            generate_thumb_c(full, thumb_small, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY, quick_prog.processed_files, quick_prog.total_files);
+                            char* bn = strrchr(thumb_small, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_small;
+                            thumbdb_set(bn, full);
+                            free(job);
+                        }
+                    } else {
+                        LOG_ERROR("Failed to allocate thumb job (watcher), generating inline");
+                        generate_thumb_c(full, thumb_small, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY, quick_prog.processed_files, quick_prog.total_files);
+                        char* bn = strrchr(thumb_small, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_small;
+                        thumbdb_set(bn, full);
+                    }
+                }
+
+                if (need_large) {
+                    thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
+                    if (job) {
+                        strncpy(job->input, full, PATH_MAX - 1);
+                        job->input[PATH_MAX - 1] = '\0';
+                        strncpy(job->output, thumb_large, PATH_MAX - 1);
+                        job->output[PATH_MAX - 1] = '\0';
+                        job->scale = THUMB_LARGE_SCALE;
+                        job->q = THUMB_LARGE_QUALITY;
+                        job->index = quick_prog.processed_files;
+                        job->total = (int)quick_prog.total_files;
+                        while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
+                        atomic_fetch_add(&thumb_workers_active, 1);
+                        if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
+                            LOG_ERROR("Failed to spawn thumb worker thread (watcher), generating inline");
+                            atomic_fetch_sub(&thumb_workers_active, 1);
+                            generate_thumb_c(full, thumb_large, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY, quick_prog.processed_files, quick_prog.total_files);
+                            char* bn = strrchr(thumb_large, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_large;
+                            thumbdb_set(bn, full);
+                            free(job);
+                        }
+                    } else {
+                        LOG_ERROR("Failed to allocate thumb job (watcher), generating inline");
+                        generate_thumb_c(full, thumb_large, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY, quick_prog.processed_files, quick_prog.total_files);
+                        char* bn = strrchr(thumb_large, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_large;
+                        thumbdb_set(bn, full);
+                    }
+                }
+            }
+            dir_close(&it);
+        }
+
+    }
 
     char* dcopy = strdup(dir);
     if (!dcopy) {
