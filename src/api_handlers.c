@@ -843,7 +843,7 @@ void handle_api_list_folders(int c, bool keep_alive) {
 	free(buf);
 }
 void handle_legacy_folders(int c, bool keep_alive) {
-    LOG_DEBUG("handle_legacy_folders requested");
+	LOG_DEBUG("handle_legacy_folders requested");
 	const int STACK_INIT = 64; const int SUBDIR_INIT = 32; const int STACK_GROW = 64;
 	char** stack = malloc(STACK_INIT * sizeof(char*));
 	if (!stack) { send_text(c, 500, "Internal Server Error", "Memory error", keep_alive); return; }
@@ -969,10 +969,10 @@ void handle_legacy_move(int c, const char* body, bool keep_alive) {
 			const char* mt = maybe_to + strlen("\"targetFolder\":\"");
 			const char* mfe = strchr(mf, '"');
 			const char* mte = strchr(mt, '"');
-			char lf[256] = {0}, lt[256] = {0};
+			char lf[256] = { 0 }, lt[256] = { 0 };
 			if (mfe && (size_t)(mfe - mf) < sizeof(lf)) strncpy(lf, mf, (size_t)(mfe - mf));
 			if (mte && (size_t)(mte - mt) < sizeof(lt)) strncpy(lt, mt, (size_t)(mte - mt));
-			char *p, *q; char prev = 0;
+			char* p, * q; char prev = 0;
 			p = lf; q = lf; prev = 0;
 			while (*p) { char c = *p++; if (c == '\\') c = '/'; if (c == '/' && prev == '/') continue; *q++ = c; prev = c; }
 			*q = '\0';
@@ -1231,9 +1231,9 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 				send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 				send(c, buf, (int)fsz, 0);
 			}
-					free(frag);
-					SAFE_FREE(range);
-					return 0;
+			free(frag);
+			SAFE_FREE(range);
+			return 0;
 		}
 		else {
 			send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);

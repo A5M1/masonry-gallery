@@ -442,8 +442,6 @@ void websocket_broadcast_topic(const char* topic, const char* msg) {
     char wrapped[4096];
     const char* s = msg;
     size_t len = 0;
-
-    // Skip leading whitespace
     while (*s && isspace((unsigned char)*s)) s++;
 
     if (*s == '{') {
@@ -467,20 +465,15 @@ void websocket_broadcast_topic(const char* topic, const char* msg) {
         }
     }
 
-    if (len == 0) len = strlen(s); // fallback if not wrapped
+    if (len == 0) len = strlen(s); 
 
     ws_lock();
 
     for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
         int sock = ws_clients[i].sock;
         if (sock == -1) continue;
+        if (topic && ws_clients[i].topic[0] && !strstr(ws_clients[i].topic, topic) && !strstr(topic, ws_clients[i].topic)) continue;
 
-        // Check topic filter
-        if (topic && ws_clients[i].topic[0]) {
-            if (!strstr(ws_clients[i].topic, topic) && !strstr(topic, ws_clients[i].topic)) {
-                continue;
-            }
-        }
 
         if (ws_clients[i].last_sent_id >= id) continue;
 
