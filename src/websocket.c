@@ -129,6 +129,8 @@ static void ws_update_topic(int c, const char* msg) {
     }
     ws_unlock();
 }
+#define MAX_WS_FRAME_SIZE (1 * 1024 * 1024)
+#define MAX_WS_MESSAGE_SIZE (2 * 1024 * 1024)
 
 static void* websocket_client_thread(void* arg) {
     int c = *(int*)arg;
@@ -137,6 +139,7 @@ static void* websocket_client_thread(void* arg) {
     unsigned char* accum = NULL;
     size_t accum_len = 0;
     int expect_opcode = -1;
+    int exit_flag = 0;
     unsigned char small_buf[4096];
 
     for (;;) {
@@ -149,6 +152,7 @@ static void* websocket_client_thread(void* arg) {
         int masked = (hdr[1] & 0x80) != 0;
         uint64_t payload_len = hdr[1] & 0x7F;
 
+        
         if (payload_len == 126) {
             unsigned char ext[2];
             if (recv(c, (char*)ext, 2, 0) != 2) break;
@@ -162,26 +166,34 @@ static void* websocket_client_thread(void* arg) {
                 payload_len = (payload_len << 8) | ext[i];
         }
 
+        if (payload_len > MAX_WS_FRAME_SIZE) {
+            LOG_WARN("WebSocket client %d sent oversized frame (%llu bytes) — closing",
+                c, (unsigned long long)payload_len);
+            unsigned char close_code[2] = { 0x03, 0xF1 };
+            send_ws_frame_opcode(c, 0x8, close_code, sizeof(close_code));
+            break;
+        }
+
         unsigned char mask[4] = { 0 };
         if (masked && recv(c, (char*)mask, 4, 0) != 4) break;
 
-        unsigned char* payload = (payload_len > sizeof(small_buf))
-            ? malloc(payload_len + 1)
-            : small_buf;
+        unsigned char* payload = (payload_len > sizeof(small_buf)) ? malloc(payload_len + 1) : small_buf;
         if (!payload) break;
 
         size_t got = 0;
         while (got < payload_len) {
             int rc = recv(c, (char*)payload + got, (int)(payload_len - got), 0);
-            if (rc <= 0) { if (payload != small_buf) free(payload); goto exit_loop; }
+            if (rc <= 0) { if (payload != small_buf) free(payload); exit_flag = 1; break; }
             got += rc;
         }
+        if (exit_flag) break;
 
         if (masked) {
             for (size_t i = 0; i < payload_len; ++i)
                 payload[i] ^= mask[i % 4];
         }
 
+        // --- Handle control opcodes ---
         if (opcode == 0x8) { // close
             if (payload != small_buf) free(payload);
             break;
@@ -193,7 +205,17 @@ static void* websocket_client_thread(void* arg) {
             continue;
         }
 
+        // --- Handle text or continuation frames ---
         if (opcode == 0x1 || (opcode == 0x0 && expect_opcode == 0x1)) {
+            // Check for total accumulated message size
+            if (accum_len + payload_len > MAX_WS_MESSAGE_SIZE) {
+                LOG_WARN("WebSocket client %d exceeded MAX_WS_MESSAGE_SIZE (%d bytes) — closing",
+                    c, MAX_WS_MESSAGE_SIZE);
+                if (payload != small_buf) free(payload);
+                exit_flag = 1;
+                break;
+            }
+
             unsigned char* newbuf = realloc(accum, accum_len + payload_len + 1);
             if (!newbuf) { if (payload != small_buf) free(payload); break; }
 
@@ -204,7 +226,8 @@ static void* websocket_client_thread(void* arg) {
 
             if (payload != small_buf) free(payload);
 
-            if (fin) {
+                if (fin) {
+                // Handle complete text message
                 if (strstr((char*)accum, "subscribe")) {
                     ws_update_topic(c, (char*)accum);
                     const char* sstart = strstr((char*)accum, "\"session\"");
@@ -219,7 +242,10 @@ static void* websocket_client_thread(void* arg) {
                                 const char* e = strchr(v, '"');
                                 if (e) {
                                     size_t L = (size_t)(e - v);
-                                    char sid[64]; if (L >= sizeof(sid)) L = sizeof(sid) - 1; memcpy(sid, v, L); sid[L] = '\0';
+                                    char sid[64];
+                                    if (L >= sizeof(sid)) L = sizeof(sid) - 1;
+                                    memcpy(sid, v, L);
+                                    sid[L] = '\0';
                                     ws_lock();
                                     for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
                                         if (ws_clients[i].sock == c) {
@@ -236,6 +262,7 @@ static void* websocket_client_thread(void* arg) {
                     }
                 }
 
+                // Full addFolder logic preserved
                 if (strstr((char*)accum, "\"action\"") && strstr((char*)accum, "addFolder")) {
                     const char* body = (char*)accum;
                     const char* n_start = strstr(body, "\"name\":");
@@ -286,11 +313,19 @@ static void* websocket_client_thread(void* arg) {
                                     if (is_dir(dest)) {
                                         char fg_path[PATH_MAX]; path_join(fg_path, dest, ".fg");
                                         FILE* fgf = fopen(fg_path, "wb"); if (fgf) fclose(fgf);
-                                        char msg[1024]; int rr = snprintf(msg, sizeof(msg), "{\"type\":\"folderAdded\",\"path\":\"%s\"}", dest);
-                                        if (rr > 0) websocket_broadcast(msg);
+                                        char msg[1024]; size_t rem_msg = sizeof(msg); char* mp = msg;
+                                        mp = json_objOpen(mp, NULL, &rem_msg);
+                                        mp = json_str(mp, "type", "folderAdded", &rem_msg);
+                                        mp = json_str(mp, "path", dest, &rem_msg);
+                                        mp = json_objClose(mp, &rem_msg);
+                                        websocket_broadcast(msg);
                                     }
                                     else {
-                                        char emsg[256]; int rr = snprintf(emsg, sizeof(emsg), "{\"type\":\"folderAdded\",\"error\":\"mkdir failed\"}"); (void)rr;
+                                        char emsg[256]; size_t rem_emsg = sizeof(emsg); char* ep = emsg;
+                                        ep = json_objOpen(ep, NULL, &rem_emsg);
+                                        ep = json_str(ep, "type", "folderAdded", &rem_emsg);
+                                        ep = json_str(ep, "error", "mkdir failed", &rem_emsg);
+                                        ep = json_objClose(ep, &rem_emsg);
                                         websocket_broadcast(emsg);
                                     }
                                 }
@@ -312,13 +347,12 @@ static void* websocket_client_thread(void* arg) {
 
         if (payload != small_buf) free(payload);
     }
-
-exit_loop:
     if (accum) free(accum);
     remove_client_socket(c);
     SOCKET_CLOSE(c);
     return NULL;
 }
+
 int websocket_init(void) {
     for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
         ws_clients[i].sock = -1;
@@ -449,17 +483,25 @@ void websocket_broadcast_topic(const char* topic, const char* msg) {
         while (e > s && isspace((unsigned char)*e)) e--;
 
         if (*e == '}') {
-            size_t inner_len = (size_t)(e - s - 0);
+            const char* inner_start = s + 1;
+            const char* inner_end = e - 0;
+            while (inner_start < inner_end && isspace((unsigned char)*inner_start)) inner_start++;
+            while (inner_end > inner_start && isspace((unsigned char)*(inner_end - 1))) inner_end--;
+            size_t inner_len = (size_t)(inner_end - inner_start);
             if (inner_len + 128 < sizeof(wrapped)) {
-                size_t off = snprintf(wrapped, sizeof(wrapped), "{\"id\":%llu,", (unsigned long long)id);
-                size_t copy_len = (size_t)(e - s - 0);
-                if (copy_len > 1) {
-                    memcpy(wrapped + off, s + 1, copy_len - 1);
-                    off += copy_len - 1;
+                size_t rem = sizeof(wrapped);
+                char* p = wrapped;
+                p = json_objOpen(p, NULL, &rem);
+                p = json_verylong(p, "id", (long long)id, &rem);
+                if (inner_len > 0) {
+                    if (rem > inner_len) {
+                        memcpy(p, inner_start, inner_len);
+                        p += inner_len;
+                        rem -= inner_len;
+                    }
                 }
-                wrapped[off++] = '}';
-                wrapped[off] = '\0';
-                len = off;
+                p = json_objClose(p, &rem);
+                len = (size_t)(p - wrapped);
                 s = wrapped;
             }
         }

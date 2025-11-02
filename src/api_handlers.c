@@ -1343,6 +1343,61 @@ void handle_legacy_addfolder(int c, const char* body, bool keep_alive) {
 	send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
 	send(c, msg, (int)strlen(msg), 0);
 }
+
+void handle_api_delete_file(int c, const char* body, bool keep_alive) {
+	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
+	const char* f_start = strstr(body, "\"fromPath\"");
+	if (!f_start) { send_text(c, 400, "Bad Request", "Missing fromPath", keep_alive); return; }
+	f_start = strchr(f_start, ':');
+	if (!f_start) { send_text(c, 400, "Bad Request", "Invalid fromPath", keep_alive); return; }
+	f_start++;
+	while (*f_start && (isspace((unsigned char)*f_start) || *f_start == ':')) f_start++;
+	if (*f_start != '"') { send_text(c, 400, "Bad Request", "Invalid fromPath", keep_alive); return; }
+	f_start++;
+	const char* f_end = strchr(f_start, '"');
+	if (!f_end) { send_text(c, 400, "Bad Request", "Invalid fromPath", keep_alive); return; }
+	char from[MAX_PATH]; size_t fl = (size_t)(f_end - f_start); if (fl >= sizeof(from)) fl = sizeof(from) - 1;
+	strncpy(from, f_start, fl); from[fl] = '\0'; url_decode(from);
+	const char* rel = from;
+	if (strncmp(from, "/media/", 7) == 0) rel = from + 7;
+	char rel_copy[PATH_MAX]; strncpy(rel_copy, rel, sizeof(rel_copy) - 1); rel_copy[sizeof(rel_copy) - 1] = '\0';
+	while (*rel_copy == '/' || *rel_copy == '\\') memmove(rel_copy, rel_copy + 1, strlen(rel_copy));
+	char src[PATH_MAX]; snprintf(src, sizeof(src), "%s%s%s", BASE_DIR, DIR_SEP_STR, rel_copy); normalize_path(src);
+	char* fname = strrchr(src, DIR_SEP);
+	if (!fname || *(fname + 1) == '\0') { send_text(c, 400, "Bad Request", "invalid fromPath", keep_alive); return; }
+	fname++;
+	char trash_root[PATH_MAX]; snprintf(trash_root, sizeof(trash_root), "%s" DIR_SEP_STR "trash", BASE_DIR); normalize_path(trash_root); mk_dir(trash_root);
+	char destFolder[PATH_MAX]; strncpy(destFolder, trash_root, sizeof(destFolder) - 1); destFolder[sizeof(destFolder) - 1] = '\0';
+	char rel_dir[PATH_MAX]; strncpy(rel_dir, rel_copy, sizeof(rel_dir) - 1); rel_dir[sizeof(rel_dir) - 1] = '\0';
+	char* l = strrchr(rel_dir, '/');
+	if (l) {
+		*l = '\0';
+		char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "%s" DIR_SEP_STR "%s", trash_root, rel_dir); normalize_path(tmp); strncpy(destFolder, tmp, sizeof(destFolder) - 1); destFolder[sizeof(destFolder) - 1] = '\0';
+	}
+	normalize_path(destFolder); mk_dir(destFolder);
+	char dest[PATH_MAX]; path_join(dest, destFolder, fname);
+	if (platform_move_file(src, dest) == 0) {
+		const char* ok = "{\"status\":\"ok\"}";
+		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
+		send(c, ok, (int)strlen(ok), 0);
+		return;
+	}
+	if (platform_copy_file(src, dest) == 0) {
+		if (platform_file_delete(src) == 0) {
+			const char* ok = "{\"status\":\"ok\"}";
+			send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
+			send(c, ok, (int)strlen(ok), 0);
+			return;
+		}
+		const char* msg = "{\"error\":\"copied but delete failed\"}";
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
+	char emsg[128]; snprintf(emsg, sizeof(emsg), "{\"error\":\"delete failed\"}");
+	send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(emsg), NULL, 0, keep_alive);
+	send(c, emsg, (int)strlen(emsg), 0);
+}
 typedef enum {
 	GET_SIMPLE, GET_QS, POST_BODY
 } handler_type_t;
@@ -1417,6 +1472,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		{ "/files", GET_QS, handle_legacy_files },
 		{ "/move", POST_BODY, handle_legacy_move },
 		{ "/addfolder", POST_BODY, handle_legacy_addfolder },
+		{ "/api/delete-file", POST_BODY, handle_api_delete_file },
 		{ "/api/tree", GET_SIMPLE, handle_api_tree },
 		{ "/api/folders/list", GET_SIMPLE, handle_api_list_folders },
 		{ "/api/folders", GET_QS, handle_api_folders },

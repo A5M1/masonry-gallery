@@ -244,6 +244,43 @@ function hideAddFolderDialog() {
   document.getElementById("folderTarget").value = "";
   document.getElementById("addFolderMsg").innerText = "";
 }
+function showDeleteDialog() {
+  const modal = document.getElementById('deleteConfirmModal');
+  const msg = document.getElementById('deleteMsg');
+  if (!modal || !msg) return;
+  const item = mediaList[currentIndex] || '';
+  msg.textContent = `Are you sure you want to delete ${item}?`;
+  modal.style.display = 'flex';
+}
+function hideDeleteDialog() {
+  const modal = document.getElementById('deleteConfirmModal');
+  if (!modal) return;
+  modal.style.display = 'none';
+}
+async function submitDelete() {
+  const item = mediaList[currentIndex];
+  if (!item) { hideDeleteDialog(); return; }
+  try {
+    const res = await fetch('/api/delete-file', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ fromPath: item })
+    });
+    if (res.ok) {
+      mediaList.splice(currentIndex, 1);
+      if (currentIndex >= mediaList.length) currentIndex = Math.max(0, mediaList.length - 1);
+      hideDeleteDialog();
+      showCurrent();
+    } else {
+      const txt = await res.text();
+      const msg = document.getElementById('deleteMsg');
+      if (msg) msg.textContent = txt || 'Delete failed';
+    }
+  } catch (e) {
+    const msg = document.getElementById('deleteMsg');
+    if (msg) msg.textContent = 'Request failed.';
+  }
+}
 async function submitAddFolder() {
   const name = document.getElementById("folderName").value.trim();
   const target = document.getElementById("folderTarget").value.trim();
@@ -252,7 +289,7 @@ async function submitAddFolder() {
     return;
   }
   const body = target ? { name, target } : { name };
-  try {
+    try {
     const res = await fetch("/addfolder", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -263,7 +300,30 @@ async function submitAddFolder() {
         document.getElementById("addFolderMsg").style.color = "#4caf50";
         document.getElementById("addFolderMsg").innerText = "Folder created.";
         hideAddFolderDialog();
-        try { await loadFolders(); } catch (e) { console.warn('Failed to reload folders after add:', e); }
+
+        const newPath = target ? (normalizePath(target) ? `${normalizePath(target)}/${name}` : name) : name;
+        const idx = folders.indexOf(newPath);
+        if (idx === -1) folders.push(newPath);
+
+        try {
+          const tree = buildTree(folders);
+          renderTree(document.getElementById('folderList'), tree, true);
+          renderTree(document.getElementById('targetFolder'), tree, false);
+          const container = document.getElementById('targetFolder');
+          requestAnimationFrame(() => {
+            const folderEls = container.querySelectorAll('.folder');
+            for (const el of folderEls) {
+              if (normalizePath(el.dataset.full) === normalizePath(newPath)) {
+                el.classList.add('selected');
+                expandAncestors(el.parentElement, container);
+                setTimeout(() => el.scrollIntoView({ block: 'center' }), 100);
+                break;
+              }
+            }
+          });
+        } catch (e) {
+          console.warn('Failed to update folders in DOM after add:', e);
+        }
     } else {
       document.getElementById("addFolderMsg").style.color = "#f44336";
       document.getElementById("addFolderMsg").innerText = txt;

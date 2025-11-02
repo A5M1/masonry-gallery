@@ -149,6 +149,9 @@
                             el.removeEventListener("load", onLoad);
                         };
                         el.addEventListener("load", onLoad, { once: true });
+                        if (el.complete && el.naturalWidth && el.naturalWidth > 0) {
+                            try { onLoad(); } catch (e) { }
+                        }
                         return true;
                     }, "800px");
 
@@ -288,6 +291,37 @@
 
     loadFolderTree();
 
+    function setupThumbSocket() {
+        try {
+            var proto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
+            var wsUrl = proto + location.host + '/ws';
+            var ws = new WebSocket(wsUrl);
+            ws.addEventListener('message', function (evt) {
+                try {
+                    var o = JSON.parse(evt.data);
+                    if (!o) return;
+                    if (o.type === 'thumb_ready' && o.media && o.thumb) {
+                        var sel1 = 'a[href="' + o.media + '"] img.thumb-img';
+                        var sel2 = '[data-src="' + o.media + '"] img.thumb-img';
+                        var els = Array.from(document.querySelectorAll(sel1)).concat(Array.from(document.querySelectorAll(sel2)));
+                        els.forEach(function (el) {
+                            try {
+                                var src = el.getAttribute('src') || '';
+                                if (!src || src.includes('placeholder')) {
+                                    var url = '/images/thumbs/' + encodeURIComponent(o.thumb);
+                                    var img = new Image();
+                                    img.onload = function () { el.src = url; scheduleLayout(); };
+                                    img.onerror = function () { };
+                                    img.src = url;
+                                }
+                            } catch (e) { }
+                        });
+                    }
+                } catch (e) { }
+            });
+        } catch (e) { }
+    }
+
     function setupSidebarLogic() {
         const topBtn = document.querySelector(".scroll-to-top-btn");
         const pushState = history.pushState;
@@ -327,6 +361,7 @@
     }
 
     setupSidebarLogic();
+    setupThumbSocket();
 
     window.w = initFancybox;
     window.m = initMasonry;
