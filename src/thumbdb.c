@@ -403,6 +403,40 @@ void thumbdb_iterate(void (*cb)(const char* key, const char* value, void* ctx), 
     thread_mutex_unlock(&db_mutex);
 }
 
+int thumbdb_find_for_media(const char* media_path, char* out_key, size_t out_key_len) {
+    if (!media_path || !out_key || out_key_len == 0) return 1;
+    if (!db_inited) { if (thumbdb_open() != 0) return 1; }
+    if (ensure_index_uptodate() != 0) return 1;
+    thread_mutex_lock(&db_mutex);
+    char best_large[PATH_MAX]; best_large[0] = '\0';
+    for (size_t i = 0; i < ht_buckets; ++i) {
+        ht_entry_t* e = ht[i];
+        while (e) {
+            if (e->val && e->val[0] != '\0' && strcmp(e->val, media_path) == 0) {
+                if (strstr(e->key, "-small.")) {
+                    strncpy(out_key, e->key, out_key_len - 1);
+                    out_key[out_key_len - 1] = '\0';
+                    thread_mutex_unlock(&db_mutex);
+                    return 0;
+                }
+                if (strstr(e->key, "-large.")) {
+                    strncpy(best_large, e->key, sizeof(best_large) - 1);
+                    best_large[sizeof(best_large) - 1] = '\0';
+                }
+            }
+            e = e->next;
+        }
+    }
+    if (best_large[0]) {
+        strncpy(out_key, best_large, out_key_len - 1);
+        out_key[out_key_len - 1] = '\0';
+        thread_mutex_unlock(&db_mutex);
+        return 0;
+    }
+    thread_mutex_unlock(&db_mutex);
+    return 1;
+}
+
 int thumbdb_compact(void) {
     if (!db_inited) return -1;
     if (ensure_index_uptodate() != 0) return -1;

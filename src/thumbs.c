@@ -271,6 +271,34 @@ void get_thumb_rel_names(const char* full_path, const char* filename, char* smal
     snprintf(small_rel, small_len, "%s-small.%s", base_name, ext_out);
     snprintf(large_rel, large_len, "%s-large.%s", base_name, ext_out);
 }
+void get_thumb_rel_names_quick(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len) {
+    const char* fname = filename ? filename : full_path;
+    const char* dot = strrchr(fname, '.');
+    char base_name[PATH_MAX];
+    char ext_in[64];
+    char ext_out[64];
+    if (dot) {
+        size_t blen = (size_t)(dot - fname);
+        if (blen >= sizeof(base_name)) blen = sizeof(base_name) - 1;
+        memcpy(base_name, fname, blen);
+        base_name[blen] = '\0';
+        size_t elen = strlen(dot + 1);
+        if (elen >= sizeof(ext_in)) elen = sizeof(ext_in) - 1;
+        memcpy(ext_in, dot + 1, elen);
+        ext_in[elen] = '\0';
+    }
+    else {
+        strncpy(base_name, fname, sizeof(base_name) - 1);
+        base_name[sizeof(base_name) - 1] = '\0';
+        strncpy(ext_in, "jpg", sizeof(ext_in) - 1);
+        ext_in[sizeof(ext_in) - 1] = '\0';
+    }
+    if (ascii_stricmp(ext_in, "webp") == 0) strncpy(ext_out, "webp", sizeof(ext_out) - 1);
+    else strncpy(ext_out, "jpg", sizeof(ext_out) - 1);
+    ext_out[sizeof(ext_out) - 1] = '\0';
+    snprintf(small_rel, small_len, "%s-small.%s", base_name, ext_out);
+    snprintf(large_rel, large_len, "%s-large.%s", base_name, ext_out);
+}
 void make_thumb_fs_paths(const char* media_full, const char* filename, char* small_fs_out, size_t small_fs_out_len, char* large_fs_out, size_t large_fs_out_len) {
     char small_rel[PATH_MAX];
     char large_rel[PATH_MAX];
@@ -683,15 +711,17 @@ static void warn_maybe_log_already_running(const char* dir) {
                 warn_head = cur;
             }
         }
-        if (cur) {
+            if (cur) {
             if (now - cur->last_log >= LOG_SUPPRESS_SECONDS) {
-                LOG_INFO("Thumbnail generation already running for: %s", dir);
+                char tmpd[PATH_MAX]; strncpy(tmpd, dir, sizeof(tmpd) - 1); tmpd[sizeof(tmpd) - 1] = '\0'; strip_trailing_sep(tmpd);
+                LOG_INFO("Thumbnail generation already running for: %s", tmpd);
                 cur->last_log = now;
             }
         }
         thread_mutex_unlock(&warn_mutex);
     } else {
-        LOG_INFO("Thumbnail generation already running for: %s", dir);
+        char tmpd[PATH_MAX]; strncpy(tmpd, dir, sizeof(tmpd) - 1); tmpd[sizeof(tmpd) - 1] = '\0'; strip_trailing_sep(tmpd);
+        LOG_INFO("Thumbnail generation already running for: %s", tmpd);
     }
 }
 static void remove_watcher_node(const char* dir) {
@@ -781,8 +811,10 @@ static void* thumbnail_generation_thread(void* args) {
     strncpy(dir_path, thread_args->dir_path, PATH_MAX - 1);
     dir_path[PATH_MAX - 1] = '\0';
     free(args);
+    strip_trailing_sep(dir_path);
     LOG_INFO("Background thumbnail generation starting for: %s", dir_path);
     run_thumb_generation(dir_path);
+    strip_trailing_sep(dir_path);
     LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
     if (!running_mutex_inited && thread_mutex_init(&running_mutex) == 0) running_mutex_inited = 1;
     if (running_mutex_inited) {
@@ -1011,7 +1043,11 @@ void run_thumb_generation(const char* dir) {
     }
 
     count_media_in_dir(dir_used, &prog);
-    LOG_INFO("Found %zu media files in %s", prog.total_files, dir_used);
+    {
+        char dir_used_clean[PATH_MAX]; strncpy(dir_used_clean, dir_used, sizeof(dir_used_clean) - 1); dir_used_clean[sizeof(dir_used_clean) - 1] = '\0';
+        strip_trailing_sep(dir_used_clean);
+        LOG_INFO("Found %zu media files in %s", prog.total_files, dir_used_clean);
+    }
     LOG_DEBUG("run_thumb_generation: calling ensure_thumbs_in_dir for %s (found %zu)", dir_used, prog.total_files);
 
     ensure_thumbs_in_dir(dir_used, &prog);
@@ -1050,6 +1086,14 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
         filename[PATH_MAX - 1] = '\0';
         dirbuf[0] = '.';
         dirbuf[1] = '\0';
+    }
+
+    char found_key[PATH_MAX]; found_key[0] = '\0';
+    if (thumbdb_find_for_media(media_path, found_key, sizeof(found_key)) == 0) {
+        if (thumb_path_len > 0) {
+            snprintf(thumb_path, thumb_path_len, "%s", found_key);
+        }
+        return true;
     }
 
     get_thumb_rel_names(media_path, filename, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
@@ -1523,7 +1567,10 @@ void scan_and_generate_missing_thumbs(void) {
     char** folders = get_gallery_folders(&count);
     if (!folders || count == 0) return;
     for (size_t i = 0; i < count; ++i) {
-        LOG_INFO("Scanning and generating missing thumbs for: %s", folders[i]);
+        {
+            char tmpf[PATH_MAX]; strncpy(tmpf, folders[i], sizeof(tmpf) - 1); tmpf[sizeof(tmpf) - 1] = '\0'; strip_trailing_sep(tmpf);
+            LOG_INFO("Scanning and generating missing thumbs for: %s", tmpf);
+        }
         ensure_thumbs_in_dir(folders[i], NULL);
     }
 }

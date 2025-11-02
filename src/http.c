@@ -105,62 +105,82 @@ static inline int parse_decimal_trimmed(const char* s, const char* e, long* out)
 }
 
 range_t parse_range_header(const char* header_value, long file_size) {
-	range_t range={ 0,0,0 };
-	if(!header_value||strncmp(header_value, "bytes=", 6)) {
+	range_t range = { 0, 0, 0 };
+	if (!header_value || strncmp(header_value, "bytes=", 6)) {
 		LOG_DEBUG("No valid Range header: %s", header_value ? header_value : "(null)");
 		return range;
 	}
-	const char* p=header_value+6;
-	const char* dash=strchr(p, '-');
-	if(!dash) {
+	const char* p = header_value + 6;
+	const char* dash = strchr(p, '-');
+	if (!dash) {
 		LOG_DEBUG("Range header missing dash: %s", header_value);
 		return range;
 	}
 
-	const char* s_begin=p;
-	const char* s_end=dash;
-	while(s_begin<s_end&&isspace((unsigned char)*s_begin)) s_begin++;
-	while(s_end>s_begin&&isspace((unsigned char)*(s_end-1))) s_end--;
+	const char* s_begin = p;
+	const char* s_end = dash;
+	while (s_begin < s_end && isspace((unsigned char)*s_begin)) s_begin++;
+	while (s_end > s_begin && isspace((unsigned char)*(s_end - 1))) s_end--;
 
-	const char* e_begin=dash+1;
-	const char* e_end=header_value+strlen(header_value);
-	while(e_begin<e_end&&isspace((unsigned char)*e_begin)) e_begin++;
-	while(e_end>e_begin&&isspace((unsigned char)*(e_end-1))) e_end--;
+	const char* e_begin = dash + 1;
+	const char* e_end = header_value + strlen(header_value);
+	while (e_begin < e_end && isspace((unsigned char)*e_begin)) e_begin++;
+	while (e_end > e_begin && isspace((unsigned char)*(e_end - 1))) e_end--;
 
-	long s_val=-1, e_val=-1;
-	if(s_begin!=s_end) {
-		if(!parse_decimal_trimmed(s_begin, s_end, &s_val)) {
-			LOG_DEBUG("Invalid range start: %.*s", (int)(s_end-s_begin), s_begin);
+	long s_val = -1, e_val = -1;
+	if (s_begin != s_end) {
+		if (!parse_decimal_trimmed(s_begin, s_end, &s_val)) {
+			LOG_DEBUG("Invalid range start: %.*s", (int)(s_end - s_begin), s_begin);
 			return range;
 		}
 	}
 
-	if(e_begin!=e_end) {
-		if(!parse_decimal_trimmed(e_begin, e_end, &e_val)) {
-			LOG_DEBUG("Invalid range end: %.*s", (int)(e_end-e_begin), e_begin);
+	if (e_begin != e_end) {
+		if (!parse_decimal_trimmed(e_begin, e_end, &e_val)) {
+			LOG_DEBUG("Invalid range end: %.*s", (int)(e_end - e_begin), e_begin);
 			return range;
 		}
 	}
 
-	if(s_val!=-1) {
-		if(s_val>=file_size) { LOG_DEBUG("Range start %ld >= file size %ld", s_val, file_size); return range; }
-		if(e_val==-1||e_val>=file_size) e_val=file_size-1;
-		if(s_val>e_val) { LOG_DEBUG("Range start %ld > end %ld", s_val, e_val); return range; }
+	if (s_val != -1) {
+		if (file_size <= 0) {
+			LOG_DEBUG("File size non-positive for range: %ld", file_size);
+			return range;
+		}
+		if (s_val < 0) s_val = 0;
+		if (s_val >= file_size) {
+			LOG_DEBUG("Range start %ld >= file size %ld, normalizing to %ld", s_val, file_size, file_size - 1);
+			s_val = file_size - 1;
+		}
+		if (e_val == -1 || e_val >= file_size) e_val = file_size - 1;
+		if (e_val < s_val) {
+			LOG_DEBUG("Range start %ld > end %ld after normalization", s_val, e_val);
+			return range;
+		}
 	}
-	else if(e_val!=-1) {
-		long start=file_size-e_val;
-		if(start<0) start=0;
-		s_val=start;
-		e_val=file_size-1;
+	else if (e_val != -1) {
+		if (file_size <= 0) {
+			LOG_DEBUG("File size non-positive for suffix range: %ld", file_size);
+			return range;
+		}
+		long suffix_len = e_val;
+		if (suffix_len <= 0) {
+			LOG_DEBUG("Invalid suffix length: %ld", suffix_len);
+			return range;
+		}
+		long start = file_size - suffix_len;
+		if (start < 0) start = 0;
+		s_val = start;
+		e_val = file_size - 1;
 	}
 	else {
 		LOG_DEBUG("Range header both start and end missing: %s", header_value);
 		return range;
 	}
 
-	range.is_range=1;
-	range.start=s_val;
-	range.end=e_val;
+	range.is_range = 1;
+	range.start = s_val;
+	range.end = e_val;
 	{
 		char sfs[32]; fmt_size(file_size, sfs, sizeof(sfs));
 		LOG_DEBUG("Parsed range: %ld-%ld/%ld (%s)", range.start, range.end, file_size, sfs);

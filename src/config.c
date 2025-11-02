@@ -1,4 +1,5 @@
 #include "config.h"
+#include "common.h"
 #include "logging.h"
 #include "directory.h"
 #include "utils.h"
@@ -51,6 +52,12 @@ void load_config(void) {
 	fclose(f);
 	if (gallery_folder_count == 0) {
 		add_gallery_folder(BASE_DIR);
+	}
+
+	if (gallery_folder_count > 0 && gallery_folders[0] && gallery_folders[0][0]) {
+		strncpy(BASE_DIR, gallery_folders[0], PATH_MAX);
+		BASE_DIR[PATH_MAX-1] = '\0';
+		normalize_path(BASE_DIR);
 	}
 }
 

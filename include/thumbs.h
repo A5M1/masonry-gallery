@@ -13,6 +13,7 @@ typedef struct progress {
     size_t total_files;
 } progress_t;
 void get_thumb_rel_names(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len);
+void get_thumb_rel_names_quick(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len);
 int get_media_dimensions(const char* path, int* width, int* height);
 void start_background_thumb_generation(const char* dir_path);
 int dir_has_missing_thumbs(const char* dir, int videos_only);
@@ -27,9 +28,9 @@ void run_thumb_generation(const char* dir);
 #ifndef MAX_FFMPEG
 #define MAX_FFMPEG 4
 #endif
- #ifndef MAX_THUMB_WORKERS
- #define MAX_THUMB_WORKERS 4
- #endif
+#ifndef MAX_THUMB_WORKERS
+#define MAX_THUMB_WORKERS 4
+#endif
 #define DEBOUNCE_MS 250
 #define STALE_LOCK_SECONDS 300
 #define MAX_SHALLOW_CHECK 25
@@ -45,6 +46,6 @@ void count_media_in_dir(const char* dir, progress_t* prog);
 void ensure_thumbs_in_dir(const char* dir, progress_t* prog);
 void generate_folder_thumb(const char* dir);
 void print_skips(progress_t* prog);
-void clean_orphan_thumbs(const char* dir, progress_t * prog);
+void clean_orphan_thumbs(const char* dir, progress_t* prog);
 void scan_and_generate_missing_thumbs(void);
 #endif // THUMBS_H

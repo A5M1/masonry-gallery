@@ -3,6 +3,7 @@
 #include "thread_pool.h"
 #include "logging.h"
 #include "directory.h"
+#include <ctype.h>
 
 void platform_sleep_ms(int ms) {
 #ifdef _WIN32
@@ -803,6 +804,11 @@ bool platform_real_path(const char* in, char* out) {
     if (!realpath(in, out)) return false;
 #endif
     normalize_path(out);
+#ifdef _WIN32
+    if (in && isalpha((unsigned char)in[0]) && in[1] == ':') {
+        out[0] = in[0];
+    }
+#endif
     return true;
 }
 

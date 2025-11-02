@@ -48,7 +48,7 @@ void derive_paths(const char* argv0) {
 	char* slash=strrchr(exe_path, DIR_SEP);
 	if(slash) *slash='\0';
 
-	strncpy(BASE_DIR, "E:\\F", PATH_MAX);
+	strncpy(BASE_DIR, exe_path, PATH_MAX);
 
 	join_path(VIEWS_DIR, PATH_MAX, exe_path, "views");
 	join_path(JS_DIR, PATH_MAX, exe_path, "public/js");
