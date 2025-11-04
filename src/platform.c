@@ -100,7 +100,6 @@ int platform_file_delete(const char* path) {
             DWORD err2 = GetLastError();
             LOG_WARN("platform_file_delete: attempt=%d DeleteFileA retry after SetFileAttributesA failed for %s err=%lu", attempts + 1, path, (unsigned long)err2);
         }
-        /* If sharing violation, give more time for other processes to close handles. */
         if (err == ERROR_SHARING_VIOLATION) {
             int backoff = 50 * (attempts + 1);
             if (backoff < 100) backoff = 100;

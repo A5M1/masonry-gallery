@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>ThumbDB Editor</title>
+    <style>
+        :root{
+            --bg:#0f1113;
+            --card:#1a1c1f;
+            --muted:#bfc3c6;
+            --glass: rgba(255,255,255,0.04);
+            --accent: rgba(255,255,255,0.06);
+        }
+        html,body{height:100%;}
+        body{font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin:0; padding:28px; background:linear-gradient(180deg,#0b0c0d 0%, #111214 100%); color:var(--muted);}
+        .wrap{max-width:1100px;margin:0 auto;}
+        header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+        h1{font-weight:600;color:#f5f6f7;margin:0}
+        .controls{display:flex;gap:8px;align-items:center}
+        input,button,select{background:transparent;border:1px solid var(--accent);color:var(--muted);padding:8px 10px;border-radius:10px;backdrop-filter: blur(6px);}
+        input::placeholder{color:rgba(191,195,198,0.6)}
+        button{cursor:pointer}
+        .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:14px;padding:14px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 6px 20px rgba(2,4,6,0.6);}
+        table{width:100%;border-collapse:collapse;font-size:13px}
+        th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,0.03);vertical-align:top}
+        th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:12px}
+        pre{margin:0;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', monospace;color:#d7d7d7}
+        .editor{margin-top:16px;display:none}
+        textarea{width:100%;min-height:220px;background:var(--card);border-radius:8px;border:1px solid rgba(255,255,255,0.03);color:#e6e6e6;padding:12px}
+        .actions{display:flex;gap:8px;margin-top:10px}
+        .muted{color:rgba(191,195,198,0.7);font-size:13px}
+        .previewCell{max-height:140px;overflow:auto}
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <header>
+            <h1>ThumbDB Viewer</h1>
+            <div class="muted">Grayscale glass UI</div>
+        </header>
+        <div class="card">
+            <div class="controls" style="margin-bottom:12px;">
+                <button id="refresh">Refresh</button>
+                <input id="filter" placeholder="Filter keys" />
+                <button id="clear">Clear</button>
+                <input id="dir" placeholder="Gallery dir (optional)" style="width:260px;" />
+                <button id="viewthumbs">View Thumbs</button>
+            </div>
+            <div id="list"></div>
+        </div>
+        <div id="editor" class="card editor">
+            <h3 id="editorKey"></h3>
+            <textarea id="editorValue"></textarea>
+            <div class="actions">
+                <button id="save">Save</button>
+                <button id="del">Delete</button>
+                <button id="close">Close</button>
+            </div>
+        </div>
+    </div>
+    <script src="/js/thumbdb.js"></script>
+</body>
+</html>

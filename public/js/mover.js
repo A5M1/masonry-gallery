@@ -451,9 +451,33 @@ function setupWebsocket() {
       ws.onmessage = (ev) => {
         try {
           const o = JSON.parse(ev.data);
-          if (o && o.type === 'folder_added') {
-            console.log('WebSocket: folder_added', o.path);
-            loadFolders();
+          if (!o) return;
+          if (o.type === 'folder_added' || o.type === 'folderAdded') {
+            const rawPath = o.path || '';
+            const newPath = rawPath.replace(/\\/g, '/');
+            loadFolders().then(() => {
+              try {
+                const container = document.getElementById('targetFolder');
+                if (!container) return;
+                const folderEls = container.querySelectorAll('.folder');
+                const normNew = normalizePath(newPath);
+                const newLast = (normNew && normNew.split('/').length) ? normNew.split('/').pop() : '';
+                for (const el of folderEls) {
+                  const elp = normalizePath(el.dataset.full || '');
+                  if (elp === normNew || (newLast && elp.split('/').pop() === newLast)) {
+                    document.querySelectorAll('#targetFolder .folder').forEach(ele => ele.classList.remove('selected'));
+                    el.classList.add('selected');
+                    expandAncestors(el.parentElement, container);
+                    setTimeout(() => el.scrollIntoView({ block: 'center' }), 100);
+                    target = el.dataset.full;
+                    const url = new URL(location.href);
+                    url.searchParams.set('target', target);
+                    window.history.replaceState({}, '', url.toString());
+                    break;
+                  }
+                }
+              } catch (e) { console.warn('Failed to select new folder after WS event', e); }
+            }).catch(() => {});
           }
         } catch (e) { console.warn('WS message parse error', e); }
       };

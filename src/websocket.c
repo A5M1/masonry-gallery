@@ -193,7 +193,6 @@ static void* websocket_client_thread(void* arg) {
                 payload[i] ^= mask[i % 4];
         }
 
-        // --- Handle control opcodes ---
         if (opcode == 0x8) { // close
             if (payload != small_buf) free(payload);
             break;
@@ -205,9 +204,7 @@ static void* websocket_client_thread(void* arg) {
             continue;
         }
 
-        // --- Handle text or continuation frames ---
         if (opcode == 0x1 || (opcode == 0x0 && expect_opcode == 0x1)) {
-            // Check for total accumulated message size
             if (accum_len + payload_len > MAX_WS_MESSAGE_SIZE) {
                 LOG_WARN("WebSocket client %d exceeded MAX_WS_MESSAGE_SIZE (%d bytes) — closing",
                     c, MAX_WS_MESSAGE_SIZE);
@@ -227,7 +224,6 @@ static void* websocket_client_thread(void* arg) {
             if (payload != small_buf) free(payload);
 
                 if (fin) {
-                // Handle complete text message
                 if (strstr((char*)accum, "subscribe")) {
                     ws_update_topic(c, (char*)accum);
                     const char* sstart = strstr((char*)accum, "\"session\"");
@@ -262,7 +258,6 @@ static void* websocket_client_thread(void* arg) {
                     }
                 }
 
-                // Full addFolder logic preserved
                 if (strstr((char*)accum, "\"action\"") && strstr((char*)accum, "addFolder")) {
                     const char* body = (char*)accum;
                     const char* n_start = strstr(body, "\"name\":");

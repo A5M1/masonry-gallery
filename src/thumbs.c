@@ -968,7 +968,6 @@ static void* thumb_maintenance_thread(void* args) {
     int interval = args ? *((int*)args) : 300;
     int ival = interval;
     free(args);
-    thumbdb_open();
     for (;;) {
         platform_sleep_ms(1000 * ival);
         LOG_INFO("Periodic thumb maintenance: running migration and orphan cleanup");
