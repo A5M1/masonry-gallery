@@ -3,6 +3,7 @@
 #include "logging.h"
 #include "platform.h"
 #include "common.h"
+#include "thread_pool.h"
 
 static void fmt_size(long b, char* out, size_t n) {
 	const char* units[] = {"B","KB","MB","GB","TB"};
@@ -188,6 +189,66 @@ range_t parse_range_header(const char* header_value, long file_size) {
 	return range;
 }
 
+static thread_mutex_t g_range_req_mutex;
+typedef struct { int sock; char path[PATH_MAX]; long last_ts_ms; int count; } range_req_entry_t;
+static range_req_entry_t g_range_reqs[256];
+static int g_range_reqs_inited = 0;
+
+static long now_ms_local(void) {
+#if defined(_WIN32)
+	FILETIME ft; GetSystemTimeAsFileTime(&ft);
+	unsigned long long t=((unsigned long long)ft.dwHighDateTime<<32)|ft.dwLowDateTime;
+	return (long)((t-116444736000000000ULL)/10000ULL);
+#else
+	struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
+	return (long)(ts.tv_sec*1000LL+ts.tv_nsec/1000000LL);
+#endif
+}
+
+static void ensure_range_reqs_init(void) {
+	if (g_range_reqs_inited) return;
+	g_range_reqs_inited = 1;
+	thread_mutex_init(&g_range_req_mutex);
+	for (int i = 0; i < (int)(sizeof(g_range_reqs)/sizeof(g_range_reqs[0])); ++i) g_range_reqs[i].sock = -1;
+}
+
+static int range_request_allowed(int sock, const char* path) {
+	const long WINDOW_MS = 60 * 1000L;
+	const int MAX_PER_WINDOW = 6;
+	long now = now_ms_local();
+	ensure_range_reqs_init();
+	thread_mutex_lock(&g_range_req_mutex);
+	int free_idx = -1;
+	for (int i = 0; i < (int)(sizeof(g_range_reqs)/sizeof(g_range_reqs[0])); ++i) {
+		if (g_range_reqs[i].sock == sock && g_range_reqs[i].path[0] && strcmp(g_range_reqs[i].path, path) == 0) {
+			if (now - g_range_reqs[i].last_ts_ms > WINDOW_MS) {
+				g_range_reqs[i].count = 1;
+				g_range_reqs[i].last_ts_ms = now;
+				thread_mutex_unlock(&g_range_req_mutex);
+				return 1;
+			}
+			g_range_reqs[i].count++;
+			g_range_reqs[i].last_ts_ms = now;
+			int ok = (g_range_reqs[i].count <= MAX_PER_WINDOW);
+			thread_mutex_unlock(&g_range_req_mutex);
+			return ok;
+		}
+		if (g_range_reqs[i].sock == -1 && free_idx == -1) free_idx = i;
+	}
+	if (free_idx >= 0) {
+		g_range_reqs[free_idx].sock = sock;
+		g_range_reqs[free_idx].path[0] = '\0';
+		strncpy(g_range_reqs[free_idx].path, path, PATH_MAX-1);
+		g_range_reqs[free_idx].path[PATH_MAX-1] = '\0';
+		g_range_reqs[free_idx].count = 1;
+		g_range_reqs[free_idx].last_ts_ms = now;
+		thread_mutex_unlock(&g_range_req_mutex);
+		return 1;
+	}
+	thread_mutex_unlock(&g_range_req_mutex);
+	return 0;
+}
+
 
 void send_header(int c, int status, const char* text, const char* ctype, long len, const range_t* r, long fs, int keep) {
 	char hbuf[1024];
@@ -229,17 +290,28 @@ void send_file_stream(int c, const char* path, const char* range, int keep) {
 	const char* ctype=mime_for(path);
 	long start=0, sz=fsz;int code=200;const char* txt="OK";
 	if(r.is_range) {
+		if (!range_request_allowed(c, path)) {
+			LOG_WARN("Too many Range requests from socket %d for %s", c, path);
+			char hbuf[256];
+			snprintf(hbuf, sizeof(hbuf), "HTTP/1.1 429 Too Many Requests\r\nConnection: %s\r\nContent-Length: 0\r\n\r\n", keep ? "keep-alive" : "close");
+			send(c, hbuf, (int)strlen(hbuf), 0);
+			return;
+		}
 		if (r.start < 0) r.start = 0;
 		if (fsz <= 0) {
 			char hbuf[256];
-			int off = snprintf(hbuf, sizeof(hbuf), "HTTP/1.1 416 Range Not Satisfiable\r\nConnection: %s\r\nContent-Range: bytes */%ld\r\nContent-Length: 0\r\n\r\n", keep ? "keep-alive" : "close", fsz);
+			int off = snprintf(hbuf, sizeof(hbuf), 
+			"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: %s\r\nContent-Range: bytes */%ld\r\nContent-Length: 0\r\n\r\n", 
+			keep ? "keep-alive" : "close", fsz);
 			send(c, hbuf, (int)strlen(hbuf), 0);
 			return;
 		}
 		if (r.end >= fsz) r.end = fsz - 1;
 		if (r.start > r.end) {
 			char hbuf[256];
-			int off = snprintf(hbuf, sizeof(hbuf), "HTTP/1.1 416 Range Not Satisfiable\r\nConnection: %s\r\nContent-Range: bytes */%ld\r\nContent-Length: 0\r\n\r\n", keep ? "keep-alive" : "close", fsz);
+			int off = snprintf(hbuf, sizeof(hbuf),
+			"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: %s\r\nContent-Range: bytes */%ld\r\nContent-Length: 0\r\n\r\n", 
+			keep ? "keep-alive" : "close", fsz);
 			send(c, hbuf, (int)strlen(hbuf), 0);
 			return;
 		}

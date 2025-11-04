@@ -1285,6 +1285,7 @@ void handle_legacy_move(int c, const char* body, bool keep_alive) {
 	normalize_path(destFolder); mk_dir(destFolder);
 	char dest[PATH_MAX]; path_join(dest, destFolder, fname);
 
+	platform_close_streams_for_path(src);
 	if (platform_move_file(src, dest) == 0) {
 		LOG_INFO("handle_legacy_move: renamed %s -> %s", src, dest);
 		const char* ok = "{\"status\":\"ok\"}";
@@ -1292,6 +1293,7 @@ void handle_legacy_move(int c, const char* body, bool keep_alive) {
 		send(c, ok, (int)strlen(ok), 0);
 		return;
 	}
+	platform_close_streams_for_path(src);
 	if (platform_copy_file(src, dest) == 0) {
 		LOG_INFO("handle_legacy_move: copied %s -> %s", src, dest);
 		if (platform_file_delete(src) == 0) {

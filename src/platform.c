@@ -4,6 +4,77 @@
 #include "logging.h"
 #include "directory.h"
 #include <ctype.h>
+#include "utils.h"
+
+static thread_mutex_t g_streams_mutex;
+typedef struct { char path[PATH_MAX]; int sock; } active_stream_t;
+static active_stream_t g_active_streams[128];
+static int g_active_streams_count = 0;
+
+static void init_streams(void) {
+    static int inited = 0;
+    if (inited) return;
+    inited = 1;
+    thread_mutex_init(&g_streams_mutex);
+    for (int i = 0; i < (int)(sizeof(g_active_streams)/sizeof(g_active_streams[0])); ++i) g_active_streams[i].sock = -1;
+}
+
+static void register_stream(const char* path, int sock) {
+    if (!path) return;
+    init_streams();
+    thread_mutex_lock(&g_streams_mutex);
+    for (int i = 0; i < (int)(sizeof(g_active_streams)/sizeof(g_active_streams[0])); ++i) {
+        if (g_active_streams[i].sock == -1) {
+            strncpy(g_active_streams[i].path, path, PATH_MAX - 1);
+            g_active_streams[i].path[PATH_MAX - 1] = '\0';
+            g_active_streams[i].sock = sock;
+            thread_mutex_unlock(&g_streams_mutex);
+            return;
+        }
+    }
+    thread_mutex_unlock(&g_streams_mutex);
+}
+
+static void unregister_stream_by_sock(int sock) {
+    init_streams();
+    thread_mutex_lock(&g_streams_mutex);
+    for (int i = 0; i < (int)(sizeof(g_active_streams)/sizeof(g_active_streams[0])); ++i) {
+        if (g_active_streams[i].sock == sock) {
+            g_active_streams[i].sock = -1;
+            g_active_streams[i].path[0] = '\0';
+            break;
+        }
+    }
+    thread_mutex_unlock(&g_streams_mutex);
+}
+
+int platform_close_streams_for_path(const char* path) {
+    if (!path) return 0;
+    init_streams();
+    char thumbs_root[PATH_MAX];
+    get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+    normalize_path((char*)path);
+    normalize_path(thumbs_root);
+    if (strncmp(path, thumbs_root, strlen(thumbs_root)) == 0) {
+        LOG_WARN("platform_close_streams_for_path: refusing to close streams for thumbs path: %s", path);
+        return 0;
+    }
+    int closed = 0;
+    thread_mutex_lock(&g_streams_mutex);
+    for (int i = 0; i < (int)(sizeof(g_active_streams)/sizeof(g_active_streams[0])); ++i) {
+        if (g_active_streams[i].sock != -1 && g_active_streams[i].path[0] && strcmp(g_active_streams[i].path, path) == 0) {
+            int s = g_active_streams[i].sock;
+            g_active_streams[i].sock = -1;
+            g_active_streams[i].path[0] = '\0';
+            thread_mutex_unlock(&g_streams_mutex);
+            SOCKET_CLOSE(s);
+            closed++;
+            thread_mutex_lock(&g_streams_mutex);
+        }
+    }
+    thread_mutex_unlock(&g_streams_mutex);
+    return closed;
+}
 
 void platform_sleep_ms(int ms) {
 #ifdef _WIN32
@@ -17,17 +88,31 @@ int platform_file_delete(const char* path) {
     if (!path) return -1;
 #ifdef _WIN32
     int attempts = 0;
-    while (attempts < 5) {
+    const int max_attempts = 20;
+    while (attempts < max_attempts) {
         if (DeleteFileA(path)) return 0;
         DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND) return 0;
+        LOG_WARN("platform_file_delete: attempt=%d DeleteFileA failed for %s err=%lu", attempts + 1, path, (unsigned long)err);
         if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
             SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
             if (DeleteFileA(path)) return 0;
+            DWORD err2 = GetLastError();
+            LOG_WARN("platform_file_delete: attempt=%d DeleteFileA retry after SetFileAttributesA failed for %s err=%lu", attempts + 1, path, (unsigned long)err2);
         }
-        platform_sleep_ms(50);
+        /* If sharing violation, give more time for other processes to close handles. */
+        if (err == ERROR_SHARING_VIOLATION) {
+            int backoff = 50 * (attempts + 1);
+            if (backoff < 100) backoff = 100;
+            if (backoff > 2000) backoff = 2000;
+            platform_sleep_ms(backoff);
+        }
+        else {
+            platform_sleep_ms(50);
+        }
         attempts++;
     }
+    LOG_ERROR("platform_file_delete: giving up deleting %s after %d attempts", path, max_attempts);
     return -1;
 #else
     int attempts = 0;
@@ -35,13 +120,16 @@ int platform_file_delete(const char* path) {
         if (unlink(path) == 0) return 0;
         if (errno == ENOENT) return 0;
         if (errno == EACCES || errno == EPERM) {
+            LOG_WARN("platform_file_delete: unlink permission error for %s errno=%d", path, errno);
             chmod(path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
             if (unlink(path) == 0) return 0;
+            LOG_WARN("platform_file_delete: unlink after chmod failed for %s errno=%d", path, errno);
         }
         if (errno == EINTR) { attempts++; continue; }
         platform_sleep_ms(50);
         attempts++;
     }
+    LOG_ERROR("platform_file_delete: giving up deleting %s after attempts errno=%d", path, errno);
     return -1;
 #endif
 }
@@ -430,6 +518,7 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
 #ifdef _WIN32
     HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return -1;
+    register_stream(path, client_socket);
     WSAPROTOCOL_INFO pi; int pi_len = sizeof(pi);
     DWORD file_size = GetFileSize(hFile, NULL);
     long rem = len;
@@ -443,9 +532,9 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
     if (getsockopt(client_socket, SOL_SOCKET, SO_PROTOCOL_INFO, (char*)&pi2, &pi2_len) == 0) {
         DWORD toWrite = (rem > 0 && rem <= (long)0xFFFFFFFF) ? (DWORD)rem : 0;
         if (toWrite > 0) {
-            if (TransmitFile((SOCKET)client_socket, hFile, toWrite, 0, NULL, NULL, 0)) { CloseHandle(hFile); return 0; }
+            if (TransmitFile((SOCKET)client_socket, hFile, toWrite, 0, NULL, NULL, 0)) { CloseHandle(hFile); unregister_stream_by_sock(client_socket); return 0; }
         } else {
-            if (TransmitFile((SOCKET)client_socket, hFile, 0, 0, NULL, NULL, 0)) { CloseHandle(hFile); return 0; }
+            if (TransmitFile((SOCKET)client_socket, hFile, 0, 0, NULL, NULL, 0)) { CloseHandle(hFile); unregister_stream_by_sock(client_socket); return 0; }
         }
     }
     char buf[65536];
@@ -458,10 +547,12 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
         rem -= snt; total += snt;
     }
     CloseHandle(hFile);
+    unregister_stream_by_sock(client_socket);
     return (rem > 0) ? -1 : 0;
 #else
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
+    register_stream(path, client_socket);
     off_t offset = start;
     long remain = len; if (remain <= 0) {
         struct stat st; if (fstat(fd, &st) == 0) remain = (long)st.st_size - start; else remain = 0;
@@ -485,6 +576,7 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
         }
     }
     close(fd);
+    unregister_stream_by_sock(client_socket);
     return 0;
 #endif
 }

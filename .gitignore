@@ -1,35 +1,35 @@
 # ======================================================
 # IDE / Editor
 # ======================================================
-.vs/
-.vscode/
-.idea/
+*.hintrc
+*.sln.docstates
 *.suo
 *.user
 *.userosscache
-*.sln.docstates
-*.hintrc
+.idea/
+.vs/
+.vscode/
 
 # ======================================================
 # Build / Output
 # ======================================================
-/build/
-/dist/
-/symbols/
-/dbDir/
-/libraries/
-/.features/
-/todo/
-*.exe
 *.cmd
 *.conf
+*.exe
+/.features/
+/build/
+/dbDir/
+/dist/
+/libraries/
+/symbols/
+/todo/
 
 # ======================================================
 # Debug 
 # ======================================================
 *.i64
-*.rdi
 *.pdb
+*.rdi
  
 # ======================================================
 # Logs / Reports
@@ -52,13 +52,13 @@ Thumbs.db
 # ======================================================
 # Temporary / Swap / Backup files
 # ======================================================
-*~
-*.swp
-*.swo
 *.bak
-*.tmp
 *.orig
 *.rej
+*.swp
+*.swo
+*.tmp
+*~
 
 # ======================================================
 # Node / JavaScript (if any)
@@ -71,21 +71,21 @@ yarn-error.log*
 # ======================================================
 # Python (if any)
 # ======================================================
-__pycache__/
 *.py[cod]
-*.pyo
 *.pyd
+*.pyo
+__pycache__/
 
 # ======================================================
 # C / C++ / Object files
 # ======================================================
+*.a
+*.dll
+*.dylib
+*.lib
 *.o
 *.obj
-*.a
-*.lib
-*.dll
 *.so
-*.dylib
 
 # ======================================================
 # Coverage / Test / Misc
@@ -93,7 +93,8 @@ __pycache__/
 *.gcda
 *.gcno
 *.lcov
-coverage/
+.roo/*
 /rust/target
-rust/Cargo.lock
 /target
+coverage/
+rust/Cargo.lock

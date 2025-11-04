@@ -24,6 +24,7 @@ const platform_recent_cmd_t* platform_get_recent_commands(size_t* out_count);
 typedef void (*platform_watcher_callback_t)(const char* dir);
 int platform_start_dir_watcher(const char* dir, platform_watcher_callback_t cb);
 int platform_stream_file_payload(int client_socket, const char* path, long start, long len, int is_range);
+int platform_close_streams_for_path(const char* path);
 int platform_stat(const char* path, struct stat* st);
 const char* platform_devnull(void);
 int platform_fsync(int fd);

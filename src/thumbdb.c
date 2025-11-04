@@ -441,9 +441,8 @@ int thumbdb_compact(void) {
     if (!db_inited) return -1;
     if (ensure_index_uptodate() != 0) return -1;
     thread_mutex_lock(&db_mutex);
-    char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "%s.tmp", db_path);
-    FILE* f = fopen(tmp, "w");
-    if (!f) { thread_mutex_unlock(&db_mutex); return -1; }
+    FILE* f = fopen(db_path, "w");
+    if (!f) { LOG_WARN("thumbdb: failed to open db for compaction: %s", db_path); thread_mutex_unlock(&db_mutex); return -1; }
     for (size_t i = 0; i < ht_buckets; ++i) {
         ht_entry_t* e = ht[i];
         while (e) {
@@ -454,8 +453,6 @@ int thumbdb_compact(void) {
     fflush(f);
     platform_fsync(fileno(f));
     fclose(f);
-    platform_file_delete(db_path);
-    if (rename(tmp, db_path) != 0) { LOG_WARN("thumbdb: compaction rename failed"); thread_mutex_unlock(&db_mutex); return -1; }
     LOG_INFO("thumbdb: compaction completed");
     thread_mutex_unlock(&db_mutex);
     return 0;

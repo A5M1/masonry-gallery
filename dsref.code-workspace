@@ -36,6 +36,9 @@
 		"files.exclude": {
 			"**/build": true,
 			"**/.vs": true,
+			"**/target": true,
+			"**/.features":true,
+			"**/.roo":true,
 			"**/logs": true,
 			"**/license": true,
 			"**/tools": true,

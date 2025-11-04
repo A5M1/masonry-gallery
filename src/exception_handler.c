@@ -21,7 +21,7 @@ static void write_process_memory_info(void) {
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
         LOG_ERROR("Memory: PageFaultCount=%lu WorkingSetSize=%zu PeakWorkingSetSize=%zu PagefileUsage=%zu",
-                  pmc.PageFaultCount, (size_t)pmc.WorkingSetSize, (size_t)pmc.PeakWorkingSetSize, (size_t)pmc.PagefileUsage);
+            pmc.PageFaultCount, (size_t)pmc.WorkingSetSize, (size_t)pmc.PeakWorkingSetSize, (size_t)pmc.PagefileUsage);
     }
 }
 
@@ -47,7 +47,7 @@ static void write_minidump_with_filename(EXCEPTION_POINTERS* ep) {
 
     char fname[MAX_PATH];
     snprintf(fname, sizeof(fname), "%s\\crashdump_%04d%02d%02d_%02d%02d%02d.dmp",
-             dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
     HANDLE hFile = CreateFileA(fname, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -61,7 +61,7 @@ static void write_minidump_with_filename(EXCEPTION_POINTERS* ep) {
     mei.ClientPointers = FALSE;
 
     BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
-                                MiniDumpWithFullMemory | MiniDumpWithHandleData, &mei, NULL, NULL);
+        MiniDumpWithFullMemory | MiniDumpWithHandleData, &mei, NULL, NULL);
     if (!ok)
         LOG_ERROR("MiniDumpWriteDump failed (err=%lu)", GetLastError());
     else
@@ -73,8 +73,8 @@ static void write_minidump_with_filename(EXCEPTION_POINTERS* ep) {
 static LONG WINAPI exception_filter(EXCEPTION_POINTERS* ep) {
     LOG_ERROR("=== UNHANDLED EXCEPTION ===");
     LOG_ERROR("Code=0x%08x Address=%p",
-              (unsigned)ep->ExceptionRecord->ExceptionCode,
-              ep->ExceptionRecord->ExceptionAddress);
+        (unsigned)ep->ExceptionRecord->ExceptionCode,
+        ep->ExceptionRecord->ExceptionAddress);
 
     DWORD pid = GetCurrentProcessId();
     DWORD tid = GetCurrentThreadId();
@@ -119,12 +119,12 @@ void install_exception_handlers(void) {
 
 static const char* signal_name(int sig) {
     switch (sig) {
-        case SIGSEGV: return "SIGSEGV (Segmentation Fault)";
-        case SIGABRT: return "SIGABRT (Abort)";
-        case SIGFPE:  return "SIGFPE (Floating Point Error)";
-        case SIGILL:  return "SIGILL (Illegal Instruction)";
-        case SIGBUS:  return "SIGBUS (Bus Error)";
-        default:      return "Unknown Signal";
+    case SIGSEGV: return "SIGSEGV (Segmentation Fault)";
+    case SIGABRT: return "SIGABRT (Abort)";
+    case SIGFPE:  return "SIGFPE (Floating Point Error)";
+    case SIGILL:  return "SIGILL (Illegal Instruction)";
+    case SIGBUS:  return "SIGBUS (Bus Error)";
+    default:      return "Unknown Signal";
     }
 }
 
@@ -166,8 +166,8 @@ static void signal_handler(int sig) {
 void install_exception_handlers(void) {
     signal(SIGSEGV, signal_handler);
     signal(SIGABRT, signal_handler);
-    signal(SIGFPE,  signal_handler);
-    signal(SIGILL,  signal_handler);
-    signal(SIGBUS,  signal_handler);
+    signal(SIGFPE, signal_handler);
+    signal(SIGILL, signal_handler);
+    signal(SIGBUS, signal_handler);
 }
 #endif
