@@ -229,7 +229,7 @@ int ascii_stricmp(const char* a, const char* b) {
 static int ascii_tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
 int debug_ascii_stricmp(const char* a, const char* b) {
-	LOG_DEBUG("debug_ascii_stricmp: probe a=%p b=%p", (void*)a, (void*)b);
+	//LOG_DEBUG("debug_ascii_stricmp: probe a=%p b=%p", (void*)a, (void*)b);
 #ifdef _WIN32
 	int a_readable = 0, b_readable = 0;
 	if (a) {
@@ -245,7 +245,7 @@ int debug_ascii_stricmp(const char* a, const char* b) {
 		}
 	}
 	if (!a_readable || !b_readable) {
-		LOG_DEBUG("debug_ascii_stricmp: unreadable pointer a=%p readable=%d b=%p readable=%d", (void*)a, a_readable, (void*)b, b_readable);
+		//LOG_DEBUG("debug_ascii_stricmp: unreadable pointer a=%p readable=%d b=%p readable=%d", (void*)a, a_readable, (void*)b, b_readable);
 		if (a == b) return 0;
 		return (a < b) ? -1 : 1;
 	}
@@ -253,13 +253,13 @@ int debug_ascii_stricmp(const char* a, const char* b) {
 	unsigned char probe_b[9] = { 0 };
 	memcpy(probe_a, a, 8);
 	memcpy(probe_b, b, 8);
-	LOG_DEBUG("debug_ascii_stricmp: a_bytes=%.8s b_bytes=%.8s", (char*)probe_a, (char*)probe_b);
+	//LOG_DEBUG("debug_ascii_stricmp: a_bytes=%.8s b_bytes=%.8s", (char*)probe_a, (char*)probe_b);
 	return ascii_stricmp(a, b);
 #else
 	unsigned char probe_a[9] = { 0 }, probe_b[9] = { 0 };
 	if (a) for (int i = 0; i < 8 && a[i]; ++i) probe_a[i] = (unsigned char)a[i];
 	if (b) for (int i = 0; i < 8 && b[i]; ++i) probe_b[i] = (unsigned char)b[i];
-	LOG_DEBUG("debug_ascii_stricmp: a_bytes=%.8s b_bytes=%.8s", (char*)probe_a, (char*)probe_b);
+	//LOG_DEBUG("debug_ascii_stricmp: a_bytes=%.8s b_bytes=%.8s", (char*)probe_a, (char*)probe_b);
 	return ascii_stricmp(a, b);
 #endif
 }

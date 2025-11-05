@@ -1180,7 +1180,12 @@ void handle_legacy_folders(int c, bool keep_alive) {
 		}
 
 		for (int i = subcnt - 1; i >= 0; --i) {
-			if (sp >= stack_cap) { stack_cap += STACK_GROW; char** tmp = realloc(stack, stack_cap * sizeof(char*)); if (!tmp) break; stack = tmp; }
+			if (sp >= stack_cap) {
+				stack_cap += STACK_GROW;
+				char** tmp = realloc(stack, stack_cap * sizeof(char*));
+				if (!tmp) break;
+				stack = tmp;
+			}
 			char* child = malloc(PATH_MAX);
 			snprintf(child, PATH_MAX, "%s%s%s", d, DIR_SEP_STR, subdirs[i]);
 			normalize_path(child);
@@ -1206,57 +1211,124 @@ void handle_legacy_folders(int c, bool keep_alive) {
 	send(c, legacy_folders_cache ? legacy_folders_cache : out, (int)used, 0);
 	free(out); free(stack);
 }
-
 void handle_legacy_files(int c, char* qs, bool keep_alive) {
 	char dirparam[PATH_MAX] = { 0 };
-	if (qs) { char* v = query_get(qs, "dir"); if (v) { strncpy(dirparam, v, PATH_MAX - 1); SAFE_FREE(v); } }
-	LOG_DEBUG("handle_legacy_files requested dir=%s", dirparam[0] ? dirparam : "/");
-	char search[PATH_MAX];
-	sanitize_dirparam(dirparam);
-	if (dirparam[0]) {
-		char dir_copy[PATH_MAX]; strncpy(dir_copy, dirparam, PATH_MAX - 1); dir_copy[PATH_MAX - 1] = 0; normalize_path(dir_copy);
-		while (*dir_copy == DIR_SEP) memmove(dir_copy, dir_copy + 1, strlen(dir_copy));
-		snprintf(search, sizeof(search), "%s%s%s", BASE_DIR, DIR_SEP_STR, dir_copy);
-	}
-	else snprintf(search, sizeof(search), "%s", BASE_DIR);
-	if (!is_dir(search)) { send_text(c, 400, "Bad Request", "Invalid directory", keep_alive); return; }
 
-	size_t cap = 1024; char* out = malloc(cap); size_t used = 0; out[used++] = '['; int first = 1;
-	diriter it; if (!dir_open(&it, search)) { free(out); send_text(c, 500, "Internal Server Error", "opendir failed", keep_alive); return; }
+	if (qs) {
+		char* v = query_get(qs, "dir");
+		if (v) {
+			strncpy(dirparam, v, PATH_MAX - 1);
+			dirparam[PATH_MAX - 1] = '\0';
+			SAFE_FREE(v);
+		}
+	}
+
+	sanitize_dirparam(dirparam);
+	normalize_path(dirparam);
+	while (*dirparam == DIR_SEP) memmove(dirparam, dirparam + 1, strlen(dirparam));
+
+	if (strstr(dirparam, "..") || dirparam[0] == DIR_SEP) {
+		send_text(c, 400, "Bad Request", "Invalid directory path", keep_alive);
+		return;
+	}
+
+	LOG_DEBUG("handle_legacy_files requested dir=%s", dirparam[0] ? dirparam : "/");
+
+	char search[PATH_MAX];
+	if (dirparam[0]) {
+		snprintf(search, sizeof(search), "%s%s%s", BASE_DIR, DIR_SEP_STR, dirparam);
+	}
+	else {
+		snprintf(search, sizeof(search), "%s", BASE_DIR);
+	}
+
+	normalize_path(search);
+
+	if (!is_dir(search)) {
+		send_text(c, 400, "Bad Request", "Invalid directory", keep_alive);
+		return;
+	}
+
+	size_t cap = 1024;
+	char* out = malloc(cap);
+	if (!out) {
+		send_text(c, 500, "Internal Server Error", "Out of memory", keep_alive);
+		return;
+	}
+
+	size_t used = 0;
+	out[used++] = '[';
+	int first = 1;
+
+	diriter it;
+	if (!dir_open(&it, search)) {
+		free(out);
+		send_text(c, 500, "Internal Server Error", "opendir failed", keep_alive);
+		return;
+	}
+
 	const char* name;
 	while ((name = dir_next(&it))) {
-		if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
-		char full[PATH_MAX]; path_join(full, search, name);
-		if (!is_file(full)) continue;
-		if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) continue;
-		if (!first) { ensure_json_buf(&out, &cap, used, 2); out[used++] = ','; }
+		if (!strcmp(name, ".") || !strcmp(name, ".."))
+			continue;
+
+		char full[PATH_MAX];
+		path_join(full, search, name);
+		if (!is_file(full))
+			continue;
+		if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS)))
+			continue;
+
+		if (!first) {
+			ensure_json_buf(&out, &cap, used, 2);
+			out[used++] = ',';
+		}
 		first = 0;
+
 		ensure_json_buf(&out, &cap, used, strlen(name) + strlen(dirparam) + 12);
 		out[used++] = '"';
-		out[used++] = '/'; out[used++] = 'm'; out[used++] = 'e'; out[used++] = 'd'; out[used++] = 'i'; out[used++] = 'a'; out[used++] = '/';
+		out[used++] = '/'; out[used++] = 'm'; out[used++] = 'e';
+		out[used++] = 'd'; out[used++] = 'i'; out[used++] = 'a';
+		out[used++] = '/';
+
 		if (dirparam[0]) {
-			char clean[PATH_MAX]; size_t wi = 0;
+			char clean[PATH_MAX];
+			size_t wi = 0;
 			for (size_t i = 0; dirparam[i] && wi + 1 < sizeof(clean); ++i) {
-				char ch = dirparam[i]; if (ch == '\\') ch = '/';
+				char ch = dirparam[i];
+				if (ch == '\\') ch = '/';
 				if (ch == '/' && wi > 0 && clean[wi - 1] == '/') continue;
 				clean[wi++] = ch;
 			}
 			if (wi > 0 && clean[wi - 1] == '/') wi--;
 			clean[wi] = '\0';
 			if (wi > 0) {
-				for (size_t i = 0; clean[i]; ++i) out[used++] = clean[i];
+				for (size_t i = 0; clean[i]; ++i) {
+					if (used + 2 >= cap) ensure_json_buf(&out, &cap, used, 16);
+					out[used++] = clean[i];
+				}
 				out[used++] = '/';
 			}
 		}
-		for (const char* p = name; *p; ++p) out[used++] = *p;
+
+		for (const char* p = name; *p; ++p) {
+			if (used + 2 >= cap) ensure_json_buf(&out, &cap, used, 16);
+			out[used++] = *p;
+		}
 		out[used++] = '"';
 	}
+
 	dir_close(&it);
-	ensure_json_buf(&out, &cap, used, 2); out[used++] = ']';
-	send_header(c, 200, "OK", "application/json; charset=utf-8", (long)used, NULL, 0, keep_alive);
+
+	ensure_json_buf(&out, &cap, used, 2);
+	out[used++] = ']';
+
+	send_header(c, 200, "OK", "application/json; charset=utf-8",
+		(long)used, NULL, 0, keep_alive);
 	send(c, out, (int)used, 0);
 	free(out);
 }
+
 
 void handle_legacy_move(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
@@ -1294,7 +1366,18 @@ void handle_legacy_move(int c, const char* body, bool keep_alive) {
 
 	const char* rel = from;
 	if (strncmp(from, "/media/", 7) == 0) rel = from + 7;
-	char rel_copy[PATH_MAX]; strncpy(rel_copy, rel, sizeof(rel_copy) - 1); rel_copy[sizeof(rel_copy) - 1] = '\0';
+	char rel_copy[PATH_MAX];
+	strncpy(rel_copy, rel, sizeof(rel_copy) - 1);
+	rel_copy[sizeof(rel_copy) - 1] = '\0';
+
+	// prevent path traversal or absolute paths
+	if (strstr(rel_copy, "..") || rel_copy[0] == '/' || rel_copy[0] == '\\') {
+		LOG_WARN("Rejected path traversal attempt: %s", rel_copy);
+		return;
+	}
+
+	
+	rel_copy[sizeof(rel_copy) - 1] = '\0';
 	while (*rel_copy == '/' || *rel_copy == '\\') memmove(rel_copy, rel_copy + 1, strlen(rel_copy));
 	char src[PATH_MAX]; snprintf(src, sizeof(src), "%s%s%s", BASE_DIR, DIR_SEP_STR, rel_copy); normalize_path(src);
 
@@ -1380,7 +1463,7 @@ typedef struct {
 static void normalize_value_inplace(char* v) {
 	if (!v) return;
 	size_t i = 0, j = 0; while (v[i]) { char ch = v[i++]; if (ch == '\\') ch = '/'; v[j++] = ch; }
-	while (j > 0 && (v[j-1] == ' ' || v[j-1] == '\t' || v[j-1] == '\r' || v[j-1] == '\n' || v[j-1] == '/')) j--; v[j] = '\0';
+	while (j > 0 && (v[j - 1] == ' ' || v[j - 1] == '\t' || v[j - 1] == '\r' || v[j - 1] == '\n' || v[j - 1] == '/')) j--; v[j] = '\0';
 }
 
 static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
@@ -1397,7 +1480,8 @@ static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 	size_t rem = c->cap - used;
 	if (!c->first) {
 		ptr = json_comma_safe(ptr, &rem);
-	} else {
+	}
+	else {
 		c->first = 0;
 	}
 	ptr = json_objOpen(ptr, NULL, &rem);
@@ -1428,14 +1512,17 @@ static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 				for (size_t ii = 0; rel[ii] && ri + 1 < sizeof(outp); ++ii) outp[ri++] = (rel[ii] == '\\') ? '/' : rel[ii]; outp[ri] = '\0';
 				char sitepath[PATH_MAX]; snprintf(sitepath, sizeof(sitepath), "/images/%s", outp);
 				ptr = json_str(ptr, "value", sitepath, &rem);
-			} else {
+			}
+			else {
 				ptr = json_str(ptr, "value", found, &rem);
 			}
-		} else {
+		}
+		else {
 			normalize_value_inplace(tmpv);
 			ptr = json_str(ptr, "value", tmpv, &rem);
 		}
-	} else {
+	}
+	else {
 		ptr = json_str(ptr, "value", "", &rem);
 	}
 	ptr = json_objClose(ptr, &rem);
@@ -1457,7 +1544,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 	if (qs) {
 		char* dir = query_get(qs, "dir");
 		if (dir) {
-			char dircopy[PATH_MAX]; strncpy(dircopy, dir, sizeof(dircopy)-1); dircopy[sizeof(dircopy)-1] = '\0'; sanitize_dirparam(dircopy);
+			char dircopy[PATH_MAX]; strncpy(dircopy, dir, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; sanitize_dirparam(dircopy);
 			char target_real[PATH_MAX]; char base_real[PATH_MAX];
 			if (!resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
 				SAFE_FREE(dir);
@@ -1482,7 +1569,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 				strncpy(ctx.base_real, base_real, sizeof(ctx.base_real) - 1);
 				ctx.base_real[sizeof(ctx.base_real) - 1] = '\0';
 				ctx.filter_enabled = 1;
-				char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root)-1); per_thumbs_root[sizeof(per_thumbs_root)-1] = '\0'; mk_dir(per_thumbs_root);
+				char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0'; mk_dir(per_thumbs_root);
 				snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
 				thumbdb_open_for_dir(per_db);
 			}
@@ -1524,14 +1611,15 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 						if (keep_j) {
 							free(cctx.arr[i].val); cctx.arr[i].val = cctx.arr[j].val; cctx.arr[j].val = NULL;
 							free(cctx.arr[j].key); cctx.arr[j].key = NULL;
-						} else {
+						}
+						else {
 							free(cctx.arr[j].val); cctx.arr[j].val = NULL; free(cctx.arr[j].key); cctx.arr[j].key = NULL;
 						}
 					}
 				}
 			}
 			char encbuf[PATH_MAX];
-			size_t outcap = 4096; char* outbuf = malloc(outcap); if (!outbuf) { for (size_t i = 0;i < cctx.count;i++){ free(cctx.arr[i].key); free(cctx.arr[i].val);} free(cctx.arr); free(buf); send_text(c,500,"Internal Server Error","Memory error",keep_alive); return; }
+			size_t outcap = 4096; char* outbuf = malloc(outcap); if (!outbuf) { for (size_t i = 0;i < cctx.count;i++) { free(cctx.arr[i].key); free(cctx.arr[i].val); } free(cctx.arr); free(buf); send_text(c, 500, "Internal Server Error", "Memory error", keep_alive); return; }
 			size_t outs = 0;
 			for (size_t i = 0; i < cctx.count; ++i) {
 				if (!cctx.arr[i].key) continue;
@@ -1541,18 +1629,18 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 					const char* p1 = strchr(v, ';');
 					if (p1) {
 						size_t l1 = (size_t)(p1 - v);
-						size_t l = l1 < sizeof(small_tok)-1 ? l1 : sizeof(small_tok)-1; memcpy(small_tok, v, l); small_tok[l] = '\0';
+						size_t l = l1 < sizeof(small_tok) - 1 ? l1 : sizeof(small_tok) - 1; memcpy(small_tok, v, l); small_tok[l] = '\0';
 						const char* p2 = strchr(p1 + 1, ';');
 						if (p2) {
-							size_t l2 = (size_t)(p2 - (p1 + 1)); size_t ll = l2 < sizeof(large_tok)-1 ? l2 : sizeof(large_tok)-1; memcpy(large_tok, p1+1, ll); large_tok[ll] = '\0';
+							size_t l2 = (size_t)(p2 - (p1 + 1)); size_t ll = l2 < sizeof(large_tok) - 1 ? l2 : sizeof(large_tok) - 1; memcpy(large_tok, p1 + 1, ll); large_tok[ll] = '\0';
 							strncpy(media, p2 + 1, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
 						}
 						else {
-							size_t l2 = strlen(p1 + 1); size_t ll = l2 < sizeof(large_tok)-1 ? l2 : sizeof(large_tok)-1; memcpy(large_tok, p1+1, ll); large_tok[ll] = '\0';
+							size_t l2 = strlen(p1 + 1); size_t ll = l2 < sizeof(large_tok) - 1 ? l2 : sizeof(large_tok) - 1; memcpy(large_tok, p1 + 1, ll); large_tok[ll] = '\0';
 						}
 					}
 					else {
-						strncpy(media, v, sizeof(media)-1); media[sizeof(media)-1] = '\0';
+						strncpy(media, v, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
 					}
 				}
 				{
@@ -1619,7 +1707,8 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 						cctx.arr[j].val = NULL;
 						free(cctx.arr[j].key);
 						cctx.arr[j].key = NULL;
-					} else {
+					}
+					else {
 						free(cctx.arr[j].val);
 						cctx.arr[j].val = NULL;
 						free(cctx.arr[j].key);
@@ -1644,11 +1733,13 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 						size_t l2 = (size_t)(p2 - (p1 + 1)); size_t ll = l2 < sizeof(large_tok) - 1 ? l2 : sizeof(large_tok) - 1;
 						memcpy(large_tok, p1 + 1, ll); large_tok[ll] = '\0';
 						strncpy(media, p2 + 1, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
-					} else {
+					}
+					else {
 						size_t l2 = strlen(p1 + 1); size_t ll = l2 < sizeof(large_tok) - 1 ? l2 : sizeof(large_tok) - 1;
 						memcpy(large_tok, p1 + 1, ll); large_tok[ll] = '\0';
 					}
-				} else {
+				}
+				else {
 					strncpy(media, v, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
 				}
 			}
@@ -1660,7 +1751,8 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 				char outp[PATH_MAX]; size_t ri = 0;
 				for (size_t ii = 0; rel[ii] && ri + 1 < sizeof(outp); ++ii) outp[ri++] = (rel[ii] == '\\') ? '/' : rel[ii]; outp[ri] = '\0';
 				snprintf(out_media, sizeof(out_media), "/images/%s", outp);
-			} else if (media[0]) {
+			}
+			else if (media[0]) {
 				strncpy(out_media, media, sizeof(out_media) - 1); out_media[sizeof(out_media) - 1] = '\0';
 			}
 			size_t used_local = ctx.used;
@@ -1697,7 +1789,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 	if (qs) {
 		char* dirq = query_get(qs, "dir");
 		if (dirq) {
-			char dircopy[PATH_MAX]; strncpy(dircopy, dirq, sizeof(dircopy)-1); dircopy[sizeof(dircopy)-1] = '\0'; sanitize_dirparam(dircopy);
+			char dircopy[PATH_MAX]; strncpy(dircopy, dirq, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; sanitize_dirparam(dircopy);
 			char target_real[PATH_MAX]; char base_real[PATH_MAX];
 			if (resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
 				char safe_dir[PATH_MAX]; safe_dir[0] = '\0'; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
@@ -1723,7 +1815,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 		return;
 	}
 	normalize_value_inplace(val);
-	char smalltok[256] = {0}; char largetok[256] = {0}; char* media = val;
+	char smalltok[256] = { 0 }; char largetok[256] = { 0 }; char* media = val;
 	char* s1 = strchr(val, ';');
 	if (s1) {
 		size_t sl = (size_t)(s1 - val);
@@ -1762,7 +1854,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 	if (g_request_qs) {
 		char* dirq = query_get(g_request_qs, "dir");
 		if (dirq) {
-			char dircopy[PATH_MAX]; strncpy(dircopy, dirq, sizeof(dircopy)-1); dircopy[sizeof(dircopy)-1] = '\0'; sanitize_dirparam(dircopy);
+			char dircopy[PATH_MAX]; strncpy(dircopy, dirq, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; sanitize_dirparam(dircopy);
 			char target_real[PATH_MAX]; char base_real[PATH_MAX];
 			if (resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
 				char safe_dir[PATH_MAX]; safe_dir[0] = '\0'; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
@@ -1800,7 +1892,7 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 	if (g_request_qs) {
 		char* dirq = query_get(g_request_qs, "dir");
 		if (dirq) {
-			char dircopy[PATH_MAX]; strncpy(dircopy, dirq, sizeof(dircopy)-1); dircopy[sizeof(dircopy)-1] = '\0'; sanitize_dirparam(dircopy);
+			char dircopy[PATH_MAX]; strncpy(dircopy, dirq, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; sanitize_dirparam(dircopy);
 			char target_real[PATH_MAX]; char base_real[PATH_MAX];
 			if (resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
 				char safe_dir[PATH_MAX]; safe_dir[0] = '\0'; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
@@ -1833,7 +1925,7 @@ void handle_api_thumbdb_thumbs_for_dir(int c, char* qs, bool keep_alive) {
 	if (!qs) { send_text(c, 400, "Bad Request", "Missing query", keep_alive); return; }
 	char* dir = query_get(qs, "dir");
 	if (!dir) { send_text(c, 400, "Bad Request", "Missing dir", keep_alive); return; }
-	char dircopy[PATH_MAX]; strncpy(dircopy, dir, sizeof(dircopy)-1); dircopy[sizeof(dircopy)-1] = '\0'; sanitize_dirparam(dircopy);
+	char dircopy[PATH_MAX]; strncpy(dircopy, dir, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; sanitize_dirparam(dircopy);
 	char target_real[PATH_MAX]; char base_real[PATH_MAX];
 	if (!resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
 		SAFE_FREE(dir);

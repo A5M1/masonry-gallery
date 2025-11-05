@@ -688,29 +688,48 @@ int platform_fsync(int fd) {
 
 void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
     if (!src || !dst || dstlen == 0) return;
+
+    // Step 1: Validate input to prevent path escaping / injection
+    for (size_t i = 0; src[i]; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        // Only allow safe characters: alphanumeric + typical path symbols
+        if (!(isalnum(c) || c == '/' || c == '\\' ||
+            c == '_' || c == '-' || c == '.' || c == ':' || c == ' ')) {
+            // Unsafe character detected, reject
+            dst[0] = '\0';
+            return;
+        }
+    }
+
     size_t di = 0;
+
 #ifdef _WIN32
+    // Wrap in quotes for cmd.exe
     if (di < dstlen - 1) dst[di++] = '"';
     for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
         char c = src[i];
-        if (c == '"') continue;
-        if (c == '%') {
-            if (di + 1 < dstlen) dst[di++] = '%'; else break;
-        }
+        if (c == '"') continue;          // Skip quotes
+        if (c == '%') {                  // Prevent env var expansion
+            if (di + 1 < dstlen) dst[di++] = '%';
+            else break;
+}
         dst[di++] = c;
     }
     if (di < dstlen - 1) dst[di++] = '"';
 #else
+    // Wrap in quotes for POSIX shells
     if (di < dstlen - 1) dst[di++] = '"';
     for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
         char c = src[i];
         if (c == '\\' || c == '"' || c == '$' || c == '`') {
-            if (di + 1 < dstlen) dst[di++] = '\\'; else break;
+            if (di + 1 < dstlen) dst[di++] = '\\';
+            else break;
         }
         dst[di++] = c;
     }
     if (di < dstlen - 1) dst[di++] = '"';
 #endif
+
     dst[di] = '\0';
 }
 

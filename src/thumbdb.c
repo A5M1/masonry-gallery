@@ -6,15 +6,65 @@
 #include "thread_pool.h"
 #include "crypto.h"
 #include "common.h"
-#include "compress.h"
-#include "robinhood_hash.h"
+#include "blaze.h"
 #include "arena.h"
 #include "config.h"
 #include "thumbs.h"
+#include "robinhood_hash.h"
 
 #define DB_FILENAME "thumbs.db"
 #define LINE_MAX 4096
 #define INITIAL_BUCKETS 65536
+#define DB_MAGIC "TNDB"
+#define DB_MAGIC_LEN 4
+
+// New binary format opcodes
+const uint8_t OP_BEGIN_RECORD    = 0xAA;
+const uint8_t OP_SEPERATOR       = 0x0A;
+const uint8_t OP_MP4            = 0x0B;
+const uint8_t OP_JPG            = 0x0C;
+const uint8_t OP_WEBM           = 0x0D;
+const uint8_t OP_GIF            = 0x0D;
+const uint8_t OP_WEBP           = 0x0E;
+const uint8_t OP_PNG            = 0x0F;
+const uint8_t OP_END_RECORD     = 0xFF;
+const uint8_t OP_BASE_DIR       = 0xBB;
+const uint8_t OP_NEWLINE        = 0xFA;
+const uint8_t OP_BACKSLASH      = 0xFB;
+const uint8_t OP_LARGE_JPG      = 0xAD;
+const uint8_t OP_SMALL_JPG      = 0xBE;
+
+static const struct { const char* ext; uint8_t code; } ext_map[] = {
+    {".jpg", OP_JPG}, {".jpeg", OP_JPG}, {".png", OP_PNG},
+    {".gif", OP_GIF}, {".webp", OP_WEBP}, {".mp4", OP_MP4},
+    {".webm", OP_WEBM}, {".ogg", OP_GIF}, {NULL, 0}
+};
+
+static unsigned char get_ext_opcode(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (!dot) return OP_JPG;  // Default to JPG
+    for (int i = 0; ext_map[i].ext; i++) {
+        if (ascii_stricmp(dot, ext_map[i].ext) == 0) return ext_map[i].code;
+    }
+    return OP_JPG;  // Default to JPG
+}
+
+static const char* get_ext_from_opcode(uint8_t code) {
+    for (int i = 0; ext_map[i].ext; i++) {
+        if (ext_map[i].code == code) return ext_map[i].ext;
+    }
+    return ".jpg";  // Default to JPG
+}
+
+static int is_valid_media_path(const char* path) {
+    if (!path || !path[0]) return 0;
+    const char* dot = strrchr(path, '.');
+    if (!dot) return 0;
+    for (int i = 0; ext_map[i].ext; i++) {
+        if (ascii_stricmp(dot, ext_map[i].ext) == 0) return 1;
+    }
+    return 0;
+}
 typedef struct ht_entry {
     char* key;
     char* val;
@@ -53,27 +103,30 @@ static uint32_t ht_hash(const char* s) {
     return h;
 }
 
-static void split_combined_val(const char* val, char* small, size_t small_len, char* large, size_t large_len, char* media, size_t media_len) {
-    small[0] = '\0'; large[0] = '\0'; media[0] = '\0';
-    if (!val) return;
-    char* v = strdup(val);
-    if (!v) return;
-    char* s1 = strchr(v, ';');
-    if (!s1) { strncpy(media, v, media_len - 1); media[media_len - 1] = '\0'; free(v); return; }
-    *s1 = '\0'; strncpy(small, v, small_len - 1); small[small_len - 1] = '\0';
-    char* s2 = s1 + 1;
-    char* s3 = strchr(s2, ';');
-    if (!s3) { strncpy(large, s2, large_len - 1); large[large_len - 1] = '\0'; free(v); return; }
-    *s3 = '\0'; strncpy(large, s2, large_len - 1); large[large_len - 1] = '\0'; strncpy(media, s3 + 1, media_len - 1); media[media_len - 1] = '\0';
-    free(v);
-}
-
-static void make_combined_val(char* out, size_t out_len, const char* small_tok, const char* large_tok, const char* media) {
-    if (!out || out_len == 0) return;
-    const char* s = small_tok ? small_tok : "null";
-    const char* l = large_tok ? large_tok : "null";
-    const char* m = media ? media : "";
-    snprintf(out, out_len, "%s;%s;%s", s, l, m);
+static int append_line_to_file(FILE* f, const char* key, const char* val) {
+    if (!f || !key) return -1;
+    
+    // Write binary encoded record using new opcode format
+    // START RECORD | SEPERATOR | KEY | SEPERATOR | MEDIA PATH | END | NEWLINE
+    
+    if (fwrite(&OP_BEGIN_RECORD, 1, 1, f) != 1) return -1;
+    if (fwrite(&OP_SEPERATOR, 1, 1, f) != 1) return -1;
+    
+    // Write key (thumbnail filename)
+    size_t key_len = strlen(key);
+    if (fwrite(key, 1, key_len, f) != key_len) return -1;
+    if (fwrite(&OP_SEPERATOR, 1, 1, f) != 1) return -1;
+    
+    // Write media path
+    if (val) {
+        size_t val_len = strlen(val);
+        if (fwrite(val, 1, val_len, f) != val_len) return -1;
+    }
+    
+    if (fwrite(&OP_END_RECORD, 1, 1, f) != 1) return -1;
+    if (fwrite(&OP_NEWLINE, 1, 1, f) != 1) return -1;
+    
+    return 0;
 }
 
 static void thumbname_to_base_and_kind(const char* name, char* base, size_t base_len, int* is_small, int* is_large) {
@@ -176,39 +229,7 @@ static void ht_free_all(void) {
     if (ht) { free_ht_table(ht, ht_buckets); ht = NULL; ht_buckets = 0; }
 }
 
-static int append_line_to_file(FILE* f, const char* key, const char* val) {
-    if (!f) return -1;
-    if (!key) return -1;
-    if (db_binary_mode) {
-        uint32_t key_len = (uint32_t)strlen(key);
-        uint32_t val_len = 0;
-        unsigned char* comp = NULL;
-        if (val && val[0]) {
-            size_t tmp_len = 0;
-            if (compress_val(val, strlen(val), &comp, &tmp_len) != 0) { return -1; }
-            val_len = (uint32_t)tmp_len;
-        }
-        else {
-            val_len = 0;
-        }
-        if (fwrite(&key_len, sizeof(uint32_t), 1, f) != 1) { if (comp) free(comp); return -1; }
-        if (fwrite(&val_len, sizeof(uint32_t), 1, f) != 1) { if (comp) free(comp); return -1; }
-        if (fwrite(key, 1, key_len, f) != key_len) { if (comp) free(comp); return -1; }
-        if (val_len > 0) {
-            if (fwrite(comp, 1, val_len, f) != val_len) { free(comp); return -1; }
-            free(comp);
-        }
-    }
-    else {
-        if (val) {
-            if (fprintf(f, "%s;%s\n", key, val) < 0) return -1;
-        }
-        else {
-            if (fprintf(f, "%s;\n", key) < 0) return -1;
-        }
-    }
-    return 0;
-}
+// Removed duplicate definition - using the one defined below
 
 static int last_text_value_for_key(const char* path, const char* key, char* out, size_t out_len) {
     if (!path || !key || !out || out_len == 0) return -1;
@@ -265,7 +286,7 @@ static int backup_file(const char* path) {
 
 static int persist_tx_ops(tx_op_t* ops) {
     if (!ops) return 0;
-    FILE* f = fopen(db_path, db_binary_mode ? "ab" : "a");
+    FILE* f = fopen(db_path, "ab");
     if (!f) return -1;
     tx_op_t* cur = ops;
     while (cur) {
@@ -275,12 +296,108 @@ static int persist_tx_ops(tx_op_t* ops) {
     fflush(f);
     platform_fsync(fileno(f));
     fclose(f);
+    struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     return 0;
 }
 
 int thumbdb_open(void) {
     LOG_WARN("thumbdb_open: opening global top-level DB is disabled; use thumbdb_open_for_dir() with a per-gallery path");
     return -1;
+}
+
+static int count_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    (void)key; (void)val; (void)val_len;
+    int* count = (int*)ctx;
+    (*count)++;
+    return 1; // Stop after first item
+}
+
+static int is_table_empty(void) {
+    if (!rh_tbl) return 1;
+    int count = 0;
+    rh_iterate(rh_tbl, count_cb, &count);
+    return count == 0;
+}
+
+static void populate_db_from_existing_thumbs(void) {
+    size_t gf_count = 0;
+    char** gfolders = get_gallery_folders(&gf_count);
+    if (!gfolders || gf_count == 0) return;
+    
+    char thumbs_root[PATH_MAX];
+    get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+    
+    for (size_t i = 0; i < gf_count; ++i) {
+        char folder_real[PATH_MAX];
+        if (!real_path(gfolders[i], folder_real)) continue;
+        
+        char safe_dir[PATH_MAX];
+        make_safe_dir_name_from(folder_real, safe_dir, sizeof(safe_dir));
+        
+        char per_thumbs_root[PATH_MAX];
+        snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
+        
+        if (!is_dir(per_thumbs_root)) continue;
+        
+        diriter tit;
+        if (!dir_open(&tit, per_thumbs_root)) continue;
+        
+        const char* tname;
+        while ((tname = dir_next(&tit))) {
+            if (!tname) continue;
+            if (!strstr(tname, "-small.") && !strstr(tname, "-large.")) continue;
+            
+            char base[PATH_MAX];
+            int is_small = 0, is_large = 0;
+            base[0] = '\0';
+            thumbname_to_base_and_kind(tname, base, sizeof(base), &is_small, &is_large);
+            if (!base[0]) continue;
+            
+            // Check if we already have this base in the database
+            if (ht_get(base)) continue;
+            
+            // Find the corresponding media file
+            diriter mit;
+            if (!dir_open(&mit, folder_real)) continue;
+            
+            const char* mname;
+            while ((mname = dir_next(&mit))) {
+                if (!mname) continue;
+                if (!has_ext(mname, IMAGE_EXTS) && !has_ext(mname, VIDEO_EXTS)) continue;
+                
+                char media_full[PATH_MAX];
+                path_join(media_full, folder_real, mname);
+                
+                char small_rel[PATH_MAX], large_rel[PATH_MAX];
+                small_rel[0] = large_rel[0] = '\0';
+                get_thumb_rel_names(media_full, mname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+                
+                if (strcmp(small_rel, tname) == 0 || strcmp(large_rel, tname) == 0) {
+                    char small_tok[8] = "null";
+                    char large_tok[8] = "null";
+                    char media[PATH_MAX] = "";
+                    
+                    char small_path[PATH_MAX];
+                    char large_path[PATH_MAX];
+                    snprintf(small_path, sizeof(small_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
+                    snprintf(large_path, sizeof(large_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
+                    
+                    if (is_file(small_path)) strncpy(small_tok, "small", sizeof(small_tok) - 1);
+                    if (is_file(large_path)) strncpy(large_tok, "large", sizeof(large_tok) - 1);
+                    strncpy(media, media_full, sizeof(media) - 1);
+                    media[sizeof(media) - 1] = '\0';
+                    
+                    // Store directly without legacy format
+                    ht_set_internal(base, media);
+                    
+                    LOG_DEBUG("thumbdb: populated %s -> %s", base, media);
+                    break;
+                }
+            }
+            dir_close(&mit);
+        }
+        dir_close(&tit);
+    }
 }
 
 int thumbdb_open_for_dir(const char* db_full_path) {
@@ -301,125 +418,137 @@ int thumbdb_open_for_dir(const char* db_full_path) {
     }
     strncpy(db_path, db_full_path, sizeof(db_path) - 1); db_path[sizeof(db_path) - 1] = '\0';
 
-    FILE* f = fopen(db_path, "a+");
+    // Ensure database file exists and starts with magic header
+    FILE* f_check = fopen(db_path, "rb");
+    if (!f_check) {
+        // File doesn't exist, create it with magic header
+        FILE* f_new = fopen(db_path, "wb");
+        if (!f_new) {
+            LOG_WARN("thumbdb: failed to create db file %s", db_path);
+            ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
+        }
+        fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, f_new);
+        fclose(f_new);
+    } else {
+        // File exists, check if it starts with magic header
+        char probe[DB_MAGIC_LEN];
+        size_t pr = fread(probe, 1, DB_MAGIC_LEN, f_check);
+        fclose(f_check);
+        if (pr != DB_MAGIC_LEN || memcmp(probe, DB_MAGIC, DB_MAGIC_LEN) != 0) {
+            // File doesn't start with magic header, recreate it
+            LOG_INFO("thumbdb: recreating database file with new opcode format");
+            FILE* f_new = fopen(db_path, "wb");
+            if (!f_new) {
+                LOG_WARN("thumbdb: failed to recreate db file %s", db_path);
+                ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
+            }
+            fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, f_new);
+            fclose(f_new);
+        }
+    }
+
+    FILE* f = fopen(db_path, "ab");
     if (!f) {
         LOG_WARN("thumbdb: failed to open db file %s", db_path);
         ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
     }
     fclose(f);
 
+    // Use new opcode-based binary format
     f = fopen(db_path, "rb");
-    if (!f) { db_inited = 1; return 0; }
-    char probe[256]; size_t pr = fread(probe, 1, sizeof(probe), f);
-    db_binary_mode = 0;
-    if (pr > 0) {
-        if (probe[0] == '#') {
-            if (strncmp(probe, "#version;", 9) == 0) db_binary_mode = 1;
-        }
+    if (!f) {
+        db_inited = 1;
+        thread_mutex_unlock(&db_open_mutex);
+        return 0;
     }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (!db_binary_mode) {
-        char line[LINE_MAX];
-        while (fgets(line, sizeof(line), f)) {
-            char* nl = strchr(line, '\n'); if (nl) *nl = '\0';
-            if (line[0] == '#') continue;
-            char* sem = strchr(line, ';');
-            if (sem) { *sem = '\0'; char* key = line; char* val = sem + 1; if (val[0] == '\0') { ht_set_internal(key, NULL); } else { ht_set_internal(key, val); } continue; }
-            char* tab = strchr(line, '\t'); if (!tab) continue; *tab = '\0'; char* key = line; char* val = tab + 1;
-            if (val[0] == '\0') {
-                char base[PATH_MAX]; base[0] = '\0'; char* p = strstr(key, "-small.");
-                if (p) { size_t bl = (size_t)(p - key); if (bl >= sizeof(base)) bl = sizeof(base) - 1; memcpy(base, key, bl); base[bl] = '\0'; }
-                else { p = strstr(key, "-large."); if (p) { size_t bl = (size_t)(p - key); if (bl >= sizeof(base)) bl = sizeof(base) - 1; memcpy(base, key, bl); base[bl] = '\0'; } else { strncpy(base, key, sizeof(base) - 1); base[sizeof(base) - 1] = '\0'; } }
-                ht_set_internal(base, NULL);
-            }
-            else {
-                char base[PATH_MAX]; base[0] = '\0'; int this_is_small = 0; char* p = strstr(key, "-small.");
-                if (p) { size_t bl = (size_t)(p - key); if (bl >= sizeof(base)) bl = sizeof(base) - 1; memcpy(base, key, bl); base[bl] = '\0'; this_is_small = 1; }
-                else { p = strstr(key, "-large."); if (p) { size_t bl = (size_t)(p - key); if (bl >= sizeof(base)) bl = sizeof(base) - 1; memcpy(base, key, bl); base[bl] = '\0'; this_is_small = 0; } else { strncpy(base, key, sizeof(base) - 1); base[sizeof(base) - 1] = '\0'; } }
-                const char* exist_val = ht_get(base);
-                char small_tok[8] = "null"; char large_tok[8] = "null"; char media[PATH_MAX] = "";
-                if (exist_val) {
-                    char* v = strdup(exist_val);
-                    if (v) { char* s1 = strchr(v, ';'); if (s1) { *s1 = '\0'; strncpy(small_tok, v, sizeof(small_tok) - 1); small_tok[sizeof(small_tok) - 1] = '\0'; char* s2 = s1 + 1; char* s3 = strchr(s2, ';'); if (s3) { *s3 = '\0'; strncpy(large_tok, s2, sizeof(large_tok) - 1); large_tok[sizeof(large_tok) - 1] = '\0'; strncpy(media, s3 + 1, sizeof(media) - 1); media[sizeof(media) - 1] = '\0'; } } free(v); }
-                }
-                if (this_is_small) strncpy(small_tok, "small", sizeof(small_tok) - 1); else strncpy(large_tok, "large", sizeof(large_tok) - 1);
-                strncpy(media, val, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
-                char combined[LINE_MAX]; snprintf(combined, sizeof(combined), "%s;%s;%s", small_tok, large_tok, media);
-                ht_set_internal(base, combined);
-            }
+    
+    if (fsize > DB_MAGIC_LEN) {
+        char magic[DB_MAGIC_LEN];
+        if (fread(magic, 1, DB_MAGIC_LEN, f) != DB_MAGIC_LEN || memcmp(magic, DB_MAGIC, DB_MAGIC_LEN) != 0) {
+            LOG_ERROR("thumbdb: invalid magic header in database file");
+            fclose(f);
+            ht_free_all(); thread_mutex_destroy(&db_mutex); thread_mutex_unlock(&db_open_mutex); return -1;
         }
-    }
-    else {
-        char header[LINE_MAX]; if (!fgets(header, sizeof(header), f)) { fclose(f); db_inited = 1; return 0; }
-        while (1) {
-            uint32_t key_len = 0; uint32_t val_len = 0;
-            if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) break;
-            if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) break;
-            if (key_len == 0) { fseek(f, val_len, SEEK_CUR); continue; }
-            char* key = malloc(key_len + 1); if (!key) break;
-            if (fread(key, 1, key_len, f) != key_len) { free(key); break; }
+        
+        // Parse new simplified opcode-based records
+        size_t offset = DB_MAGIC_LEN;
+        while (offset < (size_t)fsize) {
+            uint8_t opcode;
+            if (fseek(f, offset, SEEK_SET) != 0) break;
+            if (fread(&opcode, 1, 1, f) != 1) break;
+            
+            if (opcode != OP_BEGIN_RECORD) {
+                offset++;
+                continue;
+            }
+            
+            offset++; // Move past BEGIN_RECORD
+            
+            // Skip separator
+            uint8_t sep;
+            if (fread(&sep, 1, 1, f) != 1 || sep != OP_SEPERATOR) break;
+            offset++;
+            
+            // Read key until separator
+            char key[PATH_MAX] = "";
+            size_t key_len = 0;
+            while (offset < (size_t)fsize && key_len < sizeof(key) - 1) {
+                uint8_t ch;
+                if (fseek(f, offset, SEEK_SET) != 0) break;
+                if (fread(&ch, 1, 1, f) != 1) break;
+                if (ch == OP_SEPERATOR) {
+                    offset++;
+                    break;
+                }
+                key[key_len++] = ch;
+                offset++;
+            }
             key[key_len] = '\0';
-            if (val_len == 0) { ht_set_internal(key, NULL); free(key); continue; }
-            unsigned char* comp = malloc(val_len);
-            if (!comp) { free(key); break; }
-            if (fread(comp, 1, val_len, f) != val_len) { free(key); free(comp); break; }
-            unsigned char* decomp = NULL; size_t decomp_len = 0;
-            if (decompress_val(comp, val_len, &decomp, &decomp_len) == 0) {
-                ht_set_internal(key, (const char*)decomp);
-                free(decomp);
+            
+            // Read value until end record
+            char value[PATH_MAX] = "";
+            size_t val_len = 0;
+            while (offset < (size_t)fsize && val_len < sizeof(value) - 1) {
+                uint8_t ch;
+                if (fseek(f, offset, SEEK_SET) != 0) break;
+                if (fread(&ch, 1, 1, f) != 1) break;
+                if (ch == OP_END_RECORD || ch == OP_NEWLINE) {
+                    offset++;
+                    break;
+                }
+                value[val_len++] = ch;
+                offset++;
             }
-            else {
-                ht_set_internal(key, NULL);
+            value[val_len] = '\0';
+            
+            // Store in hash table
+            if (key_len > 0) {
+                ht_set_internal(key, val_len > 0 ? value : NULL);
             }
-            free(comp); free(key);
         }
     }
     fclose(f);
-    {
-        struct stat st;
-        if (stat(db_path, &st) == 0) {
-            db_last_mtime = st.st_mtime;
-            db_last_size = st.st_size;
-        }
-        else {
-            db_last_mtime = 0; db_last_size = 0;
-        }
+    
+    struct stat st;
+    if (stat(db_path, &st) == 0) {
+        db_last_mtime = st.st_mtime;
+        db_last_size = st.st_size;
+    } else {
+        db_last_mtime = 0;
+        db_last_size = 0;
     }
-    if (!db_binary_mode) {
-        if (backup_file(db_path) == 0) LOG_INFO("thumbdb: backed up legacy db to %s.bak", db_path);
-        else LOG_WARN("thumbdb: failed to backup legacy db %s", db_path);
-
-        char tmp_path[PATH_MAX]; snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", db_path);
-        FILE* out = fopen(tmp_path, "wb");
-        if (out) {
-            fprintf(out, "#version;1.0\n");
-            if (rh_tbl) {
-                rh_iterate(rh_tbl, rh_write_bin_cb, out);
-            }
-            else if (ht) {
-                for (size_t i = 0; i < ht_buckets; ++i) {
-                    ht_entry_t* e = ht[i];
-                    while (e) {
-                        rh_write_bin_cb(e->key, (const unsigned char*)e->val, e->val ? strlen(e->val) + 1 : 0, out);
-                        e = e->next;
-                    }
-                }
-            }
-            fflush(out); platform_fsync(fileno(out)); fclose(out);
-            if (platform_move_file(tmp_path, db_path) == 0) {
-                LOG_INFO("thumbdb: converted legacy db to binary format: %s", db_path);
-                db_binary_mode = 1;
-            }
-            else {
-                LOG_WARN("thumbdb: failed to replace legacy db with binary conversion");
-                platform_file_delete(tmp_path);
-            }
-        }
-        else {
-            LOG_WARN("thumbdb: failed to open temp file for binary conversion: %s", tmp_path);
-        }
+    
+    // If database is empty, scan for existing thumbnails and populate
+    if (is_table_empty()) {
+        LOG_INFO("thumbdb: database is empty, scanning for existing thumbnails...");
+        populate_db_from_existing_thumbs();
     }
+    
     db_inited = 1;
+    thread_mutex_unlock(&db_open_mutex);
     LOG_INFO("thumbdb: opened %s (buckets=%zu)", db_path, ht_buckets);
     return 0;
 }
@@ -439,14 +568,6 @@ static int rh_iter_wrap_cb(const char* key, const unsigned char* val, size_t val
     if (!val || val_len == 0) {
         rc->cb(key, NULL, rc->user);
         return 0;
-    }
-    if (val_len >= 4 && val[0] == 'H' && val[1] == 'H' && val[2] == 'R' && val[3] == '1') {
-        unsigned char* decomp = NULL; size_t decomp_len = 0;
-        if (decompress_val(val, val_len, &decomp, &decomp_len) == 0 && decomp) {
-            rc->cb(key, (const char*)decomp, rc->user);
-            free(decomp);
-            return 0;
-        }
     }
     rc->cb(key, (const char*)val, rc->user);
     return 0;
@@ -473,12 +594,10 @@ static int media_is_under_base(const char* media, const char* base) {
 
 static int rh_comp_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
     struct comp_ctx* c = (struct comp_ctx*)ctx;
-    if (!key || !val || val_len == 0) return 0;
-    char small_tok[8], large_tok[8], media[PATH_MAX]; small_tok[0] = large_tok[0] = media[0] = '\0';
-    split_combined_val((const char*)val, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
-    if (c->restrict_to_base) {
-        if (!media[0]) return 0;
-        if (!media_is_under_base(media, c->allowed_base)) return 0;
+    if (!key) return 0;
+    // Store directly without legacy format parsing
+    if (c->restrict_to_base && val && val_len > 0) {
+        if (!media_is_under_base((const char*)val, c->allowed_base)) return 0;
     }
     if (append_line_to_file(c->f, key, (const char*)val) == 0) {
         c->wrote_count++;
@@ -489,46 +608,67 @@ static int rh_comp_cb(const char* key, const unsigned char* val, size_t val_len,
 static int rh_write_bin_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
     FILE* f = (FILE*)ctx;
     if (!f || !key) return 0;
-    uint32_t key_len = (uint32_t)strlen(key);
-    uint32_t out_val_len = 0;
-    unsigned char* comp = NULL;
-    if (val && val_len > 0) {
-        size_t in_len = val_len;
-        if (((const unsigned char*)val)[val_len - 1] == 0 && val_len > 0) in_len = val_len - 1;
-        size_t tmp_len = 0;
-        if (compress_val((const char*)val, in_len, &comp, &tmp_len) == 0) {
-            out_val_len = (uint32_t)tmp_len;
+    
+    uint8_t op_code;
+    
+    if (!val || val_len == 0) {
+        op_code = 0x22;
+    } else {
+        char* p = strstr(key, "-small.");
+        if (p) {
+            op_code = 0x20;
+        } else {
+            p = strstr(key, "-large.");
+            if (p) {
+                op_code = 0x21;
+            } else {
+                op_code = 0x10;
+            }
         }
     }
-    if (fwrite(&key_len, sizeof(uint32_t), 1, f) != 1) { if (comp) free(comp); return -1; }
-    if (fwrite(&out_val_len, sizeof(uint32_t), 1, f) != 1) { if (comp) free(comp); return -1; }
-    if (fwrite(key, 1, key_len, f) != key_len) { if (comp) free(comp); return -1; }
-    if (out_val_len > 0) {
-        if (fwrite(comp, 1, out_val_len, f) != out_val_len) { free(comp); return -1; }
-        free(comp);
-    }
+    
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t out_val_len = 1;
+    uint8_t value_op_code = op_code;
+    
+    if (fwrite(&op_code, 1, 1, f) != 1) return -1;
+    
+    uint8_t sep = 0x5E;
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    
+    if (fwrite(&key_len, sizeof(uint32_t), 1, f) != 1) return -1;
+    
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    
+    if (fwrite(key, 1, key_len, f) != key_len) return -1;
+    
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    
+    if (fwrite(&out_val_len, sizeof(uint32_t), 1, f) != 1) return -1;
+    
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    
+    if (fwrite(&value_op_code, 1, 1, f) != 1) return -1;
+    
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    
     return 0;
 }
 
 struct find_media_ctx { const char* media; char* out; size_t out_len; char best[PATH_MAX]; };
-static int rh_find_media_cb(const char* key, const unsigned char* val, size_t val_len, void* c) {
-    struct find_media_ctx* fc = (struct find_media_ctx*)c;
+static int rh_find_media_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    struct find_media_ctx* fc = (struct find_media_ctx*)ctx;
     if (!val || val_len == 0) return 0;
-    char small_tok[8], large_tok[8], media[PATH_MAX]; small_tok[0] = large_tok[0] = media[0] = '\0';
-    split_combined_val((const char*)val, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
-    if (media[0] != '\0' && strcmp(media, fc->media) == 0) {
+    // Direct comparison without legacy format parsing
+    if (strcmp((const char*)val, fc->media) == 0) {
         char found[PATH_MAX]; found[0] = '\0';
-        if (strcmp(small_tok, "small") == 0) {
-            if (find_thumb_filename_for_base(key, 1, found, sizeof(found))) {
-                strncpy(fc->out, found, fc->out_len - 1); fc->out[fc->out_len - 1] = '\0'; return 1;
-            }
+        if (find_thumb_filename_for_base(key, 1, found, sizeof(found))) {
+            strncpy(fc->out, found, fc->out_len - 1); fc->out[fc->out_len - 1] = '\0'; return 1;
         }
-        if (strcmp(large_tok, "large") == 0) {
-            if (find_thumb_filename_for_base(key, 0, found, sizeof(found))) {
-                strncpy(fc->out, found, fc->out_len - 1); fc->out[fc->out_len - 1] = '\0'; return 1;
-            }
-            if (fc->best[0] == '\0') strncpy(fc->best, key, sizeof(fc->best) - 1);
+        if (find_thumb_filename_for_base(key, 0, found, sizeof(found))) {
+            strncpy(fc->out, found, fc->out_len - 1); fc->out[fc->out_len - 1] = '\0'; return 1;
         }
+        if (fc->best[0] == '\0') strncpy(fc->best, key, sizeof(fc->best) - 1);
     }
     return 0;
 }
@@ -567,54 +707,108 @@ static void* rebuild_worker(void* arg) {
     FILE* f = fopen(db_path, "rb");
     if (!f) { rh_destroy(new_tbl); return NULL; }
 
-    char probe[256]; size_t pr = fread(probe, 1, sizeof(probe), f);
-    int local_binary = 0;
-    if (pr > 0) { if (probe[0] == '#') { if (strncmp(probe, "#version;", 9) == 0) local_binary = 1; } }
-    fseek(f, 0, SEEK_SET);
+    // Verify magic header
+    char magic[DB_MAGIC_LEN];
+    if (fread(magic, 1, DB_MAGIC_LEN, f) != DB_MAGIC_LEN || memcmp(magic, DB_MAGIC, DB_MAGIC_LEN) != 0) {
+        LOG_ERROR("thumbdb: invalid magic header in database file during rebuild");
+        fclose(f);
+        rh_destroy(new_tbl);
+        return NULL;
+    }
 
-    if (!local_binary) {
-        char line[LINE_MAX];
-        while (fgets(line, sizeof(line), f)) {
-            char* nl = strchr(line, '\n'); if (nl) *nl = '\0'; if (line[0] == '#') continue;
-            char* sem = strchr(line, ';');
-            if (sem) {
-                *sem = '\0'; char* key = line; char* val = sem + 1;
-                if (val[0] == '\0') rh_insert(new_tbl, key, strlen(key), NULL, 0);
-                else rh_insert(new_tbl, key, strlen(key), (const unsigned char*)val, strlen(val) + 1);
-                continue;
-            }
-            char* tab = strchr(line, '\t'); if (!tab) continue; *tab = '\0'; char* key = line; char* val = tab + 1;
-            if (val[0] == '\0') { rh_insert(new_tbl, key, strlen(key), NULL, 0); }
-            else {
-                char base[PATH_MAX]; base[0] = '\0'; char* p = strstr(key, "-small."); int this_is_small = 0;
-                if (p) { size_t bl = (size_t)(p - key); if (bl >= sizeof(base)) bl = sizeof(base) - 1; memcpy(base, key, bl); base[bl] = '\0'; this_is_small = 1; }
-                else { p = strstr(key, "-large."); if (p) { size_t bl = (size_t)(p - key); if (bl >= sizeof(base)) bl = sizeof(base) - 1; memcpy(base, key, bl); base[bl] = '\0'; this_is_small = 0; } else strncpy(base, key, sizeof(base) - 1); base[sizeof(base) - 1] = '\0'; }
-                char small_tok[8] = "null"; char large_tok[8] = "null"; char media[PATH_MAX] = "";
-                if (this_is_small) strncpy(small_tok, "small", sizeof(small_tok) - 1); else strncpy(large_tok, "large", sizeof(large_tok) - 1);
-                strncpy(media, val, sizeof(media) - 1); media[sizeof(media) - 1] = '\0'; char combined[LINE_MAX]; snprintf(combined, sizeof(combined), "%s;%s;%s", small_tok, large_tok, media);
-                rh_insert(new_tbl, base, strlen(base), (const unsigned char*)combined, strlen(combined) + 1);
-            }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, DB_MAGIC_LEN, SEEK_SET);
+
+    size_t offset = DB_MAGIC_LEN;
+    while (offset < (size_t)fsize) {
+        // Read operation code (binary)
+        fseek(f, offset, SEEK_SET);
+        uint8_t op_code = 0;
+        if (fread(&op_code, 1, 1, f) != 1) break;
+        offset += 1;
+        
+        // Read separator (0x5E) as binary
+        uint8_t sep = 0;
+        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) break;
+        offset += 1;
+        
+        // Read key length (binary)
+        uint32_t key_len = 0;
+        if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) break;
+        offset += sizeof(uint32_t);
+        
+        // Read separator (0x5E) as binary
+        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) break;
+        offset += 1;
+        
+        // Read key data (binary)
+        if (key_len == 0 || offset + key_len > (size_t)fsize) break;
+        char* key = malloc(key_len + 1);
+        if (!key) break;
+        if (fread(key, 1, key_len, f) != key_len) { free(key); break; }
+        key[key_len] = '\0';
+        offset += key_len;
+        
+        // Read separator (0x5E) as binary
+        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) { free(key); break; }
+        offset += 1;
+        
+        // Read value length (binary)
+        uint32_t val_len = 0;
+        if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) { free(key); break; }
+        offset += sizeof(uint32_t);
+        
+        // Read separator (0x5E) as binary
+        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) { free(key); break; }
+        offset += 1;
+        
+        // Read value data (binary)
+        unsigned char* val = NULL;
+        if (val_len > 0) {
+            if (offset + val_len > (size_t)fsize) { free(key); break; }
+            val = malloc(val_len + 1);
+            if (!val) { free(key); break; }
+            if (fread(val, 1, val_len, f) != val_len) { free(key); free(val); break; }
+            val[val_len] = '\0';
+            offset += val_len;
         }
-    } else {
-        char header[LINE_MAX]; if (!fgets(header, sizeof(header), f)) { fclose(f); rh_destroy(new_tbl); return NULL; }
-        while (1) {
-            uint32_t key_len = 0; uint32_t val_len = 0;
-            if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) break;
-            if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) break;
-            if (key_len == 0) { fseek(f, val_len, SEEK_CUR); continue; }
-            char* key = malloc(key_len + 1); if (!key) break; if (fread(key, 1, key_len, f) != key_len) { free(key); break; } key[key_len] = '\0';
-            if (val_len == 0) { rh_insert(new_tbl, key, strlen(key), NULL, 0); free(key); continue; }
-            unsigned char* comp = malloc(val_len); if (!comp) { free(key); break; }
-            if (fread(comp, 1, val_len, f) != val_len) { free(key); free(comp); break; }
-            unsigned char* decomp = NULL; size_t decomp_len = 0;
-            if (decompress_val(comp, val_len, &decomp, &decomp_len) == 0) {
-                rh_insert(new_tbl, key, strlen(key), decomp, decomp_len + 1);
-                free(decomp);
-            } else {
-                rh_insert(new_tbl, key, strlen(key), NULL, 0);
-            }
-            free(comp); free(key);
+        
+        // Read end marker (0x5E) as binary
+        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) {
+            if (val) free(val);
+            free(key);
+            break;
         }
+        offset += 1;
+        
+        // Validate operation codes to prevent invalid combinations
+        if ((op_code == 0x20 || op_code == 0x21) && val_len == 0) {
+            // Invalid: small/large thumbnail with null value
+            if (val) free(val);
+            free(key);
+            continue;
+        }
+        if (op_code == 0x22 && val_len > 0) {
+            // Invalid: null operation with non-null value
+            if (val) free(val);
+            free(key);
+            continue;
+        }
+        
+        // Process the operation
+        if (op_code == 0x10) { // SET operation
+            rh_insert(new_tbl, key, strlen(key), val, val_len);
+        } else if (op_code == 0x20) { // SMALL_THUMB operation
+            rh_insert(new_tbl, key, strlen(key), val, val_len);
+        } else if (op_code == 0x21) { // LARGE_THUMB operation
+            rh_insert(new_tbl, key, strlen(key), val, val_len);
+        } else if (op_code == 0x22) { // NULL operation
+            rh_insert(new_tbl, key, strlen(key), NULL, 0);
+        }
+        
+        if (val) free(val);
+        free(key);
     }
     fclose(f);
 
@@ -622,7 +816,9 @@ static void* rebuild_worker(void* arg) {
     rh_table_t* old = rh_tbl;
     rh_tbl = new_tbl;
     ht_buckets = (size_t)1 << power;
-    db_last_mtime = st.st_mtime; db_last_size = st.st_size; db_rebuilding = 0;
+    db_last_mtime = st.st_mtime;
+    db_last_size = st.st_size;
+    db_rebuilding = 0;
     thread_mutex_unlock(&db_mutex);
 
     if (old) rh_destroy(old);
@@ -666,55 +862,120 @@ int thumbdb_tx_begin(void) {
 }
 
 int thumbdb_tx_abort(void) {
+    if (!db_inited) {
+        LOG_ERROR("thumbdb_tx_abort: database not initialized");
+        return -1;
+    }
+    
     thread_mutex_lock(&db_mutex);
-    if (!tx_active) { thread_mutex_unlock(&db_mutex); return -1; }
-    while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
+    if (!tx_active) {
+        thread_mutex_unlock(&db_mutex);
+        LOG_ERROR("thumbdb_tx_abort: no active transaction to abort");
+        return -1;
+    }
+    
+    // Count operations to be cleaned up
+    size_t op_count = 0;
+    tx_op_t* cur = tx_head;
+    while (cur) { op_count++; cur = cur->next; }
+    
+    // Clean up all transaction operations
+    int cleanup_errors = 0;
+    cur = tx_head;
+    while (cur) {
+        tx_op_t* n = cur->next;
+        if (cur->key) {
+            free(cur->key);
+            cur->key = NULL;
+        }
+        if (cur->val) {
+            free(cur->val);
+            cur->val = NULL;
+        }
+        free(cur);
+        cur = n;
+        op_count--;
+    }
+    tx_head = NULL;
     tx_active = 0;
     thread_mutex_unlock(&db_mutex);
-    return 0;
+    
+    LOG_DEBUG("thumbdb_tx_abort: successfully aborted transaction (%zu operations discarded)", op_count);
+    return cleanup_errors == 0 ? 0 : -1;
 }
 
 int thumbdb_tx_commit(void) {
     if (!db_inited) return -1;
     thread_mutex_lock(&db_mutex);
-    if (!tx_active) { thread_mutex_unlock(&db_mutex); return -1; }
+    if (!tx_active) {
+        thread_mutex_unlock(&db_mutex);
+        LOG_ERROR("thumbdb_tx_commit: no active transaction");
+        return -1;
+    }
+    
+    // Check if there are any operations to commit
+    if (!tx_head) {
+        LOG_DEBUG("thumbdb_tx_commit: no operations to commit");
+        tx_active = 0;
+        thread_mutex_unlock(&db_mutex);
+        return 0;
+    }
+    
+    // First, apply all operations to in-memory hash table
     tx_op_t* cur = tx_head;
-    while (cur) { ht_set_internal(cur->key, cur->val); cur = cur->next; }
-    FILE* f = fopen(db_path, db_binary_mode ? "ab" : "a");
+    while (cur) {
+        if (ht_set_internal(cur->key, cur->val) != 0) {
+            thread_mutex_unlock(&db_mutex);
+            LOG_ERROR("thumbdb_tx_commit: failed to set internal value for key: %s", cur->key ? cur->key : "(null)");
+            return -1;
+        }
+        cur = cur->next;
+    }
+    
+    // Persist all transaction operations to file using new opcode format
+    FILE* f = fopen(db_path, "ab");
     if (!f) {
         LOG_WARN("thumbdb: failed to open db for append during commit");
         thread_mutex_unlock(&db_mutex);
         return -1;
     }
     cur = tx_head;
+    int committed_ops = 0;
     while (cur) {
-        int do_write = 1;
-        if (!db_binary_mode) {
-            char lastval[LINE_MAX]; lastval[0] = '\0';
-            if (last_text_value_for_key(db_path, cur->key, lastval, sizeof(lastval)) == 0) {
-                if ((cur->val == NULL && lastval[0] == '\0') || (cur->val && strcmp(lastval, cur->val) == 0)) do_write = 0;
-            }
+        if (append_line_to_file(f, cur->key, cur->val) != 0) {
+            fclose(f);
+            LOG_WARN("thumbdb: failed to write tx op during commit for key: %s", cur->key ? cur->key : "(null)");
+            thread_mutex_unlock(&db_mutex);
+            return -1;
         }
-        if (do_write) {
-            if (append_line_to_file(f, cur->key, cur->val) != 0) {
-                fclose(f);
-                LOG_WARN("thumbdb: failed to write tx op during commit");
-                thread_mutex_unlock(&db_mutex);
-                return -1;
-            }
-        }
+        committed_ops++;
         cur = cur->next;
     }
-    fflush(f);
-    platform_fsync(fileno(f));
+    if (fflush(f) != 0) {
+        fclose(f);
+        LOG_WARN("thumbdb: failed to flush database during commit");
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
+    if (platform_fsync(fileno(f)) != 0) {
+        fclose(f);
+        LOG_WARN("thumbdb: failed to sync database during commit");
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
     fclose(f);
-    {
-        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+    
+    struct stat st;
+    if (stat(db_path, &st) == 0) {
+        db_last_mtime = st.st_mtime;
+        db_last_size = st.st_size;
     }
 
+    // Clean up transaction list
     while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
     tx_active = 0;
     thread_mutex_unlock(&db_mutex);
+    LOG_DEBUG("thumbdb_tx_commit: successfully committed %d operations", committed_ops);
     return 0;
 }
 
@@ -737,62 +998,72 @@ static int tx_record_op(const char* key, const char* val) {
     return 0;
 }
 
+static int find_hash_conflict(const char* target_hash, char* conflicting_key, size_t key_len) {
+    if (!rh_tbl || !target_hash || target_hash[0] == '\0') return 0;
+    
+    // Simple implementation - check if hash already exists
+    const char* existing = ht_get(target_hash);
+    if (existing) {
+        // Hash conflict detected - return the target hash as conflicting key
+        strncpy(conflicting_key, target_hash, key_len - 1);
+        conflicting_key[key_len - 1] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
 int thumbdb_set(const char* key, const char* value) {
     if (!db_inited) return -1;
     if (!key) return -1;
-    thread_mutex_lock(&db_mutex);
-    char base[PATH_MAX]; int is_small = 0, is_large = 0; base[0] = '\0';
-    thumbname_to_base_and_kind(key, base, sizeof(base), &is_small, &is_large);
-
-    const char* exist_val = ht_get(base);
-    char small_tok[8] = "null"; char large_tok[8] = "null"; char media[PATH_MAX] = "";
-    if (exist_val) split_combined_val(exist_val, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
-    if (is_small) strncpy(small_tok, "small", sizeof(small_tok) - 1);
-    if (is_large) strncpy(large_tok, "large", sizeof(large_tok) - 1);
-    if (value) strncpy(media, value, sizeof(media) - 1);
-    char combined[LINE_MAX]; make_combined_val(combined, sizeof(combined), small_tok, large_tok, media);
-
-    if (tx_active) {
-        tx_op_t* tcur = tx_head;
-        while (tcur) {
-            if (tcur->key && strcmp(tcur->key, base) == 0) {
-                if ((tcur->val == NULL && combined[0] == '\0') || (tcur->val && strcmp(tcur->val, combined) == 0)) {
-                    thread_mutex_unlock(&db_mutex);
-                    return 0;
-                }
-                break;
-            }
-            tcur = tcur->next;
-        }
-        int r = tx_record_op(base, combined);
-        thread_mutex_unlock(&db_mutex);
-        return r;
+    if (value && !is_valid_media_path(value)) {
+        LOG_WARN("thumbdb_set: rejected invalid media path: %s", value);
+        return -1;
     }
-    const char* curr = ht_get(base);
-    if (curr && strcmp(curr, combined) == 0) {
+    thread_mutex_lock(&db_mutex);
+    
+    // Use the thumbnail filename directly as the database key (no hash deduplication)
+    const char* db_key = key;
+    const char* db_value = value;
+    
+    // For transaction mode, record the operation directly
+    if (tx_active) {
+        int r = tx_record_op(db_key, db_value);
+        if (r != 0) {
+            thread_mutex_unlock(&db_mutex);
+            LOG_ERROR("thumbdb_set: failed to record transaction operation for key: %s", db_key);
+            return -1;
+        }
         thread_mutex_unlock(&db_mutex);
         return 0;
     }
-    int r = ht_set_internal(base, combined);
-    FILE* f = fopen(db_path, db_binary_mode ? "ab" : "a");
+    
+    // For direct mode, check if we need to update
+    const char* curr = ht_get(db_key);
+    if (curr && db_value && strcmp(curr, db_value) == 0) {
+        thread_mutex_unlock(&db_mutex);
+        return 0;  // No change needed
+    }
+    if (!curr && !db_value) {
+        thread_mutex_unlock(&db_mutex);
+        return 0;  // No change needed
+    }
+    
+    // Update the hash table
+    int r = ht_set_internal(db_key, db_value);
+    
+    // Write to file immediately for direct mode
+    FILE* f = fopen(db_path, "ab");
     if (f) {
-        if (!db_binary_mode) {
-            char lastval[LINE_MAX]; lastval[0] = '\0';
-            if (last_text_value_for_key(db_path, base, lastval, sizeof(lastval)) == 0) {
-                if (strcmp(lastval, combined) != 0) append_line_to_file(f, base, combined);
-            }
-            else {
-                append_line_to_file(f, base, combined);
-            }
-        }
-        else {
-            append_line_to_file(f, base, combined);
-        }
+        append_line_to_file(f, db_key, db_value);
         fflush(f);
         platform_fsync(fileno(f));
         fclose(f);
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
+    else {
+        LOG_WARN("thumbdb: failed to open db file for append in thumbdb_set");
+    }
+    
     thread_mutex_unlock(&db_mutex);
     return r;
 }
@@ -802,14 +1073,17 @@ int thumbdb_get(const char* key, char* buf, size_t buflen) {
     if (!key || !buf) return -1;
     if (ensure_index_uptodate() != 0) return -1;
     thread_mutex_lock(&db_mutex);
-    char base[PATH_MAX]; int is_small = 0, is_large = 0; base[0] = '\0';
-    thumbname_to_base_and_kind(key, base, sizeof(base), &is_small, &is_large);
-    const char* e_val = ht_get(base);
-    if (!e_val) { thread_mutex_unlock(&db_mutex); return 1; }
-    char small_tok[8], large_tok[8], media[PATH_MAX]; small_tok[0] = large_tok[0] = media[0] = '\0';
-    split_combined_val(e_val, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
-    if (media[0] == '\0') { thread_mutex_unlock(&db_mutex); return 1; }
-    strncpy(buf, media, buflen - 1); buf[buflen - 1] = '\0';
+    
+    // Use the thumbnail filename directly as the lookup key
+    const char* e_val = ht_get(key);
+    if (!e_val) {
+        thread_mutex_unlock(&db_mutex);
+        return 1;
+    }
+    
+    // Simply return the stored value
+    strncpy(buf, e_val, buflen - 1);
+    buf[buflen - 1] = '\0';
     thread_mutex_unlock(&db_mutex);
     return 0;
 }
@@ -821,59 +1095,49 @@ int thumbdb_delete(const char* key) {
     char base[PATH_MAX]; int is_small = 0, is_large = 0; base[0] = '\0';
     thumbname_to_base_and_kind(key, base, sizeof(base), &is_small, &is_large);
 
-    ht_entry_t* exist = ht_find(base);
-    char small_tok[8] = "null"; char large_tok[8] = "null"; char media[PATH_MAX] = "";
-    if (exist && exist->val) split_combined_val(exist->val, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
-
-    if (is_small) strncpy(small_tok, "null", sizeof(small_tok) - 1);
-    if (is_large) strncpy(large_tok, "null", sizeof(large_tok) - 1);
-
-    int both_null = (strcmp(small_tok, "null") == 0 && strcmp(large_tok, "null") == 0);
-
-    if (tx_active) {
-        if (both_null) {
-            int r = tx_record_op(base, NULL);
-            thread_mutex_unlock(&db_mutex);
-            return r;
+    // Extract hash from key or use key directly if it's a hash
+    char hash_key[PATH_MAX] = "";
+    
+    // If key looks like a hash (32 hex chars), use it directly as the database key
+    if (strlen(key) == 32) {
+        const char* hex_chars = "0123456789abcdef";
+        int is_hash = 1;
+        for (int i = 0; i < 32; i++) {
+            if (!strchr(hex_chars, tolower(key[i]))) {
+                is_hash = 0;
+                break;
+            }
         }
-        char combined[LINE_MAX]; make_combined_val(combined, sizeof(combined), small_tok, large_tok, media);
-        int r = tx_record_op(base, combined);
+        if (is_hash) {
+            strncpy(hash_key, key, sizeof(hash_key) - 1);
+        }
+    }
+    
+    // If no hash found yet, use base name as hash (fallback)
+    if (hash_key[0] == '\0') {
+        strncpy(hash_key, base, sizeof(hash_key) - 1);
+    }
+
+    // Use direct value storage without legacy format parsing
+    if (tx_active) {
+        int r = tx_record_op(hash_key, NULL);
         thread_mutex_unlock(&db_mutex);
         return r;
     }
 
-    if (both_null) {
-        ht_set_internal(base, NULL);
-    }
-    else {
-        char combined[LINE_MAX]; make_combined_val(combined, sizeof(combined), small_tok, large_tok, media);
-        ht_set_internal(base, combined);
-    }
+    ht_set_internal(hash_key, NULL);
 
-    FILE* f = fopen(db_path, db_binary_mode ? "ab" : "a");
-    if (f) {
-        if (!db_binary_mode) {
-            if (both_null) {
-                char lastval[LINE_MAX]; lastval[0] = '\0';
-                if (last_text_value_for_key(db_path, base, lastval, sizeof(lastval)) != 0 || lastval[0] != '\0') append_line_to_file(f, base, NULL);
-            }
-            else {
-                char combined[LINE_MAX]; make_combined_val(combined, sizeof(combined), small_tok, large_tok, media);
-                char lastval[LINE_MAX]; lastval[0] = '\0';
-                if (last_text_value_for_key(db_path, base, lastval, sizeof(lastval)) != 0 || strcmp(lastval, combined) != 0) append_line_to_file(f, base, combined);
-            }
-        }
-        else {
-            if (both_null) append_line_to_file(f, base, NULL);
-            else { char combined[LINE_MAX]; make_combined_val(combined, sizeof(combined), small_tok, large_tok, media); append_line_to_file(f, base, combined); }
-        }
-        fflush(f);
-        platform_fsync(fileno(f));
-        fclose(f);
+    tx_op_t single_op;
+    single_op.key = (char*)hash_key;
+    single_op.val = NULL;
+    single_op.next = NULL;
+    int ret = persist_tx_ops(&single_op);
+    if (ret == 0) {
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
+    // In binary mode, append delete operation(s) directly
     thread_mutex_unlock(&db_mutex);
-    return 0;
+    return ret;
 }
 
 void thumbdb_iterate(void (*cb)(const char* key, const char* value, void* ctx), void* ctx) {
@@ -912,88 +1176,74 @@ int thumbdb_compact(void) {
     if (!db_inited) return -1;
     if (ensure_index_uptodate() != 0) return -1;
     thread_mutex_lock(&db_mutex);
-    FILE* f = fopen(db_path, db_binary_mode ? "wb" : "w");
-    if (!f) { LOG_WARN("thumbdb: failed to open db for compaction: %s", db_path); thread_mutex_unlock(&db_mutex); return -1; }
-    fprintf(f, "#version;1.0\n");
-    if (!rh_tbl) { fclose(f); thread_mutex_unlock(&db_mutex); return -1; }
-    struct comp_ctx cc;
-    cc.f = f; cc.restrict_to_base = 0; cc.allowed_base[0] = '\0';
-    char thumb_dir[PATH_MAX]; strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1); thumb_dir[sizeof(thumb_dir) - 1] = '\0';
-    char* last = strrchr(thumb_dir, DIR_SEP);
-    if (last) *last = '\0'; else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
-    char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-    size_t trl = strlen(thumbs_root);
-    if (trl > 0 && strncmp(thumb_dir, thumbs_root, trl) == 0) {
-        const char* sub = thumb_dir + trl;
-        while (*sub == DIR_SEP) sub++;
-        if (*sub) {
-            char safe_dir[PATH_MAX]; strncpy(safe_dir, sub, sizeof(safe_dir) - 1); safe_dir[sizeof(safe_dir) - 1] = '\0';
-            char* s_last = strrchr(safe_dir, DIR_SEP);
-            if (s_last) memmove(safe_dir, s_last + 1, strlen(s_last + 1) + 1);
-            size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-            for (size_t i = 0; i < gf_count; ++i) {
-                char folder_real[PATH_MAX]; if (!real_path(gfolders[i], folder_real)) continue;
-                char sf[PATH_MAX]; sf[0] = '\0'; make_safe_dir_name_from(folder_real, sf, sizeof(sf));
-                if (strcmp(sf, safe_dir) == 0) {
-                    strncpy(cc.allowed_base, folder_real, sizeof(cc.allowed_base) - 1);
-                    cc.allowed_base[sizeof(cc.allowed_base) - 1] = '\0';
-                    cc.restrict_to_base = 1;
-                    break;
-                }
-            }
-        }
+    
+    if (!rh_tbl) {
+        thread_mutex_unlock(&db_mutex);
+        return -1;
     }
-
-    rh_iterate(rh_tbl, rh_comp_cb, &cc);
-
-    if (cc.restrict_to_base && cc.wrote_count == 0) {
-        char per_thumbs_root[PATH_MAX];
-        char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-        char safe_dir[PATH_MAX]; make_safe_dir_name_from(cc.allowed_base, safe_dir, sizeof(safe_dir));
-        snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
-        if (is_dir(per_thumbs_root)) {
-            diriter tit;
-            if (dir_open(&tit, per_thumbs_root)) {
-                const char* tname;
-                while ((tname = dir_next(&tit))) {
-                    if (!tname) continue;
-                    if (!strstr(tname, "-small.") && !strstr(tname, "-large.")) continue;
-                    char base[PATH_MAX]; int is_small = 0, is_large = 0; base[0] = '\0';
-                    thumbname_to_base_and_kind(tname, base, sizeof(base), &is_small, &is_large);
-                    if (!base[0]) continue;
-                    diriter mit;
-                    if (!dir_open(&mit, cc.allowed_base)) continue;
-                    const char* mname;
-                    while ((mname = dir_next(&mit))) {
-                        if (!mname) continue;
-                        if (!has_ext(mname, IMAGE_EXTS) && !has_ext(mname, VIDEO_EXTS)) continue;
-                        char media_full[PATH_MAX]; path_join(media_full, cc.allowed_base, mname);
-                        char small_rel[PATH_MAX], large_rel[PATH_MAX]; small_rel[0] = large_rel[0] = '\0';
-                        get_thumb_rel_names(media_full, mname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
-                        if (strcmp(small_rel, tname) == 0 || strcmp(large_rel, tname) == 0) {
-                            char small_tok[8] = "null"; char large_tok[8] = "null"; char media[PATH_MAX] = "";
-                            char small_path[PATH_MAX]; char large_path[PATH_MAX];
-                            snprintf(small_path, sizeof(small_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
-                            snprintf(large_path, sizeof(large_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-                            if (is_file(small_path)) strncpy(small_tok, "small", sizeof(small_tok) - 1);
-                            if (is_file(large_path)) strncpy(large_tok, "large", sizeof(large_tok) - 1);
-                            strncpy(media, media_full, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
-                            char combined[LINE_MAX]; make_combined_val(combined, sizeof(combined), small_tok, large_tok, media);
-                            append_line_to_file(f, base, combined);
-                            cc.wrote_count++;
-                            break;
-                        }
-                    }
-                    dir_close(&mit);
-                }
-                dir_close(&tit);
-            }
-        }
+    
+    // Create temporary file for safe writing
+    char temp_path[PATH_MAX];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", db_path);
+    
+    FILE* out = fopen(temp_path, "wb");
+    if (!out) {
+        LOG_WARN("thumbdb: failed to open temporary database file for binary write");
+        thread_mutex_unlock(&db_mutex);
+        return -1;
     }
-    fflush(f);
-    platform_fsync(fileno(f));
-    fclose(f);
-    LOG_INFO("thumbdb: compaction completed");
+    
+    if (fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, out) != DB_MAGIC_LEN) {
+        LOG_WARN("thumbdb: failed to write magic header");
+        fclose(out);
+        platform_file_delete(temp_path);
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
+    
+    int result = rh_iterate(rh_tbl, rh_write_bin_cb, out);
+    if (result != 0) {
+        LOG_WARN("thumbdb: iteration failed during processing");
+        fclose(out);
+        platform_file_delete(temp_path);
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
+    
+    if (fflush(out) != 0) {
+        LOG_WARN("thumbdb: fflush failed during processing");
+        fclose(out);
+        platform_file_delete(temp_path);
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
+    
+    if (platform_fsync(fileno(out)) != 0) {
+        LOG_WARN("thumbdb: fsync failed during processing");
+        fclose(out);
+        platform_file_delete(temp_path);
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
+    
+    fclose(out);
+    
+    // Atomically replace the old file with the new one
+    if (platform_move_file(temp_path, db_path) != 0) {
+        LOG_WARN("thumbdb: failed to replace database file");
+        platform_file_delete(temp_path);
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
+    
+    // Update file stats
+    struct stat st;
+    if (stat(db_path, &st) == 0) {
+        db_last_mtime = st.st_mtime;
+        db_last_size = st.st_size;
+    }
+    
+    LOG_INFO("thumbdb: processing completed");
     thread_mutex_unlock(&db_mutex);
     return 0;
 }
@@ -1001,8 +1251,8 @@ int thumbdb_compact(void) {
 static void sweep_cb(const char* key, const char* value, void* ctx) {
     (void)ctx;
     if (!value || value[0] == '\0') return;
-    char small_tok[8], large_tok[8], media[PATH_MAX]; small_tok[0] = large_tok[0] = media[0] = '\0';
-    split_combined_val(value, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
+    // Direct value comparison without legacy format parsing
+    const char* media = value;
     if (!media[0]) return;
     if (!is_file(media)) {
         char thumb_path[PATH_MAX];
@@ -1088,8 +1338,8 @@ int thumbdb_sweep_orphans(void) {
             get_thumbs_root(thumb_dir, sizeof(thumb_dir));
         }
 
-        char small_tok[8], large_tok[8], media[PATH_MAX]; small_tok[0] = large_tok[0] = media[0] = '\0';
-        split_combined_val(value, small_tok, sizeof(small_tok), large_tok, sizeof(large_tok), media, sizeof(media));
+        // Direct value comparison without legacy format parsing
+        const char* media = value;
         char thumb_path[PATH_MAX];
         snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, key);
         if (!is_file(media)) {
@@ -1146,24 +1396,40 @@ int thumbdb_sweep_orphans(void) {
     for (size_t i = 0; i < del_count; ++i) {
         ht_set_internal(dels[i], NULL);
     }
-    FILE* f = fopen(db_path, db_binary_mode ? "ab" : "a");
-    if (f) {
-        for (size_t i = 0; i < del_count; ++i) {
-            append_line_to_file(f, dels[i], NULL);
+    // Persist orphan deletions to file
+    if (!db_binary_mode) {
+        FILE* f = fopen(db_path, "ab");
+        if (f) {
+            for (size_t i = 0; i < del_count; ++i) {
+                append_line_to_file(f, dels[i], NULL);
+            }
+            fflush(f);
+            platform_fsync(fileno(f));
+            fclose(f);
+            struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
         }
-        fflush(f);
-        platform_fsync(fileno(f));
-        fclose(f);
-        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        else {
+            LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
+        }
     }
     else {
-        LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
+        FILE* f = fopen(db_path, "ab");
+        if (f) {
+            for (size_t i = 0; i < del_count; ++i) {
+                append_line_to_file(f, dels[i], NULL);
+            }
+            fflush(f);
+            platform_fsync(fileno(f));
+            fclose(f);
+            struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        }
+        else {
+            LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
+        }
     }
     thread_mutex_unlock(&db_mutex);
 
     for (size_t i = 0; i < del_count; ++i) free(dels[i]); free(dels);
-
-    thumbdb_compact();
 
     return 0;
 }

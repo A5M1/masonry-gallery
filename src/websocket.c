@@ -407,6 +407,8 @@ int websocket_register_socket(int client_socket, char* request_headers) {
         if (key_alloc) free(key);
         return 0;
     }
+    combined[0] = '\0';
+
 
     sprintf(combined, "%s%s", key, guid);
     if (key_alloc) { free(key); key = NULL; key_alloc = 0; }

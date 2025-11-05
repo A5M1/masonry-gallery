@@ -99,3 +99,9 @@ __pycache__/
 coverage/
 rust/Cargo.lock
 .todo.txt
+*.backup
+*.tmp
+*.db
+.roomodes
+tools/parse_thumbdb.py
+SECURITY_ASSESSMENT_REPORT.md
