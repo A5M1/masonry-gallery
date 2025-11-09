@@ -32,7 +32,11 @@ static void api_thumbdb_collect_cb(const char* key, const char* value, void* uct
 	if (c->count + 1 > c->cap) {
 		size_t nc = c->cap ? c->cap * 2 : 256;
 		api_kv_t* tmp = realloc(c->arr, nc * sizeof(*tmp));
-		if (!tmp) { c->err = 1; return; }
+		if (!tmp) {
+			LOG_ERROR("Failed to realloc API KV array to size %zu", nc);
+			c->err = 1;
+			return;
+		}
 		c->arr = tmp; c->cap = nc;
 	}
 	c->arr[c->count].key = key ? strdup(key) : NULL;
@@ -99,7 +103,7 @@ static void ensure_json_buf(char** pbuf, size_t* pcap, size_t used, size_t need)
 		size_t newcap = MAX((*pcap + need) * 2, *pcap + 8192);
 		char* new_buf = realloc(*pbuf, newcap);
 		if (!new_buf) {
-			LOG_ERROR("Failed to reallocate JSON buffer");
+			LOG_ERROR("Failed to reallocate JSON buffer to size %zu", newcap);
 			return;
 		}
 		*pbuf = new_buf;
@@ -197,7 +201,15 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		const char* name; while ((name = dir_next(&it))) {
 			if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
 			if (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS)) {
-				if (n == alloc) { alloc = alloc ? alloc * 2 : 64; files = realloc(files, alloc * sizeof(char*)); }
+				if (n == alloc) {
+					alloc = alloc ? alloc * 2 : 64;
+					files = realloc(files, alloc * sizeof(char*));
+					if (!files) {
+						LOG_ERROR("Failed to realloc files array to size %zu", alloc);
+						alloc = 0;
+						break;
+					}
+				}
 				files[n++] = strdup(name);
 			}
 		}
@@ -208,7 +220,14 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	int total = (int)n; int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE; if (totalPages == 0) totalPages = 1; if (page < 1) page = 1; if (page > totalPages) page = totalPages;
 	int start = (page - 1) * ITEMS_PER_PAGE; int end = start + ITEMS_PER_PAGE; if (end > total) end = total;
 
-	size_t hcap = 8192; char* hbuf = malloc(hcap); if (!hbuf) { for (size_t i = 0;i < n;i++) free(files[i]); free(files); if (out_len) *out_len = 0; return NULL; }
+	size_t hcap = 8192;
+	char* hbuf = malloc(hcap);
+	if (!hbuf) {
+		size_t i;
+		for (i = 0;i < n;i++) free(files[i]);
+		if (out_len) *out_len = 0;
+		return NULL;
+	}
 	size_t hused = 0;
 	appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-fragment\" data-page=\"%d\" data-hasmore=\"%d\">", page, (page < totalPages) ? 1 : 0);
 
@@ -225,12 +244,25 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 			if (dir_open(&tit, per_thumbs_root)) {
 				const char* tname; size_t cap = 128;
 				thumb_map = calloc(cap, sizeof(*thumb_map));
+				if (!thumb_map) {
+					LOG_ERROR("Failed to allocate thumb map array of size %zu", cap);
+					cap = 0;
+				}
 				while ((tname = dir_next(&tit))) {
 					if (!tname) continue;
 					if (!strstr(tname, "-small.") && !strstr(tname, "-large.")) continue;
 					char media_val[PATH_MAX]; media_val[0] = '\0';
 					if (thumbdb_get(tname, media_val, sizeof(media_val)) != 0) continue;
-					if (thumb_map_count + 1 >= cap) { size_t nc = cap * 2; thumb_map = realloc(thumb_map, nc * sizeof(*thumb_map)); if (!thumb_map) { cap = 0; break; } cap = nc; }
+					if (thumb_map_count + 1 >= cap) {
+						size_t nc = cap * 2;
+						thumb_map = realloc(thumb_map, nc * sizeof(*thumb_map));
+						if (!thumb_map) {
+							LOG_ERROR("Failed to realloc thumb map array to size %zu", nc);
+							cap = 0;
+							break;
+						}
+						cap = nc;
+					}
 					thumb_map[thumb_map_count].media = strdup(media_val);
 					thumb_map[thumb_map_count].thumb = strdup(tname);
 					thumb_map_count++;
@@ -519,7 +551,16 @@ static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, cons
 			path_join(full, dir, name);
 			full[PATH_MAX - 1] = '\0';
 			if (is_dir(full) && !has_nogallery(full) && has_media_rec(full)) {
-				if (n == alloc) { alloc = alloc ? alloc * 2 : 16; names = realloc(names, alloc * sizeof(char*)); }
+				if (n == alloc) {
+					alloc = alloc ? alloc * 2 : 16;
+					names = realloc(names, alloc * sizeof(char*));
+					if (!names) {
+						size_t i;
+						for (i = 0; i < n; i++) free(names[i]);
+						alloc = 0;
+						break;
+					}
+				}
 				names[n++] = strdup(name);
 			}
 		}
@@ -559,7 +600,8 @@ void handle_api_tree(int c, bool keep_alive) {
 		ptr = json_str(ptr, "name", "root", &cap); used = ptr - buf;
 		ptr = json_str(ptr, "path", "", &cap); used = ptr - buf;
 		ptr = json_arrOpen(ptr, "children", &cap); used = ptr - buf;
-		for (size_t i = 0; i < count; i++) {
+		size_t i;
+		for (i = 0; i < count; i++) {
 			if (i > 0) { ptr = json_comma_safe(ptr, &cap); used = ptr - buf; }
 			build_folder_tree_json(&buf, &cap, &used, folders[i], folders[i]);
 		}
@@ -1092,7 +1134,14 @@ void handle_api_add_folder(int c, const char* body, bool keep_alive) {
 	if (!is_dir(path)) { send_text(c, 400, "Bad Request", "Not a directory", keep_alive); return; }
 	if (is_gallery_folder(path)) { send_text(c, 400, "Bad Request", "Folder already in gallery", keep_alive); return; }
 	add_gallery_folder(path);
-	size_t cap = 512; char* buf = malloc(cap); size_t rlen = cap; char* ptr = buf;
+	size_t cap = 512; char* buf = malloc(cap);
+	if (!buf) {
+		const char* msg = "{\"error\":\"Out of memory\"}";
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
+	size_t rlen = cap; char* ptr = buf;
 	ptr = json_objOpen(ptr, NULL, &rlen);
 	ptr = json_str(ptr, "status", "success", &rlen);
 	ptr = json_str(ptr, "message", path, &rlen);
@@ -1103,10 +1152,18 @@ void handle_api_add_folder(int c, const char* body, bool keep_alive) {
 }
 void handle_api_list_folders(int c, bool keep_alive) {
 	size_t count; char** folders = get_gallery_folders(&count);
-	size_t cap = 8192; char* buf = malloc(cap); size_t len = cap; char* ptr = buf;
+	size_t cap = 8192; char* buf = malloc(cap);
+	if (!buf) {
+		const char* msg = "{\"error\":\"Out of memory\"}";
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
+	size_t len = cap; char* ptr = buf;
 	ptr = json_objOpen(ptr, NULL, &len);
 	ptr = json_arrOpen(ptr, "folders", &len);
-	for (size_t i = 0; i < count; i++) {
+	size_t i;
+	for (i = 0; i < count; i++) {
 		if (i > 0) ptr = json_comma_safe(ptr, &len);
 		ptr = json_objOpen(ptr, NULL, &len);
 		ptr = json_str(ptr, "path", folders[i], &len);
@@ -1147,7 +1204,13 @@ void handle_legacy_folders(int c, bool keep_alive) {
 
 		diriter it; if (!dir_open(&it, d)) { free(d); continue; }
 		const char* name; int has_media = 0;
-		char** subdirs = malloc(SUBDIR_INIT * sizeof(char*)); int subcap = SUBDIR_INIT, subcnt = 0;
+		char** subdirs = malloc(SUBDIR_INIT * sizeof(char*));
+		if (!subdirs) {
+			LOG_ERROR("Failed to allocate subdirs array");
+			free(d);
+			continue;
+		}
+		int subcap = SUBDIR_INIT, subcnt = 0;
 		while ((name = dir_next(&it))) {
 			if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
 			char full[PATH_MAX]; path_join(full, d, name);
@@ -1187,6 +1250,10 @@ void handle_legacy_folders(int c, bool keep_alive) {
 				stack = tmp;
 			}
 			char* child = malloc(PATH_MAX);
+			if (!child) {
+				LOG_ERROR("Failed to allocate child path buffer");
+				break;
+			}
 			snprintf(child, PATH_MAX, "%s%s%s", d, DIR_SEP_STR, subdirs[i]);
 			normalize_path(child);
 			stack[sp++] = child;
@@ -1369,18 +1436,13 @@ void handle_legacy_move(int c, const char* body, bool keep_alive) {
 	char rel_copy[PATH_MAX];
 	strncpy(rel_copy, rel, sizeof(rel_copy) - 1);
 	rel_copy[sizeof(rel_copy) - 1] = '\0';
-
-	// prevent path traversal or absolute paths
 	if (strstr(rel_copy, "..") || rel_copy[0] == '/' || rel_copy[0] == '\\') {
 		LOG_WARN("Rejected path traversal attempt: %s", rel_copy);
 		return;
 	}
-
-	
 	rel_copy[sizeof(rel_copy) - 1] = '\0';
 	while (*rel_copy == '/' || *rel_copy == '\\') memmove(rel_copy, rel_copy + 1, strlen(rel_copy));
 	char src[PATH_MAX]; snprintf(src, sizeof(src), "%s%s%s", BASE_DIR, DIR_SEP_STR, rel_copy); normalize_path(src);
-
 	char* fname = strrchr(src, DIR_SEP);
 	if (!fname || *(fname + 1) == '\0') { send_text(c, 400, "Bad Request", "invalid fromPath", keep_alive); return; }
 	fname++;

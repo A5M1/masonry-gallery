@@ -83,9 +83,9 @@ static void* worker_thread(void* arg) {
     size_t buf_size = 8192;
     char* buffer = malloc(buf_size);
     if (!buffer) {
-        LOG_ERROR("Failed to allocate thread buffer");
+        LOG_ERROR("Failed to allocate thread buffer of size %zu", buf_size);
 #ifdef _WIN32
-        return 1;  
+        return 1;
 #else
         return NULL;
 #endif
@@ -109,7 +109,7 @@ static void* worker_thread(void* arg) {
                 buf_size *= 2;
                 char* new_buf = realloc(buffer, buf_size);
                 if (!new_buf) {
-                    LOG_ERROR("Failed to realloc request buffer");
+                    LOG_ERROR("Failed to realloc request buffer to size %zu", buf_size);
                     broken = 1;
                     break;
                 }
@@ -184,7 +184,7 @@ static void* worker_thread(void* arg) {
             } else {
                 headers_copy = malloc(headers_len + 1);
                 if (!headers_copy) {
-                    LOG_ERROR("Failed to allocate headers copy");
+                    LOG_ERROR("Failed to allocate headers copy of size %zu", headers_len + 1);
                     SOCKET_CLOSE(c);
                     continue;
                 }
@@ -202,7 +202,7 @@ static void* worker_thread(void* arg) {
                 } else {
                     body = malloc(content_length + 1);
                     if (!body) {
-                        LOG_ERROR("Failed to allocate body buffer");
+                        LOG_ERROR("Failed to allocate body buffer of size %d", content_length + 1);
                         if (headers_copy != stack_headers) free(headers_copy);
                         SOCKET_CLOSE(c);
                         continue;
@@ -253,15 +253,29 @@ void start_thread_pool(int nworkers) {
 	if(nworkers<=0) nworkers=get_worker_count();
 	LOG_INFO("Starting thread pool with %d workers", nworkers);
     job_ring=calloc(QUEUE_CAP, sizeof(int));
-    if (job_ring) {
-        for (int i = 0; i < QUEUE_CAP; ++i) job_ring[i] = -1;
+    if (!job_ring) {
+        LOG_ERROR("Failed to allocate job ring buffer of size %d", QUEUE_CAP);
+        return;
     }
+    for (int i = 0; i < QUEUE_CAP; ++i) job_ring[i] = -1;
     thread_mutex_init(&job_mutex);
 #ifdef _WIN32
     job_not_empty=CreateSemaphore(NULL, 0, QUEUE_CAP, NULL);
     job_not_full=CreateSemaphore(NULL, QUEUE_CAP, QUEUE_CAP, NULL);
+    if (!job_not_empty || !job_not_full) {
+        LOG_ERROR("Failed to create thread pool synchronization objects");
+        return;
+    }
     shutdown_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!shutdown_event) {
+        LOG_ERROR("Failed to create shutdown event");
+        return;
+    }
     worker_handles = calloc(nworkers, sizeof(HANDLE));
+    if (!worker_handles) {
+        LOG_ERROR("Failed to allocate worker handles array for %d workers", nworkers);
+        return;
+    }
     worker_count = nworkers;
     for(int i=0;i<nworkers;++i) {
         uintptr_t th = _beginthreadex(NULL, 0, worker_thread, NULL, 0, NULL);
@@ -274,6 +288,10 @@ void start_thread_pool(int nworkers) {
     }
 #else
     worker_handles = calloc(nworkers, sizeof(pthread_t));
+    if (!worker_handles) {
+        LOG_ERROR("Failed to allocate worker handles array for %d workers", nworkers);
+        return;
+    }
     worker_count = nworkers;
     for(int i=0;i<nworkers;++i) {
         if (pthread_create(&worker_handles[i], NULL, worker_thread, NULL) != 0) {

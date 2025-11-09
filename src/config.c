@@ -91,7 +91,17 @@ void add_gallery_folder(const char* path) {
 	}
 	gallery_folder_count++;
 	gallery_folders = realloc(gallery_folders, gallery_folder_count * sizeof(char*));
+	if (!gallery_folders) {
+		LOG_ERROR("Failed to realloc gallery folders array for %zu folders", gallery_folder_count);
+		gallery_folder_count--;
+		return;
+	}
 	gallery_folders[gallery_folder_count - 1] = strdup(path);
+	if (!gallery_folders[gallery_folder_count - 1]) {
+		LOG_ERROR("Failed to duplicate gallery folder path: %s", path);
+		gallery_folder_count--;
+		return;
+	}
 	LOG_DEBUG("Added gallery folder: %s", path);
 
 	save_config();

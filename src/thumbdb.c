@@ -18,7 +18,6 @@
 #define DB_MAGIC "TNDB"
 #define DB_MAGIC_LEN 4
 
-// New binary format opcodes
 const uint8_t OP_BEGIN_RECORD    = 0xAA;
 const uint8_t OP_SEPERATOR       = 0x0A;
 const uint8_t OP_MP4            = 0x0B;
@@ -42,18 +41,18 @@ static const struct { const char* ext; uint8_t code; } ext_map[] = {
 
 static unsigned char get_ext_opcode(const char* path) {
     const char* dot = strrchr(path, '.');
-    if (!dot) return OP_JPG;  // Default to JPG
+    if (!dot) return OP_JPG;  
     for (int i = 0; ext_map[i].ext; i++) {
         if (ascii_stricmp(dot, ext_map[i].ext) == 0) return ext_map[i].code;
     }
-    return OP_JPG;  // Default to JPG
+    return OP_JPG; 
 }
 
 static const char* get_ext_from_opcode(uint8_t code) {
     for (int i = 0; ext_map[i].ext; i++) {
         if (ext_map[i].code == code) return ext_map[i].ext;
     }
-    return ".jpg";  // Default to JPG
+    return ".jpg";  
 }
 
 static int is_valid_media_path(const char* path) {
@@ -105,19 +104,11 @@ static uint32_t ht_hash(const char* s) {
 
 static int append_line_to_file(FILE* f, const char* key, const char* val) {
     if (!f || !key) return -1;
-    
-    // Write binary encoded record using new opcode format
-    // START RECORD | SEPERATOR | KEY | SEPERATOR | MEDIA PATH | END | NEWLINE
-    
     if (fwrite(&OP_BEGIN_RECORD, 1, 1, f) != 1) return -1;
     if (fwrite(&OP_SEPERATOR, 1, 1, f) != 1) return -1;
-    
-    // Write key (thumbnail filename)
     size_t key_len = strlen(key);
     if (fwrite(key, 1, key_len, f) != key_len) return -1;
     if (fwrite(&OP_SEPERATOR, 1, 1, f) != 1) return -1;
-    
-    // Write media path
     if (val) {
         size_t val_len = strlen(val);
         if (fwrite(val, 1, val_len, f) != val_len) return -1;
@@ -125,7 +116,6 @@ static int append_line_to_file(FILE* f, const char* key, const char* val) {
     
     if (fwrite(&OP_END_RECORD, 1, 1, f) != 1) return -1;
     if (fwrite(&OP_NEWLINE, 1, 1, f) != 1) return -1;
-    
     return 0;
 }
 
@@ -229,7 +219,6 @@ static void ht_free_all(void) {
     if (ht) { free_ht_table(ht, ht_buckets); ht = NULL; ht_buckets = 0; }
 }
 
-// Removed duplicate definition - using the one defined below
 
 static int last_text_value_for_key(const char* path, const char* key, char* out, size_t out_len) {
     if (!path || !key || !out || out_len == 0) return -1;
@@ -241,7 +230,11 @@ static int last_text_value_for_key(const char* path, const char* key, char* out,
     size_t key_len = strlen(key);
     const size_t chunk = 8192;
     char* buf = malloc(chunk + key_len + 4);
-    if (!buf) { fclose(f); return -1; }
+    if (!buf) {
+        LOG_ERROR("Failed to allocate buffer for last_text_value_for_key");
+        fclose(f);
+        return -1;
+    }
     long read_pos = pos;
     out[0] = '\0';
     while (read_pos > 0) {
@@ -309,7 +302,7 @@ static int count_cb(const char* key, const unsigned char* val, size_t val_len, v
     (void)key; (void)val; (void)val_len;
     int* count = (int*)ctx;
     (*count)++;
-    return 1; // Stop after first item
+    return 1;
 }
 
 static int is_table_empty(void) {
@@ -352,11 +345,7 @@ static void populate_db_from_existing_thumbs(void) {
             base[0] = '\0';
             thumbname_to_base_and_kind(tname, base, sizeof(base), &is_small, &is_large);
             if (!base[0]) continue;
-            
-            // Check if we already have this base in the database
             if (ht_get(base)) continue;
-            
-            // Find the corresponding media file
             diriter mit;
             if (!dir_open(&mit, folder_real)) continue;
             
@@ -386,8 +375,6 @@ static void populate_db_from_existing_thumbs(void) {
                     if (is_file(large_path)) strncpy(large_tok, "large", sizeof(large_tok) - 1);
                     strncpy(media, media_full, sizeof(media) - 1);
                     media[sizeof(media) - 1] = '\0';
-                    
-                    // Store directly without legacy format
                     ht_set_internal(base, media);
                     
                     LOG_DEBUG("thumbdb: populated %s -> %s", base, media);
@@ -403,25 +390,22 @@ static void populate_db_from_existing_thumbs(void) {
 int thumbdb_open_for_dir(const char* db_full_path) {
     if (!db_open_mutex_inited) { if (thread_mutex_init(&db_open_mutex) == 0) db_open_mutex_inited = 1; }
     thread_mutex_lock(&db_open_mutex);
-    if (db_inited) {
-        thumbdb_close();
+    
+    if (!db_inited) {
+        if (thread_mutex_init(&db_mutex) != 0) {
+            LOG_ERROR("thumbdb: failed to init mutex");
+            return -1;
+        }
+        if (ht_ensure(INITIAL_BUCKETS) != 0) { thread_mutex_destroy(&db_mutex); return -1; }
     }
-    if (thread_mutex_init(&db_mutex) != 0) {
-        LOG_ERROR("thumbdb: failed to init mutex");
-        return -1;
-    }
-    if (ht_ensure(INITIAL_BUCKETS) != 0) { thread_mutex_destroy(&db_mutex); return -1; }
 
     if (!db_full_path || db_full_path[0] == '\0') {
-        thread_mutex_destroy(&db_mutex);
+        if (!db_inited) thread_mutex_destroy(&db_mutex);
         return -1;
     }
     strncpy(db_path, db_full_path, sizeof(db_path) - 1); db_path[sizeof(db_path) - 1] = '\0';
-
-    // Ensure database file exists and starts with magic header
     FILE* f_check = fopen(db_path, "rb");
     if (!f_check) {
-        // File doesn't exist, create it with magic header
         FILE* f_new = fopen(db_path, "wb");
         if (!f_new) {
             LOG_WARN("thumbdb: failed to create db file %s", db_path);
@@ -430,12 +414,10 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, f_new);
         fclose(f_new);
     } else {
-        // File exists, check if it starts with magic header
         char probe[DB_MAGIC_LEN];
         size_t pr = fread(probe, 1, DB_MAGIC_LEN, f_check);
         fclose(f_check);
         if (pr != DB_MAGIC_LEN || memcmp(probe, DB_MAGIC, DB_MAGIC_LEN) != 0) {
-            // File doesn't start with magic header, recreate it
             LOG_INFO("thumbdb: recreating database file with new opcode format");
             FILE* f_new = fopen(db_path, "wb");
             if (!f_new) {
@@ -453,8 +435,6 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
     }
     fclose(f);
-
-    // Use new opcode-based binary format
     f = fopen(db_path, "rb");
     if (!f) {
         db_inited = 1;
@@ -472,8 +452,6 @@ int thumbdb_open_for_dir(const char* db_full_path) {
             fclose(f);
             ht_free_all(); thread_mutex_destroy(&db_mutex); thread_mutex_unlock(&db_open_mutex); return -1;
         }
-        
-        // Parse new simplified opcode-based records
         size_t offset = DB_MAGIC_LEN;
         while (offset < (size_t)fsize) {
             uint8_t opcode;
@@ -485,14 +463,10 @@ int thumbdb_open_for_dir(const char* db_full_path) {
                 continue;
             }
             
-            offset++; // Move past BEGIN_RECORD
-            
-            // Skip separator
+            offset++;
             uint8_t sep;
             if (fread(&sep, 1, 1, f) != 1 || sep != OP_SEPERATOR) break;
             offset++;
-            
-            // Read key until separator
             char key[PATH_MAX] = "";
             size_t key_len = 0;
             while (offset < (size_t)fsize && key_len < sizeof(key) - 1) {
@@ -507,8 +481,6 @@ int thumbdb_open_for_dir(const char* db_full_path) {
                 offset++;
             }
             key[key_len] = '\0';
-            
-            // Read value until end record
             char value[PATH_MAX] = "";
             size_t val_len = 0;
             while (offset < (size_t)fsize && val_len < sizeof(value) - 1) {
@@ -523,8 +495,6 @@ int thumbdb_open_for_dir(const char* db_full_path) {
                 offset++;
             }
             value[val_len] = '\0';
-            
-            // Store in hash table
             if (key_len > 0) {
                 ht_set_internal(key, val_len > 0 ? value : NULL);
             }
@@ -541,7 +511,6 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         db_last_size = 0;
     }
     
-    // If database is empty, scan for existing thumbnails and populate
     if (is_table_empty()) {
         LOG_INFO("thumbdb: database is empty, scanning for existing thumbnails...");
         populate_db_from_existing_thumbs();
@@ -595,7 +564,6 @@ static int media_is_under_base(const char* media, const char* base) {
 static int rh_comp_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
     struct comp_ctx* c = (struct comp_ctx*)ctx;
     if (!key) return 0;
-    // Store directly without legacy format parsing
     if (c->restrict_to_base && val && val_len > 0) {
         if (!media_is_under_base((const char*)val, c->allowed_base)) return 0;
     }
@@ -659,7 +627,6 @@ struct find_media_ctx { const char* media; char* out; size_t out_len; char best[
 static int rh_find_media_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
     struct find_media_ctx* fc = (struct find_media_ctx*)ctx;
     if (!val || val_len == 0) return 0;
-    // Direct comparison without legacy format parsing
     if (strcmp((const char*)val, fc->media) == 0) {
         char found[PATH_MAX]; found[0] = '\0';
         if (find_thumb_filename_for_base(key, 1, found, sizeof(found))) {
@@ -685,7 +652,11 @@ static int rh_collect_kv_cb(const char* key, const unsigned char* val, size_t va
     if (count + 1 > cap) {
         size_t nc = cap * 2;
         kv_t* tmp = realloc(arr, nc * sizeof(*arr));
-        if (!tmp) { c->err = 1; return 1; }
+        if (!tmp) {
+            LOG_ERROR("Failed to realloc array in rh_collect_kv_cb");
+            c->err = 1;
+            return 1;
+        }
         arr = tmp; *c->arrp = arr; *c->capp = nc; cap = nc;
     }
     arr[count].key = key ? strdup(key) : NULL;
@@ -707,7 +678,6 @@ static void* rebuild_worker(void* arg) {
     FILE* f = fopen(db_path, "rb");
     if (!f) { rh_destroy(new_tbl); return NULL; }
 
-    // Verify magic header
     char magic[DB_MAGIC_LEN];
     if (fread(magic, 1, DB_MAGIC_LEN, f) != DB_MAGIC_LEN || memcmp(magic, DB_MAGIC, DB_MAGIC_LEN) != 0) {
         LOG_ERROR("thumbdb: invalid magic header in database file during rebuild");
@@ -722,88 +692,70 @@ static void* rebuild_worker(void* arg) {
 
     size_t offset = DB_MAGIC_LEN;
     while (offset < (size_t)fsize) {
-        // Read operation code (binary)
         fseek(f, offset, SEEK_SET);
         uint8_t op_code = 0;
         if (fread(&op_code, 1, 1, f) != 1) break;
         offset += 1;
-        
-        // Read separator (0x5E) as binary
         uint8_t sep = 0;
         if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) break;
         offset += 1;
-        
-        // Read key length (binary)
         uint32_t key_len = 0;
         if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) break;
         offset += sizeof(uint32_t);
-        
-        // Read separator (0x5E) as binary
         if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) break;
         offset += 1;
-        
-        // Read key data (binary)
         if (key_len == 0 || offset + key_len > (size_t)fsize) break;
         char* key = malloc(key_len + 1);
-        if (!key) break;
+        if (!key) {
+            LOG_ERROR("Failed to allocate key buffer in rebuild_worker");
+            break;
+        }
         if (fread(key, 1, key_len, f) != key_len) { free(key); break; }
         key[key_len] = '\0';
         offset += key_len;
-        
-        // Read separator (0x5E) as binary
         if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) { free(key); break; }
         offset += 1;
-        
-        // Read value length (binary)
         uint32_t val_len = 0;
         if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) { free(key); break; }
         offset += sizeof(uint32_t);
-        
-        // Read separator (0x5E) as binary
         if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) { free(key); break; }
         offset += 1;
-        
-        // Read value data (binary)
         unsigned char* val = NULL;
         if (val_len > 0) {
             if (offset + val_len > (size_t)fsize) { free(key); break; }
             val = malloc(val_len + 1);
-            if (!val) { free(key); break; }
+            if (!val) {
+                LOG_ERROR("Failed to allocate value buffer in rebuild_worker");
+                free(key);
+                break;
+            }
             if (fread(val, 1, val_len, f) != val_len) { free(key); free(val); break; }
             val[val_len] = '\0';
             offset += val_len;
         }
-        
-        // Read end marker (0x5E) as binary
         if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) {
             if (val) free(val);
             free(key);
             break;
         }
         offset += 1;
-        
-        // Validate operation codes to prevent invalid combinations
         if ((op_code == 0x20 || op_code == 0x21) && val_len == 0) {
-            // Invalid: small/large thumbnail with null value
             if (val) free(val);
             free(key);
             continue;
         }
         if (op_code == 0x22 && val_len > 0) {
-            // Invalid: null operation with non-null value
             if (val) free(val);
             free(key);
             continue;
         }
-        
-        // Process the operation
-        if (op_code == 0x10) { // SET operation
+        if (op_code == 0x10) {
             rh_insert(new_tbl, key, strlen(key), val, val_len);
-        } else if (op_code == 0x20) { // SMALL_THUMB operation
+        } else if (op_code == 0x20) {
             rh_insert(new_tbl, key, strlen(key), val, val_len);
-        } else if (op_code == 0x21) { // LARGE_THUMB operation
+        } else if (op_code == 0x21) {
             rh_insert(new_tbl, key, strlen(key), val, val_len);
-        } else if (op_code == 0x22) { // NULL operation
+        } else if (op_code == 0x22) {
             rh_insert(new_tbl, key, strlen(key), NULL, 0);
         }
         
@@ -874,12 +826,10 @@ int thumbdb_tx_abort(void) {
         return -1;
     }
     
-    // Count operations to be cleaned up
     size_t op_count = 0;
     tx_op_t* cur = tx_head;
     while (cur) { op_count++; cur = cur->next; }
     
-    // Clean up all transaction operations
     int cleanup_errors = 0;
     cur = tx_head;
     while (cur) {
@@ -913,7 +863,7 @@ int thumbdb_tx_commit(void) {
         return -1;
     }
     
-    // Check if there are any operations to commit
+    
     if (!tx_head) {
         LOG_DEBUG("thumbdb_tx_commit: no operations to commit");
         tx_active = 0;
@@ -921,7 +871,7 @@ int thumbdb_tx_commit(void) {
         return 0;
     }
     
-    // First, apply all operations to in-memory hash table
+    
     tx_op_t* cur = tx_head;
     while (cur) {
         if (ht_set_internal(cur->key, cur->val) != 0) {
@@ -932,7 +882,7 @@ int thumbdb_tx_commit(void) {
         cur = cur->next;
     }
     
-    // Persist all transaction operations to file using new opcode format
+    
     FILE* f = fopen(db_path, "ab");
     if (!f) {
         LOG_WARN("thumbdb: failed to open db for append during commit");
@@ -971,7 +921,7 @@ int thumbdb_tx_commit(void) {
         db_last_size = st.st_size;
     }
 
-    // Clean up transaction list
+    
     while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
     tx_active = 0;
     thread_mutex_unlock(&db_mutex);
@@ -990,9 +940,24 @@ static int tx_record_op(const char* key, const char* val) {
         }
         cur = cur->next;
     }
-    tx_op_t* op = calloc(1, sizeof(tx_op_t)); if (!op) return -1;
+    tx_op_t* op = calloc(1, sizeof(tx_op_t));
+    if (!op) {
+        LOG_ERROR("Failed to allocate transaction operation structure");
+        return -1;
+    }
     op->key = strdup(key);
+    if (!op->key) {
+        LOG_ERROR("Failed to duplicate key in tx_record_op");
+        free(op);
+        return -1;
+    }
     op->val = val ? strdup(val) : NULL;
+    if (val && !op->val) {
+        LOG_ERROR("Failed to duplicate value in tx_record_op");
+        free(op->key);
+        free(op);
+        return -1;
+    }
     op->next = NULL;
     if (!tx_head) tx_head = op; else { cur = tx_head; while (cur->next) cur = cur->next; cur->next = op; }
     return 0;
@@ -1001,10 +966,8 @@ static int tx_record_op(const char* key, const char* val) {
 static int find_hash_conflict(const char* target_hash, char* conflicting_key, size_t key_len) {
     if (!rh_tbl || !target_hash || target_hash[0] == '\0') return 0;
     
-    // Simple implementation - check if hash already exists
     const char* existing = ht_get(target_hash);
     if (existing) {
-        // Hash conflict detected - return the target hash as conflicting key
         strncpy(conflicting_key, target_hash, key_len - 1);
         conflicting_key[key_len - 1] = '\0';
         return 1;
@@ -1021,11 +984,11 @@ int thumbdb_set(const char* key, const char* value) {
     }
     thread_mutex_lock(&db_mutex);
     
-    // Use the thumbnail filename directly as the database key (no hash deduplication)
+    
     const char* db_key = key;
     const char* db_value = value;
     
-    // For transaction mode, record the operation directly
+    
     if (tx_active) {
         int r = tx_record_op(db_key, db_value);
         if (r != 0) {
@@ -1037,21 +1000,21 @@ int thumbdb_set(const char* key, const char* value) {
         return 0;
     }
     
-    // For direct mode, check if we need to update
+    
     const char* curr = ht_get(db_key);
     if (curr && db_value && strcmp(curr, db_value) == 0) {
         thread_mutex_unlock(&db_mutex);
-        return 0;  // No change needed
+        return 0;
     }
     if (!curr && !db_value) {
         thread_mutex_unlock(&db_mutex);
-        return 0;  // No change needed
+        return 0;
     }
     
-    // Update the hash table
+    
     int r = ht_set_internal(db_key, db_value);
     
-    // Write to file immediately for direct mode
+    
     FILE* f = fopen(db_path, "ab");
     if (f) {
         append_line_to_file(f, db_key, db_value);
@@ -1074,14 +1037,14 @@ int thumbdb_get(const char* key, char* buf, size_t buflen) {
     if (ensure_index_uptodate() != 0) return -1;
     thread_mutex_lock(&db_mutex);
     
-    // Use the thumbnail filename directly as the lookup key
+    
     const char* e_val = ht_get(key);
     if (!e_val) {
         thread_mutex_unlock(&db_mutex);
         return 1;
     }
     
-    // Simply return the stored value
+    
     strncpy(buf, e_val, buflen - 1);
     buf[buflen - 1] = '\0';
     thread_mutex_unlock(&db_mutex);
@@ -1095,10 +1058,10 @@ int thumbdb_delete(const char* key) {
     char base[PATH_MAX]; int is_small = 0, is_large = 0; base[0] = '\0';
     thumbname_to_base_and_kind(key, base, sizeof(base), &is_small, &is_large);
 
-    // Extract hash from key or use key directly if it's a hash
+    
     char hash_key[PATH_MAX] = "";
     
-    // If key looks like a hash (32 hex chars), use it directly as the database key
+    
     if (strlen(key) == 32) {
         const char* hex_chars = "0123456789abcdef";
         int is_hash = 1;
@@ -1113,12 +1076,12 @@ int thumbdb_delete(const char* key) {
         }
     }
     
-    // If no hash found yet, use base name as hash (fallback)
+    
     if (hash_key[0] == '\0') {
         strncpy(hash_key, base, sizeof(hash_key) - 1);
     }
 
-    // Use direct value storage without legacy format parsing
+    
     if (tx_active) {
         int r = tx_record_op(hash_key, NULL);
         thread_mutex_unlock(&db_mutex);
@@ -1135,7 +1098,7 @@ int thumbdb_delete(const char* key) {
     if (ret == 0) {
         struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
-    // In binary mode, append delete operation(s) directly
+    
     thread_mutex_unlock(&db_mutex);
     return ret;
 }
@@ -1182,7 +1145,7 @@ int thumbdb_compact(void) {
         return -1;
     }
     
-    // Create temporary file for safe writing
+    
     char temp_path[PATH_MAX];
     snprintf(temp_path, sizeof(temp_path), "%s.tmp", db_path);
     
@@ -1228,7 +1191,7 @@ int thumbdb_compact(void) {
     
     fclose(out);
     
-    // Atomically replace the old file with the new one
+    
     if (platform_move_file(temp_path, db_path) != 0) {
         LOG_WARN("thumbdb: failed to replace database file");
         platform_file_delete(temp_path);
@@ -1236,7 +1199,7 @@ int thumbdb_compact(void) {
         return -1;
     }
     
-    // Update file stats
+    
     struct stat st;
     if (stat(db_path, &st) == 0) {
         db_last_mtime = st.st_mtime;
@@ -1251,7 +1214,7 @@ int thumbdb_compact(void) {
 static void sweep_cb(const char* key, const char* value, void* ctx) {
     (void)ctx;
     if (!value || value[0] == '\0') return;
-    // Direct value comparison without legacy format parsing
+    
     const char* media = value;
     if (!media[0]) return;
     if (!is_file(media)) {
@@ -1308,7 +1271,11 @@ int thumbdb_sweep_orphans(void) {
     thread_mutex_lock(&db_mutex);
     size_t cap = 128; size_t count = 0;
     kv_t* arr = malloc(cap * sizeof(*arr));
-    if (!arr) { thread_mutex_unlock(&db_mutex); return -1; }
+    if (!arr) {
+        LOG_ERROR("Failed to allocate array in thumbdb_sweep_orphans");
+        thread_mutex_unlock(&db_mutex);
+        return -1;
+    }
     if (!rh_tbl) { free(arr); thread_mutex_unlock(&db_mutex); return -1; }
     struct collect_ctx cctx = { &arr, &cap, &count, 0 };
     int r = rh_iterate(rh_tbl, rh_collect_kv_cb, &cctx);
@@ -1319,7 +1286,12 @@ int thumbdb_sweep_orphans(void) {
     thread_mutex_unlock(&db_mutex);
 
     size_t del_cap = 64; size_t del_count = 0; char** dels = malloc(del_cap * sizeof(char*));
-    if (!dels) { for (size_t j = 0; j < count; ++j) { free(arr[j].key); free(arr[j].val); } free(arr); return -1; }
+    if (!dels) {
+        LOG_ERROR("Failed to allocate deletion array in thumbdb_sweep_orphans");
+        for (size_t j = 0; j < count; ++j) { free(arr[j].key); free(arr[j].val); }
+        free(arr);
+        return -1;
+    }
 
     for (size_t i = 0; i < count; ++i) {
         char* key = arr[i].key; char* value = arr[i].val;
@@ -1338,7 +1310,7 @@ int thumbdb_sweep_orphans(void) {
             get_thumbs_root(thumb_dir, sizeof(thumb_dir));
         }
 
-        // Direct value comparison without legacy format parsing
+        
         const char* media = value;
         char thumb_path[PATH_MAX];
         snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, key);
@@ -1380,10 +1352,20 @@ int thumbdb_sweep_orphans(void) {
             }
 
             if (del_count + 1 > del_cap) {
-                size_t nc = del_cap * 2; char** tmp = realloc(dels, nc * sizeof(char*)); if (!tmp) {}
-                else { dels = tmp; del_cap = nc; }
+                size_t nc = del_cap * 2;
+                char** tmp = realloc(dels, nc * sizeof(char*));
+                if (!tmp) {
+                    LOG_ERROR("Failed to realloc deletion array, breaking early");
+                    break;
+                }
+                dels = tmp; del_cap = nc;
             }
             dels[del_count++] = strdup(key);
+            if (!dels[del_count - 1]) {
+                LOG_ERROR("Failed to duplicate key for deletion, breaking early");
+                del_count--;
+                break;
+            }
         }
 
         free(key); free(value);
@@ -1396,7 +1378,7 @@ int thumbdb_sweep_orphans(void) {
     for (size_t i = 0; i < del_count; ++i) {
         ht_set_internal(dels[i], NULL);
     }
-    // Persist orphan deletions to file
+    
     if (!db_binary_mode) {
         FILE* f = fopen(db_path, "ab");
         if (f) {

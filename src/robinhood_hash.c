@@ -1,4 +1,5 @@
 #include "robinhood_hash.h"
+#include "logging.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -61,8 +62,17 @@ uint64_t xxh3_64(const void* data, size_t len) {
 rh_table_t* rh_create(size_t capacity_power) {
     if (capacity_power < 4) capacity_power = 4;
     size_t cap = (size_t)1 << capacity_power;
-    struct rh_table* t = malloc(sizeof(*t)); if (!t) return NULL;
-    t->entries = calloc(cap, sizeof(struct rh_entry)); if (!t->entries) { free(t); return NULL; }
+    struct rh_table* t = malloc(sizeof(*t));
+    if (!t) {
+        LOG_ERROR("Failed to allocate robinhood hash table structure");
+        return NULL;
+    }
+    t->entries = calloc(cap, sizeof(struct rh_entry));
+    if (!t->entries) {
+        LOG_ERROR("Failed to allocate robinhood hash table entries array of size %zu", cap);
+        free(t);
+        return NULL;
+    }
     t->cap = cap; t->mask = cap - 1; t->count = 0; return t;
 }
 void rh_destroy(rh_table_t* t) {
@@ -78,8 +88,21 @@ int rh_insert(rh_table_t* t, const char* key, size_t key_len, const unsigned cha
     uint64_t h = rh_hash64(key, key_len);
     size_t mask = t->mask; size_t pos = (size_t)(h & mask);
     struct rh_entry e = { h, NULL, key_len, NULL, val_len };
-    e.key = malloc(key_len + 1); if (!e.key) return -1; memcpy(e.key, key, key_len); e.key[key_len] = '\0';
-    if (val && val_len) { e.val = malloc(val_len); if (!e.val) { free(e.key); return -1; } memcpy(e.val, val, val_len); }
+    e.key = malloc(key_len + 1);
+    if (!e.key) {
+        LOG_ERROR("Failed to allocate key buffer of size %zu", key_len + 1);
+        return -1;
+    }
+    memcpy(e.key, key, key_len); e.key[key_len] = '\0';
+    if (val && val_len) {
+        e.val = malloc(val_len);
+        if (!e.val) {
+            LOG_ERROR("Failed to allocate value buffer of size %zu", val_len);
+            free(e.key);
+            return -1;
+        }
+        memcpy(e.val, val, val_len);
+    }
     while (1) {
         struct rh_entry* cur = &t->entries[pos];
         if (!cur->key) { *cur = e; t->count++; return 0; }

@@ -177,8 +177,16 @@ static void* websocket_client_thread(void* arg) {
         unsigned char mask[4] = { 0 };
         if (masked && recv(c, (char*)mask, 4, 0) != 4) break;
 
-        unsigned char* payload = (payload_len > sizeof(small_buf)) ? malloc(payload_len + 1) : small_buf;
-        if (!payload) break;
+        unsigned char* payload = NULL;
+        if (payload_len > sizeof(small_buf)) {
+            payload = malloc(payload_len + 1);
+            if (!payload) {
+                LOG_ERROR("Failed to allocate payload buffer of size %llu", (unsigned long long)payload_len + 1);
+                break;
+            }
+        } else {
+            payload = small_buf;
+        }
 
         size_t got = 0;
         while (got < payload_len) {
@@ -214,7 +222,12 @@ static void* websocket_client_thread(void* arg) {
             }
 
             unsigned char* newbuf = realloc(accum, accum_len + payload_len + 1);
-            if (!newbuf) { if (payload != small_buf) free(payload); break; }
+            if (!newbuf) {
+                LOG_ERROR("Failed to realloc accumulator buffer to size %llu", (unsigned long long)(accum_len + payload_len + 1));
+                if (payload != small_buf) free(payload);
+                exit_flag = 1;
+                break;
+            }
 
             accum = newbuf;
             memcpy(accum + accum_len, payload, payload_len);
@@ -396,14 +409,12 @@ int websocket_register_socket(int client_socket, char* request_headers) {
         if (key_alloc) free(key);
         return 0;
     }
-
     LOG_DEBUG("WebSocket handshake received, Sec-WebSocket-Key=%.64s", key);
-
     const char* guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     size_t total = strlen(key) + strlen(guid);
-
     char* combined = malloc(total + 1);
     if (!combined) {
+        LOG_ERROR("Failed to allocate combined buffer of size %llu", (unsigned long long)(total + 1));
         if (key_alloc) free(key);
         return 0;
     }
@@ -422,7 +433,10 @@ int websocket_register_socket(int client_socket, char* request_headers) {
 
     size_t enc_len = crypto_base64_encode_len(20);
     char* accept = malloc(enc_len + 1);
-    if (!accept) return 0;
+    if (!accept) {
+        LOG_ERROR("Failed to allocate accept buffer of size %llu", (unsigned long long)(enc_len + 1));
+        return 0;
+    }
     crypto_base64_encode(sha, 20, accept, enc_len + 1);
 
     char resp[512];
@@ -443,7 +457,12 @@ int websocket_register_socket(int client_socket, char* request_headers) {
     LOG_DEBUG("WebSocket handshake accepted, client_socket=%d", client_socket);
 
     int* arg = malloc(sizeof(int));
-    if (!arg) { remove_client_socket(client_socket); SOCKET_CLOSE(client_socket); return 0; }
+    if (!arg) {
+        LOG_ERROR("Failed to allocate thread argument for client socket %d", client_socket);
+        remove_client_socket(client_socket);
+        SOCKET_CLOSE(client_socket);
+        return 0;
+    }
     *arg = client_socket;
     thread_create_detached(websocket_client_thread, arg);
 

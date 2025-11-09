@@ -150,6 +150,9 @@ void sb_append(char** buf, size_t* cap, size_t* len, const char* s) {
 	if (*len + add + 1 >= *cap) {
 		*cap = *cap * 2 + add + 64;
 		*buf = realloc(*buf, *cap);
+		if (!*buf) {
+			return;
+		}
 	}
 	memcpy(*buf + *len, s, add);
 	*len += add;

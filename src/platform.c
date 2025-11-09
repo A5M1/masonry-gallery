@@ -493,7 +493,11 @@ int platform_start_dir_watcher(const char* dir, platform_watcher_callback_t cb) 
     char* d = strdup(dir);
     if (!d) return -1;
     void** arg = malloc(sizeof(void*) * 2);
-    if (!arg) { free(d); return -1; }
+    if (!arg) {
+        LOG_ERROR("Failed to allocate argument array for directory watcher");
+        free(d);
+        return -1;
+    }
     arg[0] = d; arg[1] = (void*)cb;
     if (thread_create_detached((void*(*)(void*))watcher_trampoline, arg) != 0) { free(d); free(arg); return -1; }
     return 0;
@@ -688,14 +692,10 @@ int platform_fsync(int fd) {
 
 void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
     if (!src || !dst || dstlen == 0) return;
-
-    // Step 1: Validate input to prevent path escaping / injection
     for (size_t i = 0; src[i]; ++i) {
         unsigned char c = (unsigned char)src[i];
-        // Only allow safe characters: alphanumeric + typical path symbols
         if (!(isalnum(c) || c == '/' || c == '\\' ||
             c == '_' || c == '-' || c == '.' || c == ':' || c == ' ')) {
-            // Unsafe character detected, reject
             dst[0] = '\0';
             return;
         }
@@ -704,12 +704,11 @@ void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
     size_t di = 0;
 
 #ifdef _WIN32
-    // Wrap in quotes for cmd.exe
     if (di < dstlen - 1) dst[di++] = '"';
     for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
         char c = src[i];
-        if (c == '"') continue;          // Skip quotes
-        if (c == '%') {                  // Prevent env var expansion
+        if (c == '"') continue;         
+        if (c == '%') {                
             if (di + 1 < dstlen) dst[di++] = '%';
             else break;
 }
@@ -717,7 +716,6 @@ void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
     }
     if (di < dstlen - 1) dst[di++] = '"';
 #else
-    // Wrap in quotes for POSIX shells
     if (di < dstlen - 1) dst[di++] = '"';
     for (size_t i = 0; src[i] && di + 2 < dstlen; ++i) {
         char c = src[i];
@@ -729,7 +727,6 @@ void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
     }
     if (di < dstlen - 1) dst[di++] = '"';
 #endif
-
     dst[di] = '\0';
 }
 

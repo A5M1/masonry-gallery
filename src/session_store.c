@@ -22,7 +22,10 @@ static char* make_session_id(void) {
     v ^= (uint64_t)((uintptr_t)&v);
     v ^= (uint64_t)++counter;
     char* s = malloc(64);
-    if (!s) return NULL;
+    if (!s) {
+        LOG_ERROR("Failed to allocate session ID string");
+        return NULL;
+    }
     snprintf(s, 64, "s%016llx%08x", (unsigned long long)v, (unsigned int)rand());
     return s;
 }
@@ -31,7 +34,11 @@ char* session_create(void) {
     char* id = make_session_id();
     if (!id) return NULL;
     session_node_t* n = malloc(sizeof(session_node_t));
-    if (!n) { free(id); return NULL; }
+    if (!n) {
+        LOG_ERROR("Failed to allocate session node structure");
+        free(id);
+        return NULL;
+    }
     strncpy(n->id, id, sizeof(n->id)-1); n->id[sizeof(n->id)-1] = '\0';
     n->last = 0;
     thread_mutex_lock(&sessions_mutex);

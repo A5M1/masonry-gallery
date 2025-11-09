@@ -109,11 +109,9 @@ void log_message(LogLevel level, const char* function, const char* format, ...) 
 	}
 #else
 	if (use_color) {
-		//out_len = snprintf(outbuf, sizeof(outbuf), "%s[%s]%s %s[%s]%s %s%s%s: %s\n",
 		out_len = snprintf(outbuf, sizeof(outbuf), "%s[%s]%s %s[%s]%s %s\n",
 			ts_color, time_str, color_reset,
 			level_prefix, level_str, color_reset,
-			//func_color, function, color_reset,
 			message_buffer);
 	}
 	else {

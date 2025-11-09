@@ -1,4 +1,5 @@
 #include "compress.h"
+#include "logging.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -10,21 +11,46 @@ static uint32_t read_u32(const unsigned char* p) { return (uint32_t)p[0] | ((uin
 
 static unsigned char* do_rle(const char* in, size_t in_len, size_t* out_len) {
     if (!in || in_len == 0) { *out_len = 0; return NULL; }
-    size_t cap = in_len + 16; unsigned char* ob = malloc(cap); if (!ob) return NULL;
+    size_t cap = in_len + 16;
+    unsigned char* ob = malloc(cap);
+    if (!ob) {
+        LOG_ERROR("Failed to allocate RLE output buffer of size %zu", cap);
+        return NULL;
+    }
     size_t oi = 0; size_t i = 0;
     while (i < in_len) {
         size_t j = i + 1; while (j < in_len && in[j] == in[i] && j - i < 255) j++;
         size_t run = j - i;
         if (run > 3) {
-            if (oi + 3 > cap) { cap = (cap + 3) * 2; unsigned char* nb = realloc(ob, cap); if (!nb) { free(ob); return NULL; } ob = nb; }
+            if (oi + 3 > cap) {
+                cap = (cap + 3) * 2;
+                unsigned char* nb = realloc(ob, cap);
+                if (!nb) {
+                    LOG_ERROR("Failed to realloc RLE output buffer to size %zu", cap);
+                    free(ob);
+                    return NULL;
+                }
+                ob = nb;
+            }
             ob[oi++] = 0xFF; ob[oi++] = (unsigned char)run; ob[oi++] = (unsigned char)in[i];
         } else {
-            if (oi + run > cap) { cap = (cap + run) * 2; unsigned char* nb = realloc(ob, cap); if (!nb) { free(ob); return NULL; } ob = nb; }
+            if (oi + run > cap) {
+                cap = (cap + run) * 2;
+                unsigned char* nb = realloc(ob, cap);
+                if (!nb) {
+                    LOG_ERROR("Failed to realloc RLE output buffer to size %zu", cap);
+                    free(ob);
+                    return NULL;
+                }
+                ob = nb;
+            }
             for (size_t k = 0; k < run; ++k) ob[oi++] = (unsigned char)in[i+k];
         }
         i = j;
     }
-    unsigned char* tb = realloc(ob, oi); if (tb) ob = tb; *out_len = oi; return ob;
+    unsigned char* tb = realloc(ob, oi);
+    if (tb) ob = tb;
+    *out_len = oi; return ob;
 }
 
 typedef struct HNode { uint64_t weight; int symbol; int left, right; } HNode;
@@ -36,7 +62,10 @@ static int build_huffman_lengths(const uint64_t freq[256], uint8_t code_len[256]
     if (symbols == 1) { for (int i=0;i<256;++i) if (freq[i]) { code_len[i] = 1; return 1; } }
     int max_nodes = 2 * symbols - 1;
     HNode* nodes = malloc(sizeof(HNode) * max_nodes);
-    if (!nodes) return -1;
+    if (!nodes) {
+        LOG_ERROR("Failed to allocate Huffman nodes array of size %d", max_nodes);
+        return -1;
+    }
     int n = 0;
     for (int i = 0; i < 256; ++i) if (freq[i]) { nodes[n].weight = freq[i]; nodes[n].symbol = i; nodes[n].left = nodes[n].right = -1; n++; }
     int node_count = n;
@@ -93,8 +122,22 @@ static int make_canonical(uint8_t code_len[256], uint32_t codes[256]) {
 }
 
 typedef struct BitWriter { unsigned char* buf; size_t cap; size_t byte; int bitpos; } BitWriter;
-static int bw_init(BitWriter* bw, size_t est) { bw->cap = est + 16; bw->buf = malloc(bw->cap); if (!bw->buf) return -1; bw->byte = 0; bw->bitpos = 0; return 0; }
-static void bw_ensure(BitWriter* bw, size_t more) { if (bw->byte + more + 4 > bw->cap) { bw->cap = (bw->cap + more) * 2; unsigned char* nb = realloc(bw->buf, bw->cap); if (nb) bw->buf = nb; } }
+static int bw_init(BitWriter* bw, size_t est) {
+    bw->cap = est + 16;
+    bw->buf = malloc(bw->cap);
+    if (!bw->buf) {
+        LOG_ERROR("Failed to allocate BitWriter buffer of size %zu", bw->cap);
+        return -1;
+    }
+    bw->byte = 0; bw->bitpos = 0; return 0;
+}
+static void bw_ensure(BitWriter* bw, size_t more) {
+    if (bw->byte + more + 4 > bw->cap) {
+        bw->cap = (bw->cap + more) * 2;
+        unsigned char* nb = realloc(bw->buf, bw->cap);
+        if (nb) bw->buf = nb;
+    }
+}
 static void bw_write_bits(BitWriter* bw, uint32_t code, uint8_t len) {
     for (int i = len - 1; i >= 0; --i) {
         int bit = (code >> i) & 1;
@@ -125,7 +168,10 @@ int compress_val(const char* in, size_t in_len, unsigned char** out, size_t* out
     size_t bitlen=0, bytelenc=0; unsigned char* bitbuf = bw_finish(&bw, &bitlen, &bytelenc);
     size_t total = header_cap + bytelenc;
     unsigned char* outb = malloc(total);
-    if (!outb) { free(rle); free(bitbuf); return -1; }
+    if (!outb) {
+        LOG_ERROR("Failed to allocate compressed output buffer of size %zu", total);
+        free(rle); free(bitbuf); return -1;
+    }
     outb[0]='H'; outb[1]='H'; outb[2]='R'; outb[3]='1';
     write_u16(outb+4, (uint16_t)symcount);
     size_t p = 6;
@@ -160,7 +206,12 @@ int decompress_val(const unsigned char* in, size_t in_len, unsigned char** out, 
     int idx_by_len[257]; memset(idx_by_len,-1,sizeof(idx_by_len));
     int idx = 0; for (int l=1;l<=256;++l) { idx_by_len[l] = idx; while (idx < pc && code_len[pairs[idx].sym] == l) idx++; }
     size_t bitpos = 0; uint32_t cur = 0; int cur_len = 0;
-    unsigned char* out_rle = malloc(256); size_t out_cap = 256; size_t outi = 0;
+    unsigned char* out_rle = malloc(256);
+    if (!out_rle) {
+        LOG_ERROR("Failed to allocate RLE output buffer of size 256");
+        return -1;
+    }
+    size_t out_cap = 256; size_t outi = 0;
     for (size_t b = 0; b < bitlen; ++b) {
         size_t byte_idx = b / 8; int bit_idx = 7 - (b % 8);
         int bit = (bitbuf[byte_idx] >> bit_idx) & 1;
@@ -171,7 +222,16 @@ int decompress_val(const unsigned char* in, size_t in_len, unsigned char** out, 
             while (j < pc && code_len[pairs[j].sym] == cur_len) {
                 if (pairs[j].code == cur) {
                     uint8_t sym = pairs[j].sym;
-                    if (outi + 1 > out_cap) { out_cap *= 2; unsigned char* nb = realloc(out_rle, out_cap); if (!nb) { free(out_rle); return -1; } out_rle = nb; }
+                    if (outi + 1 > out_cap) {
+                        out_cap *= 2;
+                        unsigned char* nb = realloc(out_rle, out_cap);
+                        if (!nb) {
+                            LOG_ERROR("Failed to realloc RLE output buffer to size %zu", out_cap);
+                            free(out_rle);
+                            return -1;
+                        }
+                        out_rle = nb;
+                    }
                     out_rle[outi++] = sym;
                     cur = 0; cur_len = 0;
                     break;
@@ -180,20 +240,47 @@ int decompress_val(const unsigned char* in, size_t in_len, unsigned char** out, 
             }
         }
     }
-    size_t exp_cap = outi * 2 + 16; unsigned char* exp = malloc(exp_cap); if (!exp) { free(out_rle); return -1; }
+    size_t exp_cap = outi * 2 + 16;
+    unsigned char* exp = malloc(exp_cap);
+    if (!exp) {
+        LOG_ERROR("Failed to allocate expansion buffer of size %zu", exp_cap);
+        free(out_rle);
+        return -1;
+    }
     size_t expi = 0; size_t ri = 0;
     while (ri < outi) {
         unsigned char c = out_rle[ri++];
         if (c == 0xFF) {
             if (ri + 1 > outi) { free(out_rle); free(exp); return -1; }
             unsigned char run = out_rle[ri++]; unsigned char ch = out_rle[ri++];
-            if (expi + run > exp_cap) { while (expi + run > exp_cap) exp_cap *= 2; unsigned char* nb = realloc(exp, exp_cap); if (!nb) { free(out_rle); free(exp); return -1; } exp = nb; }
+            if (expi + run > exp_cap) {
+                while (expi + run > exp_cap) exp_cap *= 2;
+                unsigned char* nb = realloc(exp, exp_cap);
+                if (!nb) {
+                    LOG_ERROR("Failed to realloc expansion buffer to size %zu", exp_cap);
+                    free(out_rle); free(exp);
+                    return -1;
+                }
+                exp = nb;
+            }
             for (unsigned int k=0;k<run;++k) exp[expi++] = ch;
         } else {
-            if (expi + 1 > exp_cap) { exp_cap *= 2; unsigned char* nb = realloc(exp, exp_cap); if (!nb) { free(out_rle); free(exp); return -1; } exp = nb; }
+            if (expi + 1 > exp_cap) {
+                exp_cap *= 2;
+                unsigned char* nb = realloc(exp, exp_cap);
+                if (!nb) {
+                    LOG_ERROR("Failed to realloc expansion buffer to size %zu", exp_cap);
+                    free(out_rle); free(exp);
+                    return -1;
+                }
+                exp = nb;
+            }
             exp[expi++] = c;
         }
     }
     free(out_rle);
-    unsigned char* tb = realloc(exp, expi + 1); if (tb) exp = tb; exp[expi] = '\0'; *out = exp; *out_len = expi; return 0;
+    unsigned char* tb = realloc(exp, expi + 1);
+    if (tb) exp = tb;
+    exp[expi] = '\0';
+    *out = exp; *out_len = expi; return 0;
 }

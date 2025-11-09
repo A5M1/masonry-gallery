@@ -48,4 +48,5 @@ void generate_folder_thumb(const char* dir);
 void print_skips(progress_t* prog);
 void clean_orphan_thumbs(const char* dir, progress_t* prog);
 void scan_and_generate_missing_thumbs(void);
+void schedule_or_generate_thumb(const char* input, const char* output, progress_t* prog, int scale, int q, const char* kind);
 #endif // THUMBS_H

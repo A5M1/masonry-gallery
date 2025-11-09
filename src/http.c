@@ -48,7 +48,10 @@ char* get_header_value(const char* buf, const char* header) {
 
             size_t vlen = (size_t)(end - val + 1);
             char* result = malloc(vlen + 1);
-            if (!result) return NULL;
+            if (!result) {
+                LOG_ERROR("Failed to allocate result buffer of size %zu", vlen + 1);
+                return NULL;
+            }
             memcpy(result, val, vlen);
             result[vlen] = '\0';
             return result;
