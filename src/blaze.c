@@ -2,7 +2,7 @@
 #include "common.h"
 #include <immintrin.h>
 
-#define ROTL64(x,r) ((x << r) | (x >> (64 - r)))
+#define ROTL64(x,r) (((uint64_t)(x) << (r)) | ((uint64_t)(x) >> (64 - (r))))
 
 #define P1 11400714785074694791ULL
 #define P2 14029467366897019727ULL
