@@ -2315,6 +2315,16 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		SAFE_FREE(range);
 		return 0;
 	}
+	if (strncmp(url, "/bundled/", 9) == 0) {
+		const char* sub = url + 9;
+		char path[PATH_MAX];
+		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "public" DIR_SEP_STR "bundle" DIR_SEP_STR "%s", BASE_DIR, sub);
+		normalize_path(path);
+		if (is_file(path)) send_file_stream(c, path, NULL, keep_alive);
+		else send_text(c, 404, "Not Found", "Not found", keep_alive);
+		SAFE_FREE(range);
+		return 0;
+	}
 
 
 	send_text(c, 404, "Not Found", "Not found", keep_alive);

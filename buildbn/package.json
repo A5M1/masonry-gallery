@@ -1,0 +1,19 @@
+{
+  "type": "module",
+  "sideEffects": [
+    "**/*.css",
+    "vendor/*.js",
+    "vendor/*.css"
+  ],
+  "scripts": {
+    "build": "node build.js"
+  },
+  "dependencies": {
+    "esbuild": "^0.27.0",
+    "ev-emitter": "^2.1.2",
+    "imagesloaded": "^5.0.0",
+    "isotope-layout": "^3.0.6",
+    "jquery": "^3.7.1",
+    "masonry-layout": "^4.2.2"
+  }
+}

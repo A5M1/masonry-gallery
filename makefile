@@ -9,6 +9,7 @@ CC_LINUX_ARM=aarch64-linux-gnu-clang
 # Compiler flags
 CFLAGS_COMMON=-std=c11 -Os -Iinclude -ffunction-sections -fdata-sections \
                 -Wno-format-truncation -Wno-misleading-indentation -w
+
 CFLAGS_X86_RELEASE=$(CFLAGS_COMMON) -msse2 -mavx2
 CFLAGS_ARM_RELEASE=$(CFLAGS_COMMON) -march=armv8-a+simd
 CFLAGS_LINUX_X86_RELEASE=$(CFLAGS_COMMON)
@@ -25,12 +26,16 @@ CFLAGS_ARM_DEBUG=-std=c11 -g -O0 -Iinclude \
 
 # ======================================================
 # Linker flags
+
+# Release (strip debug info)
 LDFLAGS_WIN=-s -Wl,--gc-sections -Wl,--strip-all -Wl,-O1 \
                 -lws2_32 -lmswsock -lDbgHelp -lpsapi
-LDFLAGS_WIN_DEBUG=$(LDFLAGS_WIN)
-
 LDFLAGS_LINUX=-Wl,--gc-sections -Wl,-O1 -ldl -lpthread
-LDFLAGS_LINUX_DEBUG=$(LDFLAGS_LINUX)
+
+# Debug (keep symbols)
+LDFLAGS_WIN_DEBUG=-Wl,--gc-sections -Wl,-O1 \
+                -lws2_32 -lmswsock -lDbgHelp -lpsapi
+LDFLAGS_LINUX_DEBUG=-Wl,--gc-sections -Wl,-O1 -ldl -lpthread
 
 # ======================================================
 # Directories
@@ -38,6 +43,7 @@ SRC_DIR=src
 BUILD_DIR=build
 DIST_DIR=dist
 RUST_DIR=rust
+BUILDBN_DIR=buildbn
 
 # ======================================================
 # Executables
@@ -158,8 +164,15 @@ rust-debug:
 copy-assets:
 	@echo "[COPY] Copying assets (views/, public/)..."
 	@mkdir -p $(DIST_DIR)
+	@$(MAKE) buildbn
+	@if [ -d "$(BUILDBN_DIR)/dist" ]; then echo "[COPY] copying buildbn/dist -> public/bundle"; mkdir -p public/bundle; cp -r $(BUILDBN_DIR)/dist/*.js public/bundle/ 2>/dev/null || true; cp -r $(BUILDBN_DIR)/dist/*.map public/bundle/ 2>/dev/null || true; fi
 	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
 	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi
+
+
+.PHONY: buildbn
+buildbn:
+	@if [ -d "$(BUILDBN_DIR)" ]; then echo "[BUILDBN] Building web bundle in $(BUILDBN_DIR)..."; cd $(BUILDBN_DIR) && if [ -f package.json ]; then npm run build || node build.js || true; else node build.js || true; fi; fi
 
 all-platforms: x86 arm linux-x86 linux-arm rust-release
 	@echo "[DONE] Built all platforms successfully."
@@ -182,5 +195,5 @@ endif
 
 # ======================================================
 .PHONY: all clean rebuild run x86 arm debug debug-arm \
-	    linux-x86 linux-arm rust-release rust-debug \
-	    copy-assets all-platforms view
+    	linux-x86 linux-arm rust-release rust-debug \
+    	copy-assets all-platforms view buildbn

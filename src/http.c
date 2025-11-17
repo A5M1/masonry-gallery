@@ -19,6 +19,7 @@ const char* mime_for(const char* p) {
 	if(!strcasecmp(e, "css"))return"text/css";
 	if(!strcasecmp(e, "html")||!strcasecmp(e, "htm"))return"text/html; charset=utf-8";
 	if(!strcasecmp(e, "json"))return"application/json; charset=utf-8";
+	if(!strcasecmp(e, "map"))return"application/json; charset=utf-8";
 	if(!strcasecmp(e, "png"))return"image/png";
 	if(!strcasecmp(e, "jpg")||!strcasecmp(e, "jpeg"))return"image/jpeg";
 	if(!strcasecmp(e, "gif"))return"image/gif";

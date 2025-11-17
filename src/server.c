@@ -53,7 +53,7 @@ void derive_paths(const char* argv0) {
 	join_path(VIEWS_DIR, PATH_MAX, exe_path, "views");
 	join_path(JS_DIR, PATH_MAX, exe_path, "public/js");
 	join_path(CSS_DIR, PATH_MAX, exe_path, "public/css");
-	join_path(BUNDLED_FILE, PATH_MAX, exe_path, "public/bundle/f.js");
+	join_path(BUNDLED_FILE, PATH_MAX, exe_path, "public/bundle/libs.bundle.js");
 
 	normalize_path(BASE_DIR);
 	normalize_path(VIEWS_DIR);

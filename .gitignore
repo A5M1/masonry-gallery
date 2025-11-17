@@ -105,3 +105,9 @@ rust/Cargo.lock
 .roomodes
 tools/parse_thumbdb.py
 SECURITY_ASSESSMENT_REPORT.md
+buildbn/package-lock.json
+buildbn/bun.lock
+buildbn/dist/libs.bundle.js
+buildbn/dist/libs.bundle.js.map
+public/bundle/libs.bundle.js
+public/bundle/libs.bundle.js.map
