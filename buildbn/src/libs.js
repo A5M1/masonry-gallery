@@ -3,7 +3,12 @@ window.$ = $;
 window.jQuery = $;
 import EvEmitter from "ev-emitter";
 import imagesLoaded from "imagesloaded";
-import "../vendor/jquery.fancybox.min.js";
+(async function() {
+  try {
+    await import("../vendor/jquery.fancybox.min.js");
+  } catch (e) {
+  }
+})();
 import Masonry from "masonry-layout";
 $.fn.masonry = function (options) {
   return this.each(function () {

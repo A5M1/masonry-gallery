@@ -47,6 +47,8 @@
 			"**/tools": true,
 			".hintrc": true,
 			"**/.vscode": true,
+			"**/.trunk": true,
+			"*.conf": true,
 			"**/.git": true,
 			"**/.github": true,
 			"**/.idea": true,

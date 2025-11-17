@@ -23,7 +23,8 @@ const uint8_t OP_SEPERATOR       = 0x0A;
 const uint8_t OP_MP4            = 0x0B;
 const uint8_t OP_JPG            = 0x0C;
 const uint8_t OP_WEBM           = 0x0D;
-const uint8_t OP_GIF            = 0x0D;
+const uint8_t OP_GIF            = 0x10;
+const uint8_t OP_OGG            = 0x11;
 const uint8_t OP_WEBP           = 0x0E;
 const uint8_t OP_PNG            = 0x0F;
 const uint8_t OP_END_RECORD     = 0xFF;
@@ -36,7 +37,7 @@ const uint8_t OP_SMALL_JPG      = 0xBE;
 static const struct { const char* ext; uint8_t code; } ext_map[] = {
     {".jpg", OP_JPG}, {".jpeg", OP_JPG}, {".png", OP_PNG},
     {".gif", OP_GIF}, {".webp", OP_WEBP}, {".mp4", OP_MP4},
-    {".webm", OP_WEBM}, {".ogg", OP_GIF}, {NULL, 0}
+    {".webm", OP_WEBM}, {".ogg", OP_OGG}, {NULL, 0}
 };
 
 static unsigned char get_ext_opcode(const char* path) {
