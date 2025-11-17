@@ -106,7 +106,6 @@ $(call obj_dir,linux_arm)/%.o: $(SRC_DIR)/%.c
 # ======================================================
 # Linking rules
 all: x86
-
 x86: $(OBJS_X86)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_X86)"
@@ -195,5 +194,5 @@ endif
 
 # ======================================================
 .PHONY: all clean rebuild run x86 arm debug debug-arm \
-    	linux-x86 linux-arm rust-release rust-debug \
-    	copy-assets all-platforms view buildbn
+		linux-x86 linux-arm rust-release rust-debug \
+		copy-assets all-platforms view buildbn
