@@ -200,7 +200,14 @@ view: rust-release
 
 clean:
 	@echo "[CLEAN]"
-	@rm -rf $(BUILD_DIR) $(DIST_DIR)
+	@if [ -d "$(DIST_DIR)" ]; then \
+		echo "[CLEAN] cleaning $(DIST_DIR) but preserving *.conf files"; \
+		find "$(DIST_DIR)" -type f ! -name '*.conf' -print0 | xargs -0 rm -f || true; \
+		find "$(DIST_DIR)" -type d -empty -delete || true; \
+	else \
+		echo "[CLEAN] $(DIST_DIR) not present"; \
+	fi
+	@rm -rf $(BUILD_DIR)
 
 rebuild: clean all
 
