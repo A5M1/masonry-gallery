@@ -98,7 +98,8 @@
 			"directory.h": "c",
 			"platform.h": "c"
 		},
-		"prettier.bracketSpacing": false
+		"prettier.bracketSpacing": false,
+		"problemsFilter.autoFilterEnabled": true
 	},
 	"launch": {
 		"configurations": [

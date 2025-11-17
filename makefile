@@ -57,6 +57,25 @@ EXEC_RUST_RELEASE=$(DIST_DIR)/galleria_view
 EXEC_RUST_DEBUG=$(DIST_DIR)/galleria_view_debug
 
 # ======================================================
+# Executable extension for the current platform. When building
+# Rust targets we need to know whether the binary has an .exe suffix.
+# If OS is not already set, try to detect it. This avoids "Undefined
+# variable 'OS'" errors when running make in environments that don't
+# define OS. uname is used when available; otherwise default to
+# Windows_NT so legacy Windows checks still work.
+DETECTED_OS := $(shell uname -s 2>/dev/null || echo Windows_NT)
+OS ?= $(DETECTED_OS)
+
+# Consider various Windows-like environments (Windows_NT, MINGW*,
+# CYGWIN*, MSYS*) as Windows for the purpose of choosing the
+# executable suffix.
+ifneq (,$(filter Windows_NT MINGW% CYGWIN% MSYS%,$(OS)))
+EXE=.exe
+else
+EXE=
+endif
+
+# ======================================================
 # File lists
 define obj_dir
 $(BUILD_DIR)/$1
