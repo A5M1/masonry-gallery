@@ -92,6 +92,7 @@ OBJS_LINUX_ARM=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_arm)/%.o,$(SRCS))
 
 # ======================================================
 # Compilation rules
+
 $(call obj_dir,x86)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] (Windows x86_64) $< -> $@"

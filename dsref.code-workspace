@@ -102,6 +102,7 @@
 		},
 		"prettier.bracketSpacing": false,
 		"problemsFilter.autoFilterEnabled": true
+
 	},
 	"launch": {
 		"configurations": [
