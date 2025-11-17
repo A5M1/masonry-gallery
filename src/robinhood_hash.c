@@ -1,8 +1,6 @@
 #include "robinhood_hash.h"
 #include "logging.h"
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
+#include "common.h"
 #include <immintrin.h>
 struct rh_entry { uint64_t h; char* key; size_t key_len; unsigned char* val; size_t val_len; };
 struct rh_table { size_t cap; size_t mask; size_t count; struct rh_entry* entries; };

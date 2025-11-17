@@ -1,6 +1,5 @@
 #pragma once
-#include <stddef.h>
-#include <stdint.h>
+#include "common.h"
 typedef struct rh_table rh_table_t;
 rh_table_t* rh_create(size_t capacity_power);
 void rh_destroy(rh_table_t* t);

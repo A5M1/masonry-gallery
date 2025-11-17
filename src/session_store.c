@@ -1,7 +1,6 @@
 #include "session_store.h"
 #include "logging.h"
-#include <time.h>
-#include <stdlib.h>
+#include "common.h"
 #include "thread_pool.h"
 typedef struct session_node {
     char id[64];

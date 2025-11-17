@@ -1,6 +1,6 @@
 #include "blaze.h"
+#include "common.h"
 #include <immintrin.h>
-#include <string.h>
 
 #define ROTL64(x,r) ((x << r) | (x >> (64 - r)))
 

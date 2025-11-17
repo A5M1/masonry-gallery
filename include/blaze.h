@@ -1,8 +1,7 @@
 #ifndef BLAZE_H
 #define BLAZE_H
 
-#include <stdint.h>
-#include <stddef.h>
+#include "common.h"
 #include <immintrin.h>
 #ifdef __cplusplus
 extern "C" {

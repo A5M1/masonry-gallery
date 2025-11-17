@@ -1,7 +1,5 @@
 #pragma once
 #include "common.h"
-#include <stdio.h>
-#include <stdarg.h>
 
 /**
  * @file logging.h

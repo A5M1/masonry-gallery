@@ -225,8 +225,7 @@ int ascii_stricmp(const char* a, const char* b) {
 }
 
 #ifdef DEBUG_DIAGNOSTIC
-#include <stdio.h>
-#include <string.h>
+#include "common.h"
 #include "logging.h"
 
 static int ascii_tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }

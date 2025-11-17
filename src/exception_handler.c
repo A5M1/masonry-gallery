@@ -109,10 +109,6 @@ void install_exception_handlers(void) {
 }
 
 #else // POSIX
-#include <signal.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <execinfo.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif

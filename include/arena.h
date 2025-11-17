@@ -1,5 +1,5 @@
 #pragma once
-#include <stddef.h>
+#include "common.h"
 typedef struct arena arena_t;
 arena_t* arena_create(size_t initial_capacity);
 void arena_destroy(arena_t* a);

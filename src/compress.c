@@ -1,8 +1,6 @@
 #include "compress.h"
 #include "logging.h"
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
+#include "common.h"
 
 static void write_u16(unsigned char* p, uint16_t v) { p[0] = (unsigned char)(v & 0xFF); p[1] = (unsigned char)((v >> 8) & 0xFF); }
 static void write_u32(unsigned char* p, uint32_t v) { p[0] = (unsigned char)(v & 0xFF); p[1] = (unsigned char)((v >> 8) & 0xFF); p[2] = (unsigned char)((v >> 16) & 0xFF); p[3] = (unsigned char)((v >> 24) & 0xFF); }

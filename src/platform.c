@@ -3,7 +3,6 @@
 #include "thread_pool.h"
 #include "logging.h"
 #include "directory.h"
-#include <ctype.h>
 #include "utils.h"
 
 static thread_mutex_t g_streams_mutex;
@@ -583,8 +582,6 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
     return 0;
 #endif
 }
-
-#include <time.h>
 
 int platform_run_command_redirect(const char* cmd, const char* out_err_path, int timeout_seconds) {
     if (!cmd) return -1;

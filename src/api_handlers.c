@@ -12,7 +12,6 @@
 #include "thread_pool.h"
 #include "platform.h"
 #include "websocket.h"
-#include <time.h>
 
 static void* start_background_wrapper(void* arg) {
 	char* dir = (char*)arg;
@@ -88,7 +87,7 @@ static void get_parent_dir_local(const char* path, char* out, size_t outlen) {
 
 
 const char* IMAGE_EXTS[] = { ".jpg",".jpeg",".png",".gif",".webp",NULL };
-const char* VIDEO_EXTS[] = { ".mp4",".webm",".ogg",".webp",NULL };
+const char* VIDEO_EXTS[] = { ".mp4",".webm",".webp",NULL };
 static char* g_request_headers = NULL;
 char g_request_url[PATH_MAX] = { 0 };
 static char* g_request_qs = NULL;
@@ -2310,18 +2309,42 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		}
 	}
 	if (strcmp(url, "/bundled") == 0) {
-		if (is_file(BUNDLED_FILE)) send_file_stream(c, BUNDLED_FILE, NULL, keep_alive);
-		else send_text(c, 404, "Not Found", "Not found", keep_alive);
+		const char* base_for_bundle = (BASE_DIR[0]) ? BASE_DIR : ".";
+		char path[PATH_MAX];
+		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "public" DIR_SEP_STR "bundle" DIR_SEP_STR "libs.bundle.js", base_for_bundle);
+		normalize_path(path);
+		if (is_file(BUNDLED_FILE)) {
+			send_file_stream(c, BUNDLED_FILE, NULL, keep_alive);
+		}
+		else if (is_file(path)) {
+			send_file_stream(c, path, NULL, keep_alive);
+		}
+		else {
+			char alt[PATH_MAX];
+			snprintf(alt, sizeof(alt), "." DIR_SEP_STR "public" DIR_SEP_STR "bundle" DIR_SEP_STR "libs.bundle.js");
+			normalize_path(alt);
+			if (is_file(alt)) send_file_stream(c, alt, NULL, keep_alive);
+			else send_text(c, 404, "Not Found", "Not found", keep_alive);
+		}
 		SAFE_FREE(range);
 		return 0;
 	}
 	if (strncmp(url, "/bundled/", 9) == 0) {
 		const char* sub = url + 9;
+		const char* base_for_bundle = (BASE_DIR[0]) ? BASE_DIR : ".";
 		char path[PATH_MAX];
-		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "public" DIR_SEP_STR "bundle" DIR_SEP_STR "%s", BASE_DIR, sub);
+		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "public" DIR_SEP_STR "bundle" DIR_SEP_STR "%s", base_for_bundle, sub);
 		normalize_path(path);
-		if (is_file(path)) send_file_stream(c, path, NULL, keep_alive);
-		else send_text(c, 404, "Not Found", "Not found", keep_alive);
+		if (is_file(path)) {
+			send_file_stream(c, path, NULL, keep_alive);
+		}
+		else {
+			char alt[PATH_MAX];
+			snprintf(alt, sizeof(alt), "." DIR_SEP_STR "public" DIR_SEP_STR "bundle" DIR_SEP_STR "%s", sub);
+			normalize_path(alt);
+			if (is_file(alt)) send_file_stream(c, alt, NULL, keep_alive);
+			else send_text(c, 404, "Not Found", "Not found", keep_alive);
+		}
 		SAFE_FREE(range);
 		return 0;
 	}

@@ -1,7 +1,6 @@
 #include "arena.h"
 #include "logging.h"
-#include <stdlib.h>
-#include <string.h>
+#include "common.h"
 struct arena { char* buf; size_t cap; size_t off; };
 arena_t* arena_create(size_t initial_capacity) {
     arena_t* a = malloc(sizeof(arena_t));

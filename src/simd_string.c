@@ -1,5 +1,5 @@
 #include "simd_string.h"
-#include <string.h>
+#include "common.h"
 int simd_streq(const char* a, const char* b) {
     if (!a || !b) return 0;
     return strcmp(a, b) == 0;
