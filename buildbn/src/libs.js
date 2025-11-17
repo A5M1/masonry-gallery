@@ -37,11 +37,4 @@ window.imagesLoaded = imagesLoaded;
 window.Masonry = Masonry;
 window.Isotope = Isotope;
 
-export { 
-  default as $, 
-  default as jQuery, 
-  EvEmitter, 
-  imagesLoaded, 
-  Masonry, 
-  Isotope 
-};
+export { $, jQuery, EvEmitter, imagesLoaded, Masonry, Isotope };
