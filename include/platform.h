@@ -5,6 +5,7 @@ void platform_sleep_ms(int ms);
 int platform_file_delete(const char* path);
 int platform_make_dir(const char* path);
 int platform_file_exists(const char* path);
+FILE* platform_fopen(const char* path, const char* mode);
 FILE* platform_popen(const char* cmd, const char* mode);
 int platform_pclose(FILE* f);
 FILE* platform_popen_direct(const char* cmd, const char* mode);

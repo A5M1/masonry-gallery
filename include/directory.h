@@ -4,9 +4,10 @@
 typedef struct diriter {
 #ifdef _WIN32
     HANDLE h;
-    WIN32_FIND_DATAA ffd;
-    char pattern[PATH_MAX];
+    WIN32_FIND_DATAW ffd;
+    WCHAR pattern[PATH_MAX];
     bool first;
+    char current_utf8[PATH_MAX * 4];
 #else
     DIR* d;
     struct dirent* e;

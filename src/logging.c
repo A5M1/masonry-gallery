@@ -26,7 +26,7 @@ void log_init(void) {
 	snprintf(log_path, PATH_MAX, "%s/%04d-%02d-%02d_%02d-%02d-%02d.log",
 		LOG_DIR, tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
 		tm->tm_hour, tm->tm_min, tm->tm_sec);
-	log_file=fopen(log_path, "a");
+	log_file=platform_fopen(log_path, "a");
 	if(!log_file) {
 		fprintf(stderr, "WARN: Could not open log file %s\n", log_path);
 	}

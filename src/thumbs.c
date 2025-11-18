@@ -51,7 +51,7 @@ static int wal_write_entry(const char* per_thumbs_root, const char* key, const c
     char chunk_path[PATH_MAX];
     if (ts < 0) ts = 0;
     snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq);
-    FILE* f = fopen(chunk_path, "w");
+    FILE* f = platform_fopen(chunk_path, "w");
     if (!f) return -1;
     fprintf(f, "%s\n%s\n", key, value ? value : "");
     fflush(f);
@@ -62,7 +62,7 @@ static int wal_write_entry(const char* per_thumbs_root, const char* key, const c
 
 static int wal_read_entry(const char* chunk_path, char* key, size_t key_len, char* value, size_t value_len) {
     if (!chunk_path || !key || key_len == 0 || !value || value_len == 0) return -1;
-    FILE* f = fopen(chunk_path, "r");
+    FILE* f = platform_fopen(chunk_path, "r");
     if (!f) return -1;
     if (!fgets(key, key_len, f)) { fclose(f); return -1; }
     size_t key_end = strcspn(key, "\r\n");
@@ -291,7 +291,7 @@ static void get_parent_dir(const char* path, char* out, size_t outlen) {
 static int is_animated_webp(const char* path) {
     if (!path) return 0;
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = platform_fopen(path, "rb");
     if (!f) return 0;
 
     unsigned char hdr[30];
@@ -1239,7 +1239,7 @@ void run_thumb_generation(const char* dir) {
     snprintf(lock_path, sizeof(lock_path), "%s" DIR_SEP_STR ".thumbs.lock", per_thumbs_root);
     
     if (is_file(lock_path)) {
-        FILE* lf = fopen(lock_path, "r");
+        FILE* lf = platform_fopen(lock_path, "r");
         if (lf) {
             int owner_pid = 0;
             if (fscanf(lf, "%d", &owner_pid) == 1 && owner_pid == platform_get_pid()) {
@@ -1258,7 +1258,7 @@ void run_thumb_generation(const char* dir) {
         if (platform_stat(lock_path, &st) == 0) {
             time_t now = time(NULL);
             int owner_pid = 0;
-            FILE* lf = fopen(lock_path, "r");
+            FILE* lf = platform_fopen(lock_path, "r");
             if (lf) {
                 if (fscanf(lf, "%d", &owner_pid) != 1)
                     owner_pid = 0;
@@ -1440,7 +1440,7 @@ void start_background_thumb_generation(const char* dir_path) {
         if (platform_stat(lock_path, &st) == 0) {
             time_t now = time(NULL);
             int owner_pid = 0;
-            FILE* lf = fopen(lock_path, "r");
+            FILE* lf = platform_fopen(lock_path, "r");
             if (lf) {
                 if (fscanf(lf, "%d", &owner_pid) != 1)
                     owner_pid = 0;
@@ -1532,7 +1532,7 @@ void add_skip(progress_t * prog, const char* reason, const char* path) {
         path_join(log_path, thumbs_root, "skipped.log");
     }
 
-    FILE* f = fopen(log_path, "a");
+    FILE* f = platform_fopen(log_path, "a");
     if (f) {
         fprintf(f, "[%s] %s\n", reason, path);
         fclose(f);
@@ -1662,7 +1662,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
         bool is_media = has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS);
         if (!is_media) continue;
         struct stat st;
-        if (stat(full, &st) != 0) {
+        if (platform_stat(full, &st) != 0) {
             add_skip(prog, "STAT_FAIL", full);
             continue;
         }
@@ -1862,4 +1862,27 @@ void scan_and_generate_missing_thumbs(void) {
         }
         ensure_thumbs_in_dir(folders[i], NULL);
     }
+}
+static void save_wal_chunk(int chunk_id, const char* data) {
+    char chunk_path[PATH_MAX];
+    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_DIR_NAME DIR_SEP_STR WAL_CHUNK_FMT, BASE_DIR, (long long)time(NULL), chunk_id);
+    FILE* f = platform_fopen(chunk_path, "w");
+    if (f) {
+        fprintf(f, "%s", data);
+        fclose(f);
+    }
+}
+
+static char* load_wal_chunk(const char* chunk_path) {
+    FILE* f = platform_fopen(chunk_path, "r");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* buf = malloc(sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    fread(buf, 1, sz, f);
+    buf[sz] = '\0';
+    fclose(f);
+    return buf;
 }

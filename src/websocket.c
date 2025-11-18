@@ -320,7 +320,7 @@ static void* websocket_client_thread(void* arg) {
                                     mk_dir(dest);
                                     if (is_dir(dest)) {
                                         char fg_path[PATH_MAX]; path_join(fg_path, dest, ".fg");
-                                        FILE* fgf = fopen(fg_path, "wb"); if (fgf) fclose(fgf);
+                                        FILE* fgf = platform_fopen(fg_path, "wb"); if (fgf) fclose(fgf);
                                         char msg[1024]; size_t rem_msg = sizeof(msg); char* mp = msg;
                                         mp = json_objOpen(mp, NULL, &rem_msg);
                                         mp = json_str(mp, "type", "folderAdded", &rem_msg);

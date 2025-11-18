@@ -180,10 +180,9 @@ rust-debug:
 
 # ======================================================
 # Helpers and meta targets
-copy-assets:
+copy-assets: buildbn
 	@echo "[COPY] Copying assets (views/, public/)..."
 	@mkdir -p $(DIST_DIR)
-	@$(MAKE) buildbn
 	@if [ -d "$(BUILDBN_DIR)/dist" ]; then echo "[COPY] copying buildbn/dist -> public/bundle"; mkdir -p public/bundle; cp -r $(BUILDBN_DIR)/dist/*.js public/bundle/ 2>/dev/null || true; cp -r $(BUILDBN_DIR)/dist/*.map public/bundle/ 2>/dev/null || true; fi
 	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
 	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi

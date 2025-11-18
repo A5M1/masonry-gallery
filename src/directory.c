@@ -66,18 +66,27 @@ bool safe_under(const char* base_real, const char* path_real) {
 
 #ifdef _WIN32
 bool dir_open(diriter* it, const char* path) {
-	snprintf(it->pattern, PATH_MAX, "%s\\*", path);
-	it->h = FindFirstFileA(it->pattern, &it->ffd);
+	if (!path) return false;
+	int req = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+	if (req <= 0 || req >= PATH_MAX - 2) return false;
+	
+	MultiByteToWideChar(CP_UTF8, 0, path, -1, it->pattern, PATH_MAX);
+	wcscat(it->pattern, L"\\*");
+	
+	it->h = FindFirstFileW(it->pattern, &it->ffd);
 	it->first = (it->h != INVALID_HANDLE_VALUE);
 	return it->h != INVALID_HANDLE_VALUE;
 }
 
 const char* dir_next(diriter* it) {
 	if (!it->first) {
-		if (!FindNextFileA(it->h, &it->ffd)) return NULL;
+		if (!FindNextFileW(it->h, &it->ffd)) return NULL;
 	}
 	it->first = false;
-	return it->ffd.cFileName;
+	if (WideCharToMultiByte(CP_UTF8, 0, it->ffd.cFileName, -1, it->current_utf8, sizeof(it->current_utf8), NULL, NULL) == 0) {
+		return NULL;
+	}
+	return it->current_utf8;
 }
 
 void dir_close(diriter* it) {

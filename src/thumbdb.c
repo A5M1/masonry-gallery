@@ -356,9 +356,9 @@ static int load_record_cb(const char* key, const char* value, void* ctx) {
 static int backup_file(const char* path) {
     if (!path) return -1;
     char bak[PATH_MAX]; snprintf(bak, sizeof(bak), "%s.bak", path);
-    FILE* in = fopen(path, "rb");
+    FILE* in = platform_fopen(path, "rb");
     if (!in) return -1;
-    FILE* out = fopen(bak, "wb");
+    FILE* out = platform_fopen(bak, "wb");
     if (!out) { fclose(in); return -1; }
     unsigned char buf[8192]; size_t r;
     while ((r = fread(buf, 1, sizeof(buf), in)) > 0) {
@@ -370,7 +370,7 @@ static int backup_file(const char* path) {
 
 static int persist_tx_ops(tx_op_t* ops) {
     if (!ops) return 0;
-    FILE* f = fopen(db_path, "ab");
+    FILE* f = platform_fopen(db_path, "ab");
     if (!f) return -1;
     tx_op_t* cur = ops;
     while (cur) {
@@ -380,7 +380,7 @@ static int persist_tx_ops(tx_op_t* ops) {
     fflush(f);
     platform_fsync(fileno(f));
     fclose(f);
-    struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+    struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     return 0;
 }
 
@@ -495,9 +495,9 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         return -1;
     }
     strncpy(db_path, db_full_path, sizeof(db_path) - 1); db_path[sizeof(db_path) - 1] = '\0';
-    FILE* f_check = fopen(db_path, "rb");
+    FILE* f_check = platform_fopen(db_path, "rb");
     if (!f_check) {
-        FILE* f_new = fopen(db_path, "wb");
+        FILE* f_new = platform_fopen(db_path, "wb");
         if (!f_new) {
             LOG_WARN("thumbdb: failed to create db file %s", db_path);
             ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
@@ -510,7 +510,7 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         fclose(f_check);
         if (pr != DB_MAGIC_LEN || memcmp(probe, DB_MAGIC, DB_MAGIC_LEN) != 0) {
             LOG_INFO("thumbdb: recreating database file with new opcode format");
-            FILE* f_new = fopen(db_path, "wb");
+            FILE* f_new = platform_fopen(db_path, "wb");
             if (!f_new) {
                 LOG_WARN("thumbdb: failed to recreate db file %s", db_path);
                 ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
@@ -520,13 +520,13 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         }
     }
 
-    FILE* f = fopen(db_path, "ab");
+    FILE* f = platform_fopen(db_path, "ab");
     if (!f) {
         LOG_WARN("thumbdb: failed to open db file %s", db_path);
         ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
     }
     fclose(f);
-    f = fopen(db_path, "rb");
+    f = platform_fopen(db_path, "rb");
     if (!f) {
         db_inited = 1;
         thread_mutex_unlock(&db_open_mutex);
@@ -551,7 +551,7 @@ int thumbdb_open_for_dir(const char* db_full_path) {
     fclose(f);
     
     struct stat st;
-    if (stat(db_path, &st) == 0) {
+    if (platform_stat(db_path, &st) == 0) {
         db_last_mtime = st.st_mtime;
         db_last_size = st.st_size;
     } else {
@@ -677,13 +677,13 @@ static int rebuild_record_cb(const char* key, const char* value, void* ctx) {
 static void* rebuild_worker(void* arg) {
     (void)arg;
     struct stat st;
-    if (stat(db_path, &st) != 0) return NULL;
+    if (platform_stat(db_path, &st) != 0) return NULL;
 
     size_t power = 16;
     rh_table_t* new_tbl = rh_create(power);
     if (!new_tbl) return NULL;
 
-    FILE* f = fopen(db_path, "rb");
+    FILE* f = platform_fopen(db_path, "rb");
     if (!f) { rh_destroy(new_tbl); return NULL; }
 
     char magic[DB_MAGIC_LEN];
@@ -717,7 +717,7 @@ static void* rebuild_worker(void* arg) {
 
 static int ensure_index_uptodate(void) {
     struct stat st;
-    if (stat(db_path, &st) != 0) return -1;
+    if (platform_stat(db_path, &st) != 0) return -1;
     if (db_last_mtime == st.st_mtime && db_last_size == st.st_size) return 0;
     if (db_rebuilding) return 0;
     db_rebuilding = 1;
@@ -875,7 +875,7 @@ int thumbdb_tx_commit(void) {
         }
         cur = cur->next;
     }
-    FILE* f = fopen(db_path, "ab");
+    FILE* f = platform_fopen(db_path, "ab");
     if (!f) {
         LOG_WARN("thumbdb: failed to open db for append during commit");
         thread_mutex_unlock(&db_mutex);
@@ -910,7 +910,7 @@ int thumbdb_tx_commit(void) {
     fclose(f);
     
     struct stat st;
-    if (stat(db_path, &st) == 0) {
+    if (platform_stat(db_path, &st) == 0) {
         db_last_mtime = st.st_mtime;
         db_last_size = st.st_size;
     }
@@ -1009,13 +1009,13 @@ int thumbdb_set(const char* key, const char* value) {
     
     int r = ht_set_internal(db_key, db_value);
     if (r == 0) {
-        FILE* f = fopen(db_path, "ab");
+        FILE* f = platform_fopen(db_path, "ab");
         if (f) {
             append_db_record(f, db_key, db_value);
             fflush(f);
             platform_fsync(fileno(f));
             fclose(f);
-            struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+            struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
         } else {
             LOG_WARN("thumbdb: failed to open db file for append in thumbdb_set");
         }
@@ -1098,7 +1098,7 @@ int thumbdb_delete(const char* key) {
     single_op.next = NULL;
     int ret = persist_tx_ops(&single_op);
     if (ret == 0) {
-        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
     
     thread_mutex_unlock(&db_mutex);
@@ -1162,7 +1162,7 @@ int thumbdb_compact(void) {
     char temp_path[PATH_MAX];
     snprintf(temp_path, sizeof(temp_path), "%s.tmp", db_path);
     
-    FILE* out = fopen(temp_path, "wb");
+    FILE* out = platform_fopen(temp_path, "wb");
     if (!out) {
         LOG_WARN("thumbdb: failed to open temporary database file for binary write");
         thread_mutex_unlock(&db_mutex);
@@ -1215,7 +1215,7 @@ int thumbdb_compact(void) {
     
     
     struct stat st;
-    if (stat(db_path, &st) == 0) {
+    if (platform_stat(db_path, &st) == 0) {
         db_last_mtime = st.st_mtime;
         db_last_size = st.st_size;
     }
@@ -1339,10 +1339,10 @@ int thumbdb_sweep_orphans(void) {
             if (!removed) {
                 char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
                 if (find_thumb_filename_for_base(key, 1, thumb_path, sizeof(thumb_path))) {
-                    if (is_file(thumb_path)) { if (platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path); }
+                    if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; }
                 }
                 if (!removed && find_thumb_filename_for_base(key, 0, thumb_path, sizeof(thumb_path))) {
-                    if (is_file(thumb_path)) { if (platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path); }
+                    if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; }
                 }
                 if (!removed) {
                     diriter dit; if (dir_open(&dit, thumbs_root)) {
@@ -1393,7 +1393,7 @@ int thumbdb_sweep_orphans(void) {
         ht_set_internal(dels[i], NULL);
     }
     
-    FILE* f = fopen(db_path, "ab");
+    FILE* f = platform_fopen(db_path, "ab");
     if (f) {
         for (size_t i = 0; i < del_count; ++i) {
             append_db_record(f, dels[i], NULL);
@@ -1401,7 +1401,7 @@ int thumbdb_sweep_orphans(void) {
         fflush(f);
         platform_fsync(fileno(f));
         fclose(f);
-        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
     else {
         LOG_WARN("thumbdb: failed to open db for appending orphan deletions");

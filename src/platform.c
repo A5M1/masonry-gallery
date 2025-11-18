@@ -86,18 +86,20 @@ void platform_sleep_ms(int ms) {
 int platform_file_delete(const char* path) {
     if (!path) return -1;
 #ifdef _WIN32
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return -1;
     int attempts = 0;
     const int max_attempts = 20;
     while (attempts < max_attempts) {
-        if (DeleteFileA(path)) return 0;
+        if (DeleteFileW(wpath)) return 0;
         DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND) return 0;
-        LOG_WARN("platform_file_delete: attempt=%d DeleteFileA failed for %s err=%lu", attempts + 1, path, (unsigned long)err);
+        LOG_WARN("platform_file_delete: attempt=%d DeleteFileW failed for %s err=%lu", attempts + 1, path, (unsigned long)err);
         if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
-            SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
-            if (DeleteFileA(path)) return 0;
+            SetFileAttributesW(wpath, FILE_ATTRIBUTE_NORMAL);
+            if (DeleteFileW(wpath)) return 0;
             DWORD err2 = GetLastError();
-            LOG_WARN("platform_file_delete: attempt=%d DeleteFileA retry after SetFileAttributesA failed for %s err=%lu", attempts + 1, path, (unsigned long)err2);
+            LOG_WARN("platform_file_delete: attempt=%d DeleteFileW retry after SetFileAttributesW failed for %s err=%lu", attempts + 1, path, (unsigned long)err2);
         }
         if (err == ERROR_SHARING_VIOLATION) {
             int backoff = 50 * (attempts + 1);
@@ -135,7 +137,9 @@ int platform_file_delete(const char* path) {
 int platform_make_dir(const char* path) {
     if (!path) return -1;
 #ifdef _WIN32
-    if (CreateDirectoryA(path, NULL)) return 0;
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return -1;
+    if (CreateDirectoryW(wpath, NULL)) return 0;
     DWORD e = GetLastError();
     if (e == ERROR_ALREADY_EXISTS) return 0;
     return -1;
@@ -156,7 +160,11 @@ int platform_make_dir(const char* path) {
 
 int platform_copy_file(const char* src,const char* dst){
 #ifdef _WIN32
-    if(!CopyFileA(src,dst,FALSE))return -1;
+    WCHAR wsrc[PATH_MAX];
+    WCHAR wdst[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, src, -1, wsrc, PATH_MAX) == 0) return -1;
+    if (MultiByteToWideChar(CP_UTF8, 0, dst, -1, wdst, PATH_MAX) == 0) return -1;
+    if(!CopyFileW(wsrc,wdst,FALSE))return -1;
     return 0;
 #else
     int in=open(src,O_RDONLY);
@@ -172,10 +180,25 @@ int platform_copy_file(const char* src,const char* dst){
     return n<0?-1:0;
 #endif
 }
+
+FILE* platform_fopen(const char* path, const char* mode) {
+#ifdef _WIN32
+    WCHAR wpath[PATH_MAX];
+    WCHAR wmode[16];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 16) == 0) return NULL;
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
+#endif
+}
+
 int platform_file_exists(const char* path) {
     if (!path) return 0;
 #ifdef _WIN32
-    DWORD attrib = GetFileAttributesA(path);
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return 0;
+    DWORD attrib = GetFileAttributesW(wpath);
     return (attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY));
 #else
     struct stat st; return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
@@ -187,10 +210,14 @@ FILE* platform_popen(const char* cmd, const char* mode) {
     if (cmd) { platform_record_command(cmd); LOG_DEBUG("platform_popen: %s", cmd); }
 #endif
 #ifdef _WIN32
-    FILE* f = _popen(cmd, mode);
+    WCHAR wcmd[4096];
+    WCHAR wmode[16];
+    if (MultiByteToWideChar(CP_UTF8, 0, cmd, -1, wcmd, 4096) == 0) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 16) == 0) return NULL;
+    FILE* f = _wpopen(wcmd, wmode);
     if (!f) {
         DWORD err = GetLastError();
-        LOG_WARN("platform_popen: _popen failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
+        LOG_WARN("platform_popen: _wpopen failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
     }
     return f;
 #else
@@ -226,17 +253,19 @@ FILE* platform_popen_direct(const char* cmd,const char* mode){
         return NULL;
     }
     if(!SetHandleInformation(hR,HANDLE_FLAG_INHERIT,0)){CloseHandle(hR);CloseHandle(hW);return NULL;}
-    STARTUPINFOA si;PROCESS_INFORMATION pi;
+    STARTUPINFOW si;PROCESS_INFORMATION pi;
     ZeroMemory(&si,sizeof(si));ZeroMemory(&pi,sizeof(pi));
     si.cb=sizeof(si);si.dwFlags=STARTF_USESTDHANDLES;
     si.hStdOutput=hW;si.hStdError=hW;si.hStdInput=GetStdHandle(STD_INPUT_HANDLE);
-    char* c=_strdup(cmd);
-    BOOL ok=CreateProcessA(NULL,c,NULL,NULL,TRUE,CREATE_NO_WINDOW,NULL,NULL,&si,&pi);
-    free(c);
+    WCHAR wcmd[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, cmd, -1, wcmd, 4096) == 0) {
+        CloseHandle(hW); CloseHandle(hR); return NULL;
+    }
+    BOOL ok=CreateProcessW(NULL,wcmd,NULL,NULL,TRUE,CREATE_NO_WINDOW,NULL,NULL,&si,&pi);
     CloseHandle(hW);
     if(!ok){
         DWORD err = GetLastError();
-        LOG_ERROR("platform_popen_direct: CreateProcessA failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
+        LOG_ERROR("platform_popen_direct: CreateProcessW failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
         CloseHandle(hR);
         return NULL;
     }
@@ -311,13 +340,16 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
     platform_record_command(cmd);
     LOG_DEBUG("platform_run_command: %s", cmd);
 #ifdef _WIN32
-    STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
-    char cmdline[4096];
-    if (snprintf(cmdline, sizeof(cmdline), "cmd.exe /C %s", cmd) >= (int)sizeof(cmdline)) return -1;
-    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    STARTUPINFOW si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
+    WCHAR wcmd[4096];
+    WCHAR warg[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, cmd, -1, warg, 4096) == 0) return -1;
+    if (swprintf(wcmd, 4096, L"cmd.exe /C %s", warg) < 0) return -1;
+    
+    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     if (!ok) {
         DWORD err = GetLastError();
-        LOG_ERROR("platform_run_command: CreateProcessA failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
+        LOG_ERROR("platform_run_command: CreateProcessW failed for '%s' err=%lu", cmd ? cmd : "(null)", err);
         return -1;
     }
     DWORD wait = WaitForSingleObject(pi.hProcess, (timeout_seconds > 0) ? (DWORD)timeout_seconds * 1000 : INFINITE);
@@ -366,7 +398,9 @@ int platform_run_command(const char* cmd, int timeout_seconds) {
 int platform_create_lockfile_exclusive(const char* lock_path) {
     if (!lock_path) return -1;
 #ifdef _WIN32
-    HANDLE h = CreateFileA(lock_path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, lock_path, -1, wpath, PATH_MAX) == 0) return -1;
+    HANDLE h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
         if (err == ERROR_FILE_EXISTS) return 1;
@@ -415,8 +449,13 @@ static void watcher_trampoline(void* arg) {
     platform_watcher_callback_t cb = (platform_watcher_callback_t)a[1];
     free(arg);
 #ifdef _WIN32
-    HANDLE hDir = CreateFileA(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (hDir == INVALID_HANDLE_VALUE) { LOG_ERROR("CreateFileA failed for watcher on %s", dir); cb(dir); free(dir); return; }
+    WCHAR wdir[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, dir, -1, wdir, PATH_MAX) == 0) {
+        LOG_ERROR("Failed to convert dir to wide char for watcher: %s", dir);
+        cb(dir); free(dir); return;
+    }
+    HANDLE hDir = CreateFileW(wdir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hDir == INVALID_HANDLE_VALUE) { LOG_ERROR("CreateFileW failed for watcher on %s", dir); cb(dir); free(dir); return; }
     for (;;) {
         BYTE buffer[8192]; DWORD bytesReturned = 0;
         BOOL ok = ReadDirectoryChangesW(hDir, buffer, sizeof(buffer), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SECURITY, &bytesReturned, NULL, NULL);
@@ -504,7 +543,26 @@ int platform_start_dir_watcher(const char* dir, platform_watcher_callback_t cb) 
 
 int platform_stat(const char* path, struct stat* st) {
     if (!path || !st) return -1;
+#ifdef _WIN32
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return -1;
+    struct _stat64 st64;
+    if (_wstat64(wpath, &st64) != 0) return -1;
+    st->st_dev = st64.st_dev;
+    st->st_ino = st64.st_ino;
+    st->st_mode = st64.st_mode;
+    st->st_nlink = st64.st_nlink;
+    st->st_uid = st64.st_uid;
+    st->st_gid = st64.st_gid;
+    st->st_rdev = st64.st_rdev;
+    st->st_size = (_off_t)st64.st_size;
+    st->st_atime = st64.st_atime;
+    st->st_mtime = st64.st_mtime;
+    st->st_ctime = st64.st_ctime;
+    return 0;
+#else
     return stat(path, st);
+#endif
 }
 
 const char* platform_devnull(void) {
@@ -518,7 +576,9 @@ const char* platform_devnull(void) {
 int platform_stream_file_payload(int client_socket, const char* path, long start, long len, int is_range) {
     (void)start; (void)len; (void)is_range;
 #ifdef _WIN32
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return -1;
+    HANDLE hFile = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return -1;
     register_stream(path, client_socket);
     WSAPROTOCOL_INFO pi; int pi_len = sizeof(pi);
@@ -588,13 +648,16 @@ int platform_run_command_redirect(const char* cmd, const char* out_err_path, int
     platform_record_command(cmd);
     LOG_DEBUG("platform_run_command_redirect: %s -> %s", cmd, out_err_path ? out_err_path : "(null)");
 #ifdef _WIN32
-    STARTUPINFOA si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
-    HANDLE hOut = CreateFileA(out_err_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hOut == INVALID_HANDLE_VALUE) { DWORD err = GetLastError(); LOG_ERROR("platform_run_command_redirect: CreateFileA failed for '%s' err=%lu", out_err_path ? out_err_path : "(null)", err); return -1; }
+    STARTUPINFOW si; PROCESS_INFORMATION pi; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES; si.wShowWindow = SW_HIDE; ZeroMemory(&pi, sizeof(pi));
+    WCHAR wout[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, out_err_path, -1, wout, PATH_MAX) == 0) return -1;
+    HANDLE hOut = CreateFileW(wout, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hOut == INVALID_HANDLE_VALUE) { DWORD err = GetLastError(); LOG_ERROR("platform_run_command_redirect: CreateFileW failed for '%s' err=%lu", out_err_path ? out_err_path : "(null)", err); return -1; }
     si.hStdOutput = hOut; si.hStdError = hOut; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    char cmdline[4096]; if (snprintf(cmdline, sizeof(cmdline), "%s", cmd) >= (int)sizeof(cmdline)) { CloseHandle(hOut); return -1; }
-    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (!ok) { DWORD err = GetLastError(); LOG_ERROR("platform_run_command_redirect: CreateProcessA failed for '%s' err=%lu", cmd ? cmd : "(null)", err); CloseHandle(hOut); return -1; }
+    WCHAR wcmd[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, cmd, -1, wcmd, 4096) == 0) { CloseHandle(hOut); return -1; }
+    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (!ok) { DWORD err = GetLastError(); LOG_ERROR("platform_run_command_redirect: CreateProcessW failed for '%s' err=%lu", cmd ? cmd : "(null)", err); CloseHandle(hOut); return -1; }
     DWORD wait = WaitForSingleObject(pi.hProcess, (timeout_seconds > 0) ? (DWORD)timeout_seconds * 1000 : INFINITE);
     DWORD exit_code = -1;
     if (wait == WAIT_OBJECT_0) { GetExitCodeProcess(pi.hProcess, &exit_code); } else { TerminateProcess(pi.hProcess, 1); exit_code = -1; }
@@ -786,7 +849,11 @@ int platform_should_use_colors(void) {
 
 int platform_move_file(const char* src, const char* dst) {
 #ifdef _WIN32
-    return MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+    WCHAR wsrc[PATH_MAX];
+    WCHAR wdst[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, src, -1, wsrc, PATH_MAX) == 0) return -1;
+    if (MultiByteToWideChar(CP_UTF8, 0, dst, -1, wdst, PATH_MAX) == 0) return -1;
+    return MoveFileExW(wsrc, wdst, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
 #else
     return rename(src, dst);
 #endif
@@ -886,7 +953,9 @@ void platform_set_socket_options(int sock) {
 
 bool platform_is_file(const char* p) {
 #ifdef _WIN32
-    DWORD attr = GetFileAttributesA(p);
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, p, -1, wpath, PATH_MAX) == 0) return false;
+    DWORD attr = GetFileAttributesW(wpath);
     return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 #else
     struct stat st;
@@ -896,7 +965,9 @@ bool platform_is_file(const char* p) {
 
 bool platform_is_dir(const char* p) {
 #ifdef _WIN32
-    DWORD attr = GetFileAttributesA(p);
+    WCHAR wpath[PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, p, -1, wpath, PATH_MAX) == 0) return false;
+    DWORD attr = GetFileAttributesW(wpath);
     return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
 #else
     struct stat st;
