@@ -8,7 +8,6 @@
             --bg:#0f1113;
             --card:#1a1c1f;
             --muted:#bfc3c6;
-            --glass: rgba(255,255,255,0.04);
             --accent: rgba(255,255,255,0.06);
         }
         html,body{height:100%;}
@@ -20,6 +19,9 @@
         input,button,select{background:transparent;border:1px solid var(--accent);color:var(--muted);padding:8px 10px;border-radius:10px;backdrop-filter: blur(6px);}
         input::placeholder{color:rgba(191,195,198,0.6)}
         button{cursor:pointer}
+        .token-row{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px}
+        .token-row label{flex:1;display:flex;flex-direction:column;gap:6px;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(191,195,198,0.7)}
+        .token-row input{width:100%}
         .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:14px;padding:14px;border:1px solid rgba(255,255,255,0.04);box-shadow:0 6px 20px rgba(2,4,6,0.6);}
         table{width:100%;border-collapse:collapse;font-size:13px}
         th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,0.03);vertical-align:top}
@@ -50,6 +52,16 @@
         </div>
         <div id="editor" class="card editor">
             <h3 id="editorKey"></h3>
+            <div class="token-row">
+                <label>
+                    <span>Small token</span>
+                    <input id="editorSmall" placeholder="null" />
+                </label>
+                <label>
+                    <span>Large token</span>
+                    <input id="editorLarge" placeholder="null" />
+                </label>
+            </div>
             <textarea id="editorValue"></textarea>
             <div class="actions">
                 <button id="save">Save</button>

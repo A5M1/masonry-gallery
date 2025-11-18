@@ -692,7 +692,10 @@ void platform_escape_path_for_cmd(const char* src, char* dst, size_t dstlen) {
     for (size_t i = 0; src[i]; ++i) {
         unsigned char c = (unsigned char)src[i];
         if (!(isalnum(c) || c == '/' || c == '\\' ||
-            c == '_' || c == '-' || c == '.' || c == ':' || c == ' ')) {
+            c == '_' || c == '-' || c == '.' || c == ':' || c == ' ' ||
+            c == '(' || c == ')' || c == '[' || c == ']' ||
+            c == '{' || c == '}' || c == ',' || c == '+' || c == '=' ||
+            c == '#')) {
             dst[0] = '\0';
             return;
         }

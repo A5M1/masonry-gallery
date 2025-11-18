@@ -7,7 +7,7 @@ CC_LINUX_ARM=aarch64-linux-gnu-clang
 
 # ======================================================
 # Compiler flags
-CFLAGS_COMMON=-std=c11 -Os -Iinclude -ffunction-sections -fdata-sections \
+CFLAGS_COMMON=-std=c17 -Os -Iinclude -ffunction-sections -fdata-sections \
                 -Wno-format-truncation -Wno-misleading-indentation -w
 
 CFLAGS_X86_RELEASE=$(CFLAGS_COMMON) -msse2 -mavx2
@@ -15,11 +15,11 @@ CFLAGS_ARM_RELEASE=$(CFLAGS_COMMON) -march=armv8-a+simd
 CFLAGS_LINUX_X86_RELEASE=$(CFLAGS_COMMON)
 CFLAGS_LINUX_ARM_RELEASE=$(CFLAGS_COMMON) -march=armv8-a+simd
 
-CFLAGS_X86_DEBUG=-std=c11 -g -O0 -Iinclude \
+CFLAGS_X86_DEBUG=-std=c17 -g -O0 -Iinclude \
                     -ffunction-sections -fdata-sections \
                     -Wno-format-truncation -Wno-misleading-indentation \
                     -DDEBUG_DIAGNOSTIC -msse2 -mavx2
-CFLAGS_ARM_DEBUG=-std=c11 -g -O0 -Iinclude \
+CFLAGS_ARM_DEBUG=-std=c17 -g -O0 -Iinclude \
                     -ffunction-sections -fdata-sections \
                     -Wno-format-truncation -Wno-misleading-indentation \
                     -DDEBUG_DIAGNOSTIC -march=armv8-a+simd

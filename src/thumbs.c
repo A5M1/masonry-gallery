@@ -13,6 +13,9 @@
 atomic_int ffmpeg_active = ATOMIC_VAR_INIT(0);
 static atomic_int magick_active = ATOMIC_VAR_INIT(0);
 #define MAX_MAGICK 2
+#define WAL_DIR_NAME "wal"
+#define WAL_CHUNK_FMT "chunk-%lld-%u.wal"
+static atomic_uint wal_chunk_seq = ATOMIC_VAR_INIT(0);
 typedef struct {
     char input[PATH_MAX];
     char output[PATH_MAX];
@@ -21,8 +24,104 @@ typedef struct {
     int index;
     int total;
 } thumb_job_t;
+static void record_thumb_job_completion(const thumb_job_t* job);
+static void run_thumb_job(thumb_job_t* job);
+static void generate_thumb_inline_and_record(const char* input, const char* output, int scale, int q, int index, int total);
 static void sleep_ms(int ms) { platform_sleep_ms(ms); }
 static atomic_int thumb_workers_active = ATOMIC_VAR_INIT(0);
+
+static void wait_for_thumb_workers(void) {
+    while (atomic_load(&thumb_workers_active) > 0)
+        sleep_ms(50);
+}
+
+static void build_wal_dir_path(const char* per_thumbs_root, char* wal_dir, size_t wal_dir_len) {
+    if (!per_thumbs_root || !wal_dir || wal_dir_len == 0) return;
+    snprintf(wal_dir, wal_dir_len, "%s" DIR_SEP_STR WAL_DIR_NAME, per_thumbs_root);
+}
+
+static int wal_write_entry(const char* per_thumbs_root, const char* key, const char* value) {
+    if (!per_thumbs_root || !key) return -1;
+    char wal_dir[PATH_MAX];
+    wal_dir[0] = '\0';
+    build_wal_dir_path(per_thumbs_root, wal_dir, sizeof(wal_dir));
+    if (!is_dir(wal_dir)) platform_make_dir(wal_dir);
+    unsigned int seq = atomic_fetch_add(&wal_chunk_seq, 1);
+    long long ts = (long long)time(NULL);
+    char chunk_path[PATH_MAX];
+    if (ts < 0) ts = 0;
+    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq);
+    FILE* f = fopen(chunk_path, "w");
+    if (!f) return -1;
+    fprintf(f, "%s\n%s\n", key, value ? value : "");
+    fflush(f);
+    platform_fsync(fileno(f));
+    fclose(f);
+    return 0;
+}
+
+static int wal_read_entry(const char* chunk_path, char* key, size_t key_len, char* value, size_t value_len) {
+    if (!chunk_path || !key || key_len == 0 || !value || value_len == 0) return -1;
+    FILE* f = fopen(chunk_path, "r");
+    if (!f) return -1;
+    if (!fgets(key, key_len, f)) { fclose(f); return -1; }
+    size_t key_end = strcspn(key, "\r\n");
+    key[key_end] = '\0';
+    if (!fgets(value, value_len, f)) {
+        value[0] = '\0';
+        fclose(f);
+        return 0;
+    }
+    size_t val_end = strcspn(value, "\r\n");
+    value[val_end] = '\0';
+    fclose(f);
+    return 0;
+}
+
+static void process_wal_chunks(const char* per_thumbs_root) {
+    if (!per_thumbs_root) return;
+    char wal_dir[PATH_MAX];
+    wal_dir[0] = '\0';
+    build_wal_dir_path(per_thumbs_root, wal_dir, sizeof(wal_dir));
+    if (!is_dir(wal_dir)) return;
+    diriter it;
+    if (!dir_open(&it, wal_dir)) return;
+    const char* entry;
+    char chunk_path[PATH_MAX];
+    char key[PATH_MAX];
+    char value[PATH_MAX];
+    while ((entry = dir_next(&it))) {
+        if (!entry || strcmp(entry, "") == 0) continue;
+        if (strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
+        path_join(chunk_path, wal_dir, entry);
+        if (!is_file(chunk_path)) continue;
+        if (wal_read_entry(chunk_path, key, sizeof(key), value, sizeof(value)) != 0) continue;
+        int committed = 0;
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            if (thumbdb_tx_begin() != 0) {
+                sleep_ms(5);
+                continue;
+            }
+            if (thumbdb_set(key, value) == 0) {
+                if (thumbdb_tx_commit() == 0) {
+                    platform_file_delete(chunk_path);
+                    thumbdb_request_compaction();
+                    committed = 1;
+                }
+                else {
+                    thumbdb_tx_abort();
+                }
+                break;
+            }
+            thumbdb_tx_abort();
+            sleep_ms(5);
+        }
+        if (!committed) {
+            LOG_WARN("process_wal_chunks: failed to commit WAL chunk %s", chunk_path);
+        }
+    }
+    dir_close(&it);
+}
 
 static int execute_command_with_limits(const char* cmd, const char* out_log, int timeout, int uses_ffmpeg) {
     int ret;
@@ -43,7 +142,7 @@ static int execute_command_with_limits(const char* cmd, const char* out_log, int
         switch (c) {
         case ';': case '&': case '|': case '`':
         case '$': case '>': case '<': case '!':
-        case '(': case ')': case '{': case '}':
+        case '{': case '}':
         case '\'':
             LOG_ERROR("execute_command_with_limits: rejecting potentially unsafe command character '%c'", c);
             return -1;
@@ -86,6 +185,8 @@ static int execute_command_with_limits(const char* cmd, const char* out_log, int
 
     return ret;
 }
+
+static void generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total);
 
 static void build_magick_resize_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, const char* out_esc) {
     if (!dst || dstlen == 0)return;
@@ -262,6 +363,54 @@ void make_safe_dir_name_from(const char* dir, char* out, size_t outlen) {
     while (si > 0 && out[si - 1] == '-') si--;
     out[si] = '\0';
 }
+static void record_thumb_job_completion(const thumb_job_t* job) {
+    if (!job) return;
+    const char* bn = strrchr(job->output, DIR_SEP);
+    if (bn) bn = bn + 1;
+    else bn = job->output;
+    char base_key[PATH_MAX];
+    thumbname_to_base_local(bn, base_key, sizeof(base_key));
+    char normalized_input[PATH_MAX];
+    strncpy(normalized_input, job->input, sizeof(normalized_input) - 1);
+    normalized_input[sizeof(normalized_input) - 1] = '\0';
+    normalize_path(normalized_input);
+    char per_thumbs_root[PATH_MAX];
+    per_thumbs_root[0] = '\0';
+    get_parent_dir(job->output, per_thumbs_root, sizeof(per_thumbs_root));
+    int wrote_wal = 0;
+    if (wal_write_entry(per_thumbs_root, base_key, normalized_input) == 0) {
+        wrote_wal = 1;
+        LOG_DEBUG("record_thumb_job_completion: queued WAL %s -> %s", base_key, normalized_input);
+    } else {
+        LOG_WARN("record_thumb_job_completion: failed to write WAL entry for %s", job->input);
+    }
+    if (wrote_wal)
+        thumbdb_request_compaction();
+    char parent[PATH_MAX];
+    parent[0] = '\0';
+    get_parent_dir(job->input, parent, sizeof(parent));
+    char msg[1024];
+    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\"}", job->input, bn);
+    if (r > 0) websocket_broadcast_topic(parent[0] ? parent : NULL, msg);
+}
+static void run_thumb_job(thumb_job_t* job) {
+    if (!job) return;
+    generate_thumb_c(job->input, job->output, job->scale, job->q, job->index, job->total);
+    record_thumb_job_completion(job);
+}
+static void generate_thumb_inline_and_record(const char* input, const char* output, int scale, int q, int index, int total) {
+    thumb_job_t temp;
+    memset(&temp, 0, sizeof(temp));
+    strncpy(temp.input, input, PATH_MAX - 1);
+    temp.input[PATH_MAX - 1] = '\0';
+    strncpy(temp.output, output, PATH_MAX - 1);
+    temp.output[PATH_MAX - 1] = '\0';
+    temp.scale = scale;
+    temp.q = q;
+    temp.index = index;
+    temp.total = total;
+    run_thumb_job(&temp);
+}
 void get_thumb_rel_names(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len) {
     char key[64];
     key[0] = '\0';
@@ -430,7 +579,7 @@ int is_newer(const char* src, const char* dst) {
     if (platform_stat(dst, &d) != 0) return 1;
     return s.st_mtime > d.st_mtime;
 }
-void generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total) {
+static void generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total) {
     LOG_DEBUG("generate_thumb_c: enter input=%s output=%s scale=%d q=%d index=%d total=%d", input ? input : "(null)", output ? output : "(null)", scale, q, index, total);
 
     if (!is_path_safe(input)) {
@@ -858,110 +1007,11 @@ static void thumb_watcher_cb(const char* dir) {
                 }
 
                 if (need_small) {
-                    quick_prog.processed_files++;
-                    thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
-                    if (!job) {
-                        LOG_ERROR("Failed to allocate thumb job structure (small) for %s", full);
-                        continue;
-                    }
-                    if (job) {
-                        strncpy(job->input, full, PATH_MAX - 1);
-                        job->input[PATH_MAX - 1] = '\0';
-                        strncpy(job->output, thumb_small, PATH_MAX - 1);
-                        job->output[PATH_MAX - 1] = '\0';
-                        job->scale = THUMB_SMALL_SCALE;
-                        job->q = THUMB_SMALL_QUALITY;
-                        job->index = quick_prog.processed_files;
-                        job->total = (int)quick_prog.total_files;
-                        while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
-                        atomic_fetch_add(&thumb_workers_active, 1);
-                        if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
-                            LOG_ERROR("Failed to spawn thumb worker thread (watcher), generating inline");
-                            atomic_fetch_sub(&thumb_workers_active, 1);
-                            generate_thumb_c(full, thumb_small, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY, quick_prog.processed_files, quick_prog.total_files);
-                            char* bn = strrchr(thumb_small, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_small;
-                            char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-                            if (thumbdb_tx_begin() == 0) {
-                                thumbdb_set(base_key, full);
-                                if (thumbdb_tx_commit() != 0) {
-                                    LOG_WARN("thumb_watcher_cb: failed to commit transaction for small thumb %s, aborting", full);
-                                    thumbdb_tx_abort();
-                                }
-                            } else {
-                                LOG_WARN("thumb_watcher_cb: failed to start transaction for small thumb %s, using fallback", full);
-                                thumbdb_set(base_key, full);
-                            }
-                            free(job);
-                        }
-                    } else {
-                        LOG_ERROR("Failed to allocate thumb job (watcher), generating inline");
-                        generate_thumb_c(full, thumb_small, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY, quick_prog.processed_files, quick_prog.total_files);
-                        char* bn = strrchr(thumb_small, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_small;
-                        char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-                        if (thumbdb_tx_begin() == 0) {
-                            thumbdb_set(base_key, full);
-                            if (thumbdb_tx_commit() != 0) {
-                                LOG_WARN("thumb_watcher_cb: failed to commit transaction for small thumb %s, aborting", full);
-                                thumbdb_tx_abort();
-                            }
-                        } else {
-                            LOG_WARN("thumb_watcher_cb: failed to start transaction for small thumb %s, using fallback", full);
-                            thumbdb_set(base_key, full);
-                        }
-                    }
+                    schedule_or_generate_thumb(full, thumb_small, &quick_prog, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY);
                 }
 
                 if (need_large) {
-                    thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
-                    if (!job) {
-                        LOG_ERROR("Failed to allocate thumb job structure (large) for %s", full);
-                        continue;
-                    }
-                    if (job) {
-                        strncpy(job->input, full, PATH_MAX - 1);
-                        job->input[PATH_MAX - 1] = '\0';
-                        strncpy(job->output, thumb_large, PATH_MAX - 1);
-                        job->output[PATH_MAX - 1] = '\0';
-                        job->scale = THUMB_LARGE_SCALE;
-                        job->q = THUMB_LARGE_QUALITY;
-                        job->index = quick_prog.processed_files;
-                        job->total = (int)quick_prog.total_files;
-                        while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
-                        atomic_fetch_add(&thumb_workers_active, 1);
-                        if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
-                            LOG_ERROR("Failed to spawn thumb worker thread (watcher), generating inline");
-                            atomic_fetch_sub(&thumb_workers_active, 1);
-                            generate_thumb_c(full, thumb_large, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY, quick_prog.processed_files, quick_prog.total_files);
-                            char* bn = strrchr(thumb_large, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_large;
-                            char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-                            if (thumbdb_tx_begin() == 0) {
-                                thumbdb_set(base_key, full);
-                                if (thumbdb_tx_commit() != 0) {
-                                    LOG_WARN("thumb_watcher_cb: failed to commit transaction for large thumb %s, aborting", full);
-                                    thumbdb_tx_abort();
-                                }
-                            } else {
-                                LOG_WARN("thumb_watcher_cb: failed to start transaction for large thumb %s, using fallback", full);
-                                thumbdb_set(base_key, full);
-                            }
-                            free(job);
-                        }
-                    } else {
-                        LOG_ERROR("Failed to allocate thumb job (watcher), generating inline");
-                        generate_thumb_c(full, thumb_large, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY, quick_prog.processed_files, quick_prog.total_files);
-                        char* bn = strrchr(thumb_large, DIR_SEP); if (bn) bn = bn + 1; else bn = thumb_large;
-                        char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-                        if (thumbdb_tx_begin() == 0) {
-                            thumbdb_set(base_key, full);
-                            if (thumbdb_tx_commit() != 0) {
-                                LOG_WARN("thumb_watcher_cb: failed to commit transaction for large thumb %s, aborting", full);
-                                thumbdb_tx_abort();
-                            }
-                        } else {
-                            LOG_WARN("thumb_watcher_cb: failed to start transaction for large thumb %s, using fallback", full);
-                            thumbdb_set(base_key, full);
-                        }
-                    }
+                    schedule_or_generate_thumb(full, thumb_large, &quick_prog, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY);
                 }
             }
             dir_close(&it);
@@ -1044,31 +1094,7 @@ static void* thumb_job_thread(void* args) {
     if (!args) return NULL;
     thumb_job_t* job = (thumb_job_t*)args;
     LOG_DEBUG("thumb_job_thread: starting generation for %s -> %s", job->input, job->output);
-    generate_thumb_c(job->input, job->output, job->scale, job->q, job->index, job->total);
-    char* bn = strrchr(job->output, DIR_SEP);
-    if (bn) bn = bn + 1; else bn = job->output;
-    char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-    
-    if (thumbdb_tx_begin() == 0) {
-        thumbdb_set(base_key, job->input);
-        if (thumbdb_tx_commit() != 0) {
-            LOG_WARN("thumb_job_thread: failed to commit transaction for %s, aborting", job->input);
-            thumbdb_tx_abort();
-        } else {
-            LOG_DEBUG("thumb_job_thread: completed and transacted into DB %s -> %s", base_key, job->input);
-        }
-    } else {
-        LOG_WARN("thumb_job_thread: failed to start transaction for %s", job->input);
-        thumbdb_set(base_key, job->input);
-    }
-    
-    {
-        char parent[PATH_MAX]; parent[0] = '\0';
-        get_parent_dir(job->input, parent, sizeof(parent));
-        char msg[1024];
-        int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\"}", job->input, bn);
-        if (r > 0) websocket_broadcast_topic(parent[0] ? parent : NULL, msg);
-    }
+    run_thumb_job(job);
     LOG_DEBUG("thumb_job_thread: broadcasting and finishing for %s", job->input);
     free(job);
     atomic_fetch_sub(&thumb_workers_active, 1);
@@ -1137,7 +1163,8 @@ static void* thumb_maintenance_thread(void* args) {
         }
 
         thumbdb_sweep_orphans();
-        thumbdb_compact();
+        if (!thumbdb_perform_requested_compaction())
+            thumbdb_compact();
     }
     return NULL;
 }
@@ -1278,6 +1305,7 @@ void run_thumb_generation(const char* dir) {
     }
     else {
         LOG_DEBUG("run_thumb_generation: opened DB %s", per_db);
+        process_wal_chunks(per_thumbs_root);
     }
 
     count_media_in_dir(dir_used, &prog);
@@ -1289,6 +1317,8 @@ void run_thumb_generation(const char* dir) {
     LOG_DEBUG("run_thumb_generation: calling ensure_thumbs_in_dir for %s (found %zu)", dir_used, prog.total_files);
 
     ensure_thumbs_in_dir(dir_used, &prog);
+    wait_for_thumb_workers();
+    process_wal_chunks(per_thumbs_root);
     LOG_DEBUG("run_thumb_generation: ensure_thumbs_in_dir completed, processed %zu files", prog.processed_files);
 
     clean_orphan_thumbs(dir_used, &prog);
@@ -1299,7 +1329,8 @@ void run_thumb_generation(const char* dir) {
 
     LOG_DEBUG("run_thumb_generation: starting final database processing");
     thumbdb_sweep_orphans();
-    thumbdb_compact();
+    if (!thumbdb_perform_requested_compaction())
+        thumbdb_compact();
     LOG_DEBUG("run_thumb_generation: final database processing completed");
 
     platform_file_delete(lock_path);
@@ -1663,15 +1694,15 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
         }
         LOG_DEBUG("ensure_thumbs_in_dir: media=%s need_small=%d need_large=%d", full, need_small, need_large);
         if (need_small)
-            schedule_or_generate_thumb(full, thumb_small, prog, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY, "small");
+            schedule_or_generate_thumb(full, thumb_small, prog, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY);
         if (need_large)
-            schedule_or_generate_thumb(full, thumb_large, prog, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY, "large");
+            schedule_or_generate_thumb(full, thumb_large, prog, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY);
     }
     dir_close(&it);
     LOG_DEBUG("ensure_thumbs_in_dir: completed scanning %s", dir);
 }
 
-void schedule_or_generate_thumb(const char* input, const char* output, progress_t* prog, int scale, int q, const char* kind) {
+void schedule_or_generate_thumb(const char* input, const char* output, progress_t* prog, int scale, int q) {
     if (!input || !output || !prog) return;
     
     prog->processed_files++;
@@ -1679,19 +1710,7 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
     thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
     if (!job) {
         LOG_ERROR("Failed to allocate thumb job structure for %s", input);
-        generate_thumb_c(input, output, scale, q, prog->processed_files, prog->total_files);
-        char* bn = strrchr(output, DIR_SEP); if (bn) bn = bn + 1; else bn = output;
-        char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-        if (thumbdb_tx_begin() == 0) {
-            thumbdb_set(base_key, input);
-            if (thumbdb_tx_commit() != 0) {
-                LOG_WARN("schedule_or_generate_thumb: failed to commit transaction for %s, aborting", input);
-                thumbdb_tx_abort();
-            }
-        } else {
-            LOG_WARN("schedule_or_generate_thumb: failed to start transaction for %s, using fallback", input);
-            thumbdb_set(base_key, input);
-        }
+        generate_thumb_inline_and_record(input, output, scale, q, (int)prog->processed_files, (int)prog->total_files);
         return;
     }
     
@@ -1710,19 +1729,7 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
     if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
         LOG_ERROR("Failed to spawn thumb worker thread, generating inline");
         atomic_fetch_sub(&thumb_workers_active, 1);
-        generate_thumb_c(input, output, scale, q, job->index, job->total);
-        char* bn = strrchr(output, DIR_SEP); if (bn) bn = bn + 1; else bn = output;
-        char base_key[PATH_MAX]; thumbname_to_base_local(bn, base_key, sizeof(base_key));
-        if (thumbdb_tx_begin() == 0) {
-            thumbdb_set(base_key, input);
-            if (thumbdb_tx_commit() != 0) {
-                LOG_WARN("schedule_or_generate_thumb: failed to commit transaction for %s, aborting", input);
-                thumbdb_tx_abort();
-            }
-        } else {
-            LOG_WARN("schedule_or_generate_thumb: failed to start transaction for %s, using fallback", input);
-            thumbdb_set(base_key, input);
-        }
+        generate_thumb_inline_and_record(input, output, scale, q, job->index, job->total);
         free(job);
     }
 }

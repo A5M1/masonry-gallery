@@ -18,8 +18,8 @@
 #define DB_MAGIC "TNDB"
 #define DB_MAGIC_LEN 4
 
-const uint8_t OP_BEGIN_RECORD    = 0xAA;
-const uint8_t OP_SEPERATOR       = 0x0A;
+const uint8_t OP_BEGIN_RECORD   = 0xAA;
+const uint8_t OP_SEPERATOR      = 0x0A;
 const uint8_t OP_MP4            = 0x0B;
 const uint8_t OP_JPG            = 0x0C;
 const uint8_t OP_WEBM           = 0x0D;
@@ -53,6 +53,57 @@ static const char* get_ext_from_opcode(uint8_t code) {
         if (ext_map[i].code == code) return ext_map[i].ext;
     }
     return ".jpg";  
+}
+
+static uint8_t get_media_opcode(const char* path) {
+    if (!path) return OP_JPG;
+    const char* dot = strrchr(path, '.');
+    const char* ext = dot ? dot : ".jpg";
+    return get_ext_opcode(ext);
+}
+
+static int write_media_segments(FILE* f, const char* media) {
+    if (!f || !media) return -1;
+    size_t path_len = strlen(media);
+    size_t emit_len = path_len;
+    const char* dot = strrchr(media, '.');
+    if (dot) emit_len = (size_t)(dot - media);
+
+    uint8_t base_marker = OP_BASE_DIR;
+    if (fwrite(&base_marker, 1, 1, f) != 1) return -1;
+    for (size_t i = 0; i < emit_len; ++i) {
+        unsigned char c = (unsigned char)media[i];
+        if (c == '/' || c == '\\') {
+            uint8_t slash = OP_BACKSLASH;
+            if (fwrite(&slash, 1, 1, f) != 1) return -1;
+            continue;
+        }
+        if (fwrite(&c, 1, 1, f) != 1) return -1;
+    }
+    uint8_t sep = OP_SEPERATOR;
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    uint8_t ext_code = get_media_opcode(media);
+    if (fwrite(&ext_code, 1, 1, f) != 1) return -1;
+    return 0;
+}
+
+static int append_db_record(FILE* f, const char* key, const char* val) {
+    if (!f || !key) return -1;
+    uint8_t begin = OP_BEGIN_RECORD;
+    if (fwrite(&begin, 1, 1, f) != 1) return -1;
+    uint8_t sep = OP_SEPERATOR;
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    size_t key_len = strlen(key);
+    if (fwrite(key, 1, key_len, f) != key_len) return -1;
+    if (fwrite(&sep, 1, 1, f) != 1) return -1;
+    if (val) {
+        if (write_media_segments(f, val) != 0) return -1;
+    }
+    uint8_t end = OP_END_RECORD;
+    if (fwrite(&end, 1, 1, f) != 1) return -1;
+    uint8_t newline = OP_NEWLINE;
+    if (fwrite(&newline, 1, 1, f) != 1) return -1;
+    return 0;
 }
 
 static int is_valid_media_path(const char* path) {
@@ -90,6 +141,10 @@ static int tx_active = 0;
 static tx_op_t* tx_head = NULL;
 static thread_mutex_t db_open_mutex;
 static int db_open_mutex_inited = 0;
+static thread_mutex_t compaction_mutex;
+static int compaction_mutex_inited = 0;
+static int compaction_requested = 0;
+static char compaction_target[PATH_MAX];
 
 static time_t db_last_mtime = 0;
 static off_t db_last_size = 0;
@@ -102,22 +157,6 @@ static uint32_t ht_hash(const char* s) {
     return h;
 }
 
-static int append_line_to_file(FILE* f, const char* key, const char* val) {
-    if (!f || !key) return -1;
-    if (fwrite(&OP_BEGIN_RECORD, 1, 1, f) != 1) return -1;
-    if (fwrite(&OP_SEPERATOR, 1, 1, f) != 1) return -1;
-    size_t key_len = strlen(key);
-    if (fwrite(key, 1, key_len, f) != key_len) return -1;
-    if (fwrite(&OP_SEPERATOR, 1, 1, f) != 1) return -1;
-    if (val) {
-        size_t val_len = strlen(val);
-        if (fwrite(val, 1, val_len, f) != val_len) return -1;
-    }
-    
-    if (fwrite(&OP_END_RECORD, 1, 1, f) != 1) return -1;
-    if (fwrite(&OP_NEWLINE, 1, 1, f) != 1) return -1;
-    return 0;
-}
 
 static void thumbname_to_base_and_kind(const char* name, char* base, size_t base_len, int* is_small, int* is_large) {
     base[0] = '\0'; if (is_small) *is_small = 0; if (is_large) *is_large = 0;
@@ -222,25 +261,44 @@ static void ht_free_all(void) {
 
 typedef int (*record_iter_cb)(const char*, const char*, void*);
 
-static int skip_legacy_binary_record(FILE* f) {
-    uint8_t sep = 0;
-    uint32_t key_len = 0;
-    uint32_t val_len = 0;
-    if (fread(&sep, 1, 1, f) != 1) return -1;
-    if (sep != 0x5E) return -1;
-    if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) return -1;
-    if (fseek(f, (long)key_len, SEEK_CUR) != 0) return -1;
-    if (fread(&sep, 1, 1, f) != 1) return -1;
-    if (sep != 0x5E) return -1;
-    if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) return -1;
-    if (fread(&sep, 1, 1, f) != 1) return -1;
-    if (sep != 0x5E) return -1;
-    if (fseek(f, (long)val_len, SEEK_CUR) != 0) return -1;
-    if (fread(&sep, 1, 1, f) != 1) return -1;
+static void skip_trailing_newline(FILE* f) {
+    int ch = fgetc(f);
+    if (ch == EOF) return;
+    if ((uint8_t)ch != OP_NEWLINE) ungetc(ch, f);
+}
+
+static int read_binary_value(FILE* f, char* val_buf, size_t val_len) {
+    size_t vpos = 0;
+    int ch; 
+    while ((ch = fgetc(f)) != EOF) {
+        uint8_t b = (uint8_t)ch;
+        if (b == OP_END_RECORD) break;
+        if (b == OP_NEWLINE) continue;
+        if (b == OP_BASE_DIR) continue;
+        if (b == OP_BACKSLASH) {
+            if (vpos + 1 < val_len) val_buf[vpos++] = DIR_SEP;
+            continue;
+        }
+        if (b == OP_SEPERATOR) {
+            int ext_code = fgetc(f);
+            if (ext_code == EOF) return -1;
+            const char* ext = get_ext_from_opcode((uint8_t)ext_code);
+            size_t ext_len = strlen(ext);
+            if (vpos + ext_len < val_len) {
+                memcpy(val_buf + vpos, ext, ext_len);
+                vpos += ext_len;
+            }
+            continue;
+        }
+        if (b == OP_LARGE_JPG || b == OP_SMALL_JPG) continue;
+        if (vpos + 1 < val_len) val_buf[vpos++] = (char)b;
+    }
+    if (ch == EOF) return -1;
+    val_buf[vpos] = '\0';
     return 0;
 }
 
-static int read_text_record(FILE* f, char* key_buf, size_t key_len, char* val_buf, size_t val_len) {
+static int read_record(FILE* f, char* key_buf, size_t key_len, char* val_buf, size_t val_len) {
     uint8_t sep = 0;
     if (fread(&sep, 1, 1, f) != 1) return -1;
     if (sep != OP_SEPERATOR) return -1;
@@ -253,16 +311,16 @@ static int read_text_record(FILE* f, char* key_buf, size_t key_len, char* val_bu
     }
     if (ch == EOF) return -1;
     key_buf[kpos] = '\0';
-    size_t vpos = 0;
-    while ((ch = fgetc(f)) != EOF) {
-        uint8_t b = (uint8_t)ch;
-        if (b == OP_END_RECORD) break;
-        if (vpos + 1 < val_len) val_buf[vpos++] = (char)b;
+    int next = fgetc(f); 
+    if (next == EOF) return -1;
+    if ((uint8_t)next == OP_END_RECORD) {
+        skip_trailing_newline(f);
+        val_buf[0] = '\0';
+        return 0;
     }
-    if (ch == EOF) return -1;
-    val_buf[vpos] = '\0';
-    int tail = fgetc(f);
-    if (tail != EOF && (uint8_t)tail != OP_NEWLINE) ungetc(tail, f);
+    ungetc(next, f);
+    if (read_binary_value(f, val_buf, val_len) != 0) return -1;
+    skip_trailing_newline(f);
     return 0;
 }
 
@@ -276,13 +334,13 @@ static int iterate_db_records(FILE* f, record_iter_cb cb, void* ctx) {
         if (c == EOF) break;
         uint8_t opcode = (uint8_t)c;
         if (opcode == OP_BEGIN_RECORD) {
-            if (read_text_record(f, key_buf, sizeof(key_buf), val_buf, sizeof(val_buf)) != 0) return -1;
+            if (read_record(f, key_buf, sizeof(key_buf), val_buf, sizeof(val_buf)) != 0) return -1;
             const char* val_ptr = val_buf[0] ? val_buf : NULL;
             int cb_ret = cb(key_buf, val_ptr, ctx);
             if (cb_ret < 0) return -1;
             if (cb_ret > 0) break;
-        } else if (opcode == 0x10 || opcode == 0x20 || opcode == 0x21 || opcode == 0x22) {
-            if (skip_legacy_binary_record(f) != 0) return -1;
+        } else if (opcode == OP_NEWLINE) {
+            continue;
         } else {
             continue;
         }
@@ -316,7 +374,7 @@ static int persist_tx_ops(tx_op_t* ops) {
     if (!f) return -1;
     tx_op_t* cur = ops;
     while (cur) {
-        if (append_line_to_file(f, cur->key, cur->val) != 0) { fclose(f); return -1; }
+        if (append_db_record(f, cur->key, cur->val) != 0) { fclose(f); return -1; }
         cur = cur->next;
     }
     fflush(f);
@@ -557,7 +615,7 @@ static int rh_comp_cb(const char* key, const unsigned char* val, size_t val_len,
     if (c->restrict_to_base && val && val_len > 0) {
         if (!media_is_under_base((const char*)val, c->allowed_base)) return 0;
     }
-    if (append_line_to_file(c->f, key, (const char*)val) == 0) {
+    if (append_db_record(c->f, key, (const char*)val) == 0) {
         c->wrote_count++;
     }
     return 0;
@@ -734,6 +792,39 @@ int thumbdb_tx_abort(void) {
     return cleanup_errors == 0 ? 0 : -1;
 }
 
+void thumbdb_request_compaction(void) {
+    if (!compaction_mutex_inited) {
+        if (thread_mutex_init(&compaction_mutex) == 0) compaction_mutex_inited = 1;
+    }
+    if (!compaction_mutex_inited) return;
+    thread_mutex_lock(&compaction_mutex);
+    if (db_path[0]) {
+        strncpy(compaction_target, db_path, sizeof(compaction_target) - 1);
+        compaction_target[sizeof(compaction_target) - 1] = '\0';
+        compaction_requested = 1;
+    }
+    thread_mutex_unlock(&compaction_mutex);
+}
+
+int thumbdb_perform_requested_compaction(void) {
+    if (!compaction_mutex_inited) {
+        if (thread_mutex_init(&compaction_mutex) == 0) compaction_mutex_inited = 1;
+    }
+    if (!compaction_mutex_inited) return 0;
+    thread_mutex_lock(&compaction_mutex);
+    int should_run = 0;
+    if (compaction_requested && db_path[0] && strcmp(compaction_target, db_path) == 0) {
+        compaction_requested = 0;
+        should_run = 1;
+    }
+    thread_mutex_unlock(&compaction_mutex);
+    if (should_run) {
+        thumbdb_compact();
+        return 1;
+    }
+    return 0;
+}
+
 int thumbdb_tx_commit(void) {
     if (!db_inited) return -1;
     thread_mutex_lock(&db_mutex);
@@ -794,7 +885,7 @@ int thumbdb_tx_commit(void) {
     int committed_ops = 0;
     while (cur) {
         if (!cur->skip) {
-            if (append_line_to_file(f, cur->key, cur->val) != 0) {
+            if (append_db_record(f, cur->key, cur->val) != 0) {
                 fclose(f);
                 LOG_WARN("thumbdb: failed to write tx op during commit for key: %s", cur->key ? cur->key : "(null)");
                 thread_mutex_unlock(&db_mutex);
@@ -920,7 +1011,7 @@ int thumbdb_set(const char* key, const char* value) {
     if (r == 0) {
         FILE* f = fopen(db_path, "ab");
         if (f) {
-            append_line_to_file(f, db_key, db_value);
+            append_db_record(f, db_key, db_value);
             fflush(f);
             platform_fsync(fileno(f));
             fclose(f);
@@ -1052,7 +1143,7 @@ static int rh_compact_write_cb(const char* key, const unsigned char* val, size_t
     struct compact_write_ctx* c = (struct compact_write_ctx*)ctx;
     if (!c || !c->f || !key) return -1;
     const char* value = (val && val_len > 0) ? (const char*)val : NULL;
-    if (append_line_to_file(c->f, key, value) != 0) return -1;
+    if (append_db_record(c->f, key, value) != 0) return -1;
     c->wrote++;
     return 0;
 }
@@ -1305,7 +1396,7 @@ int thumbdb_sweep_orphans(void) {
     FILE* f = fopen(db_path, "ab");
     if (f) {
         for (size_t i = 0; i < del_count; ++i) {
-            append_line_to_file(f, dels[i], NULL);
+            append_db_record(f, dels[i], NULL);
         }
         fflush(f);
         platform_fsync(fileno(f));

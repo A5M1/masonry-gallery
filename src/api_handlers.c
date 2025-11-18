@@ -1527,6 +1527,36 @@ static void normalize_value_inplace(char* v) {
 	while (j > 0 && (v[j - 1] == ' ' || v[j - 1] == '\t' || v[j - 1] == '\r' || v[j - 1] == '\n' || v[j - 1] == '/')) j--; v[j] = '\0';
 }
 
+static void format_thumbdb_value(const char* raw, const char* base_real, char* out, size_t outlen) {
+	if (!out || outlen == 0) return;
+	out[0] = '\0';
+	if (!raw || raw[0] == '\0') return;
+	char tmp[PATH_MAX];
+	size_t len = strlen(raw);
+	if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+	memcpy(tmp, raw, len);
+	tmp[len] = '\0';
+	normalize_value_inplace(tmp);
+	if (tmp[0] == '\0') return;
+	if (base_real && base_real[0] != '\0' && safe_under(base_real, tmp)) {
+		size_t bl = strlen(base_real);
+		const char* rel = tmp + bl + ((base_real[bl] == DIR_SEP) ? 1 : 0);
+		char outp[PATH_MAX];
+		size_t ri = 0;
+		while (rel[ri] && ri + 1 < sizeof(outp)) {
+			outp[ri] = (rel[ri] == '\\') ? '/' : rel[ri];
+			ri++;
+		}
+		outp[ri] = '\0';
+		snprintf(out, outlen, "/images/%s", outp);
+		return;
+	}
+	size_t copy_len = strlen(tmp);
+	if (copy_len >= outlen) copy_len = outlen - 1;
+	memcpy(out, tmp, copy_len);
+	out[copy_len] = '\0';
+}
+
 static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 	tdb_list_ctx_t* c = (tdb_list_ctx_t*)ctx;
 	if (!key) return;
@@ -1535,8 +1565,10 @@ static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 		char full[PATH_MAX]; path_join(full, c->per_thumbs_root, key);
 		if (!is_file(full)) return;
 	}
+	char formatted[PATH_MAX] = "";
+	format_thumbdb_value(value, c->base_real, formatted, sizeof(formatted));
 	size_t used = c->used;
-	ensure_json_buf(&c->buf, &c->cap, used, 256 + strlen(key) + (value ? strlen(value) : 0));
+	ensure_json_buf(&c->buf, &c->cap, used, 256 + strlen(key) + strlen(formatted));
 	char* ptr = c->buf + used;
 	size_t rem = c->cap - used;
 	if (!c->first) {
@@ -1547,45 +1579,7 @@ static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 	}
 	ptr = json_objOpen(ptr, NULL, &rem);
 	ptr = json_str(ptr, "key", key, &rem);
-	char tmpv[65536]; tmpv[0] = '\0';
-	if (value) {
-		size_t vlen = strlen(value);
-		if (vlen >= sizeof(tmpv)) vlen = sizeof(tmpv) - 1;
-		memcpy(tmpv, value, vlen); tmpv[vlen] = '\0';
-		char* found = NULL;
-		size_t len = strlen(tmpv);
-		char* start = tmpv;
-		for (size_t ii = 0; ii <= len; ++ii) {
-			char ch = tmpv[ii];
-			if (ch == ';' || ch == '\0') {
-				tmpv[ii] = '\0';
-				char* tok = start;
-				if (strstr(tok, "//") || strchr(tok, '/') || strchr(tok, '\\') || (strlen(tok) > 1 && isalpha((unsigned char)tok[0]) && tok[1] == ':')) found = tok;
-				start = (char*)(tmpv + ii + 1);
-			}
-		}
-		if (found) {
-			normalize_value_inplace(found);
-			if (c->base_real[0] && safe_under(c->base_real, found)) {
-				size_t bl = strlen(c->base_real);
-				const char* rel = found + bl + ((c->base_real[bl] == DIR_SEP) ? 1 : 0);
-				char outp[PATH_MAX]; size_t ri = 0;
-				for (size_t ii = 0; rel[ii] && ri + 1 < sizeof(outp); ++ii) outp[ri++] = (rel[ii] == '\\') ? '/' : rel[ii]; outp[ri] = '\0';
-				char sitepath[PATH_MAX]; snprintf(sitepath, sizeof(sitepath), "/images/%s", outp);
-				ptr = json_str(ptr, "value", sitepath, &rem);
-			}
-			else {
-				ptr = json_str(ptr, "value", found, &rem);
-			}
-		}
-		else {
-			normalize_value_inplace(tmpv);
-			ptr = json_str(ptr, "value", tmpv, &rem);
-		}
-	}
-	else {
-		ptr = json_str(ptr, "value", "", &rem);
-	}
+	ptr = json_str(ptr, "value", formatted, &rem);
 	ptr = json_objClose(ptr, &rem);
 	c->used = ptr - c->buf;
 }
@@ -1601,7 +1595,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 	ptr = json_arrOpen(ptr, "items", &rem);
 	used = ptr - buf;
 	tdb_list_ctx_t ctx;
-	ctx.buf = buf; ctx.cap = cap; ctx.used = used; ctx.first = 1; ctx.filter_enabled = 0; ctx.per_thumbs_root[0] = '\0';
+	ctx.buf = buf; ctx.cap = cap; ctx.used = used; ctx.first = 1; ctx.filter_enabled = 0; ctx.per_thumbs_root[0] = '\0'; ctx.base_real[0] = '\0';
 	if (qs) {
 		char* dir = query_get(qs, "dir");
 		if (dir) {
@@ -1657,16 +1651,8 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 					if (!cctx.arr[j].key) continue;
 					if (strcmp(cctx.arr[i].key, cctx.arr[j].key) == 0) {
 						char media_i[PATH_MAX] = ""; char media_j[PATH_MAX] = "";
-						{
-							const char* v = cctx.arr[i].val ? cctx.arr[i].val : "";
-							const char* s1 = strchr(v, ';');
-							if (s1) { const char* s2 = strchr(s1 + 1, ';'); if (s2) strncpy(media_i, s2 + 1, sizeof(media_i) - 1); }
-						}
-						{
-							const char* v = cctx.arr[j].val ? cctx.arr[j].val : "";
-							const char* s1 = strchr(v, ';');
-							if (s1) { const char* s2 = strchr(s1 + 1, ';'); if (s2) strncpy(media_j, s2 + 1, sizeof(media_j) - 1); }
-						}
+						format_thumbdb_value(cctx.arr[i].val, ctx.base_real, media_i, sizeof(media_i));
+						format_thumbdb_value(cctx.arr[j].val, ctx.base_real, media_j, sizeof(media_j));
 						int keep_j = 0;
 						if ((media_i[0] == '\0') && (media_j[0] != '\0')) keep_j = 1;
 						if (keep_j) {
@@ -1684,30 +1670,14 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 			size_t outs = 0;
 			for (size_t i = 0; i < cctx.count; ++i) {
 				if (!cctx.arr[i].key) continue;
-				char small_tok[64] = "null"; char large_tok[64] = "null"; char media[PATH_MAX] = "";
+				char small_tok[64] = "null"; char large_tok[64] = "null"; char media_display[PATH_MAX] = "";
 				if (cctx.arr[i].val) {
-					const char* v = cctx.arr[i].val;
-					const char* p1 = strchr(v, ';');
-					if (p1) {
-						size_t l1 = (size_t)(p1 - v);
-						size_t l = l1 < sizeof(small_tok) - 1 ? l1 : sizeof(small_tok) - 1; memcpy(small_tok, v, l); small_tok[l] = '\0';
-						const char* p2 = strchr(p1 + 1, ';');
-						if (p2) {
-							size_t l2 = (size_t)(p2 - (p1 + 1)); size_t ll = l2 < sizeof(large_tok) - 1 ? l2 : sizeof(large_tok) - 1; memcpy(large_tok, p1 + 1, ll); large_tok[ll] = '\0';
-							strncpy(media, p2 + 1, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
-						}
-						else {
-							size_t l2 = strlen(p1 + 1); size_t ll = l2 < sizeof(large_tok) - 1 ? l2 : sizeof(large_tok) - 1; memcpy(large_tok, p1 + 1, ll); large_tok[ll] = '\0';
-						}
-					}
-					else {
-						strncpy(media, v, sizeof(media) - 1); media[sizeof(media) - 1] = '\0';
-					}
+					format_thumbdb_value(cctx.arr[i].val, ctx.base_real, media_display, sizeof(media_display));
 				}
 				{
 					size_t oi = 0;
-					for (size_t pi = 0; media[pi] && oi + 4 < sizeof(encbuf); ++pi) {
-						unsigned char ch = (unsigned char)media[pi];
+					for (size_t pi = 0; media_display[pi] && oi + 4 < sizeof(encbuf); ++pi) {
+						unsigned char ch = (unsigned char)media_display[pi];
 						if (ch == '\\') ch = '/';
 						if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '/' || ch == ':') { encbuf[oi++] = ch; }
 						else {
@@ -1943,7 +1913,10 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 	if (!key || !val) { free(key); free(val); send_text(c, 500, "Internal Server Error", "Out of memory", keep_alive); return; }
 	memcpy(key, kstart, klen); key[klen] = '\0'; memcpy(val, vstart, vlen); val[vlen] = '\0';
 	url_decode(key); url_decode(val);
+	normalize_path(val);
 	int r = thumbdb_set(key, val);
+	if (r == 0)
+		thumbdb_request_compaction();
 	free(key); free(val);
 	if (r == 0) send_text(c, 200, "OK", "{\"status\":\"ok\"}", keep_alive); else send_text(c, 500, "Internal Server Error", "set failed", keep_alive);
 }

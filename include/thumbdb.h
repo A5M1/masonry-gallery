@@ -15,5 +15,7 @@ int thumbdb_sweep_orphans(void);
 int thumbdb_tx_begin(void);
 int thumbdb_tx_commit(void);
 int thumbdb_tx_abort(void);
+void thumbdb_request_compaction(void);
+int thumbdb_perform_requested_compaction(void);
 
 

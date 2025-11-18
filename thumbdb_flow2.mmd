@@ -1,0 +1,48 @@
+---
+config:
+  layout: elk
+  theme: neo-dark
+  look: neo
+---
+flowchart TB
+ subgraph subGraph0["1. Generation Phase (thumbs.c)"]
+        Schedule["schedule_or_generate_thumb"]
+        Trigger["Trigger: ensure_thumbs_in_dir"]
+        Worker["Thread: thumb_job_thread"]
+        Gen["generate_thumb_c"]
+        FS[("File System")]
+        Record["record_thumb_job_completion"]
+  end
+ subgraph subGraph1["2. WAL Phase (thumbs.c)"]
+        WALWrite["wal_write_entry"]
+        WALFile[/"wal/chunk-TIMESTAMP-SEQ.wal"/]
+  end
+ subgraph subGraph2["3. Processing Phase (thumbs.c)"]
+        Process["process_wal_chunks"]
+        TxBegin["thumbdb_tx_begin"]
+        DBSet["thumbdb_set"]
+        TxCommit["thumbdb_tx_commit"]
+        DeleteWAL["Delete WAL File"]
+  end
+ subgraph subGraph3["4. Storage Phase (thumbdb.c)"]
+        Append["append_db_record"]
+        MainDB[/"thumbs.db"/]
+        Sync["platform_fsync"]
+        InMemory["Update In-Memory Hash Table"]
+  end
+    Trigger --> Schedule
+    Schedule --> Worker
+    Worker --> Gen
+    Gen -- Creates Image --> FS
+    Gen --> Record
+    Record --> WALWrite
+    WALWrite -- Writes key/value --> WALFile
+    Process -- Reads --> WALFile
+    Process --> TxBegin & DBSet & TxCommit
+    TxCommit -- Success --> DeleteWAL
+    TxCommit --> Append
+    Append -- Appends Binary Record --> MainDB
+    Append --> Sync
+    Sync --> InMemory
+    Trigger -.-> Process
+    Record -.-> Process

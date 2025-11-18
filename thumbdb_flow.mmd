@@ -1,0 +1,75 @@
+
+
+sequenceDiagram
+    autonumber
+    participant Main as Main Thread
+    participant Worker as Worker Thread
+    participant FS as File System
+    participant DB as ThumbDB Logic
+    participant Mem as In-Memory (RAM)
+
+    Note over Main: Phase 1: Discovery & Scheduling
+
+    Main->>Main: ensure_thumbs_in_dir(dir)
+
+    loop For each media file
+        Main->>FS: platform_stat(thumb_path)
+        FS-->>Main: File missing or outdated
+        Main->>Worker: schedule_or_generate_thumb()
+        Note right of Main: Spawns detached thread
+    end
+
+    Note over Worker: Phase 2: Generation (Parallel)
+
+    Worker->>Worker: run_thumb_job()
+    Worker->>Worker: generate_thumb_c()
+    Worker->>FS: Execute ffmpeg/magick
+    FS-->>Worker: Image file created
+    Worker->>Worker: record_thumb_job_completion()
+
+    Note over Worker: Phase 3: WAL Logging (Lock-Free)
+
+    Worker->>FS: wal_write_entry()
+    Note right of FS: Creates "wal/chunk-{ts}-{seq}.wal"<br/>Content: "Key\nValue\n"
+    Worker->>FS: fflush() & fsync()
+
+    Note over Main: Phase 4: Batch Processing
+
+    Main->>Worker: wait_for_thumb_workers()
+    Worker-->>Main: Threads finished
+
+    Main->>Main: process_wal_chunks()
+    Main->>FS: dir_open("wal/")
+
+    loop For each WAL chunk
+        Main->>FS: wal_read_entry()
+        FS-->>Main: Returns Key & Value
+
+        Note over Main, Mem: Phase 5: DB Transaction
+
+        Main->>DB: thumbdb_tx_begin()
+        DB->>Mem: Acquire db_mutex
+        DB->>Mem: Set tx_active = 1, tx_head = NULL
+
+        Main->>DB: thumbdb_set(key, value)
+        DB->>Mem: tx_record_op()
+        Note right of Mem: Allocates tx_op_t node<br/>Appends to linked list
+
+        Main->>DB: thumbdb_tx_commit()
+
+        Note over DB, FS: Phase 6: Persistence
+
+        DB->>Mem: Check for duplicates in rh_tbl
+        DB->>FS: fopen("thumbs.db", "ab")
+        DB->>FS: append_db_record()
+        Note right of FS: Writes Binary Opcodes:<br/>[OP_BEGIN][Key][OP_SEP][Value][OP_END]
+        DB->>FS: fflush() & fsync()
+
+        DB->>Mem: ht_set_internal()
+        Note right of Mem: Updates Robin Hood Hash Table
+
+        DB->>Mem: Free tx_head list
+        DB->>Mem: Release db_mutex
+
+        Main->>FS: platform_file_delete(chunk_path)
+    end
