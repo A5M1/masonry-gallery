@@ -6,7 +6,7 @@
 <p>im working on possibly forking CEF and making it more portable and less bloated as fuck</p>
 <br>
 
-<h4>Crash Debugging</h4>
+<!-- <h4>Crash Debugging</h4>
 <p>If the application crashes, it automatically generates detailed crash dumps in the <code>dmp/</code> directory with:</p>
 <ul>
 <li>Minidump files for post-mortem debugging with WinDbg</li>
@@ -16,7 +16,7 @@
 <li>Module information with base addresses</li>
 </ul>
 <p>See <a href="DEBUGGING.md">DEBUGGING.md</a> for detailed information on analyzing crash dumps.</p>
-<br>
+<br>-->
 
 <h4>See License</h4>
 <a href="https://xcn.abby0666.xyz/abgslv2.htm">ABGSL V2</a>
