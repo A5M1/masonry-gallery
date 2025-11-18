@@ -73,6 +73,7 @@ typedef struct ht_entry {
 typedef struct tx_op {
     char* key;
     char* val;
+    int skip;
     struct tx_op* next;
 } tx_op_t;
 static void free_ht_table(ht_entry_t** table, size_t buckets);
@@ -93,7 +94,6 @@ static int db_open_mutex_inited = 0;
 static time_t db_last_mtime = 0;
 static off_t db_last_size = 0;
 static int db_rebuilding = 0;
-static int db_binary_mode = 0;
 
 static uint32_t ht_hash(const char* s) {
 
@@ -220,46 +220,79 @@ static void ht_free_all(void) {
 }
 
 
-static int last_text_value_for_key(const char* path, const char* key, char* out, size_t out_len) {
-    if (!path || !key || !out || out_len == 0) return -1;
-    FILE* f = fopen(path, "rb");
-    if (!f) return -1;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
-    long pos = ftell(f);
-    if (pos <= 0) { fclose(f); return -1; }
-    size_t key_len = strlen(key);
-    const size_t chunk = 8192;
-    char* buf = malloc(chunk + key_len + 4);
-    if (!buf) {
-        LOG_ERROR("Failed to allocate buffer for last_text_value_for_key");
-        fclose(f);
-        return -1;
+typedef int (*record_iter_cb)(const char*, const char*, void*);
+
+static int skip_legacy_binary_record(FILE* f) {
+    uint8_t sep = 0;
+    uint32_t key_len = 0;
+    uint32_t val_len = 0;
+    if (fread(&sep, 1, 1, f) != 1) return -1;
+    if (sep != 0x5E) return -1;
+    if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) return -1;
+    if (fseek(f, (long)key_len, SEEK_CUR) != 0) return -1;
+    if (fread(&sep, 1, 1, f) != 1) return -1;
+    if (sep != 0x5E) return -1;
+    if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) return -1;
+    if (fread(&sep, 1, 1, f) != 1) return -1;
+    if (sep != 0x5E) return -1;
+    if (fseek(f, (long)val_len, SEEK_CUR) != 0) return -1;
+    if (fread(&sep, 1, 1, f) != 1) return -1;
+    return 0;
+}
+
+static int read_text_record(FILE* f, char* key_buf, size_t key_len, char* val_buf, size_t val_len) {
+    uint8_t sep = 0;
+    if (fread(&sep, 1, 1, f) != 1) return -1;
+    if (sep != OP_SEPERATOR) return -1;
+    size_t kpos = 0;
+    int ch;
+    while ((ch = fgetc(f)) != EOF) {
+        uint8_t b = (uint8_t)ch;
+        if (b == OP_SEPERATOR) break;
+        if (kpos + 1 < key_len) key_buf[kpos++] = (char)b;
     }
-    long read_pos = pos;
-    out[0] = '\0';
-    while (read_pos > 0) {
-        size_t to_read = (read_pos >= (long)chunk) ? chunk : (size_t)read_pos;
-        read_pos -= to_read;
-        if (fseek(f, read_pos, SEEK_SET) != 0) break;
-        size_t r = fread(buf, 1, to_read, f);
-        if (r == 0) break;
-        buf[r] = '\0';
-        for (long i = (long)r - 1; i >= 0; --i) {
-            if (buf[i] == '\n' || i == 0) {
-                long line_start = (i == 0) ? read_pos : (read_pos + i + 1);
-                if (fseek(f, line_start, SEEK_SET) != 0) continue;
-                char line[LINE_MAX]; if (!fgets(line, sizeof(line), f)) continue;
-                if (strncmp(line, key, key_len) == 0 && line[key_len] == ';') {
-                    char* val = line + key_len + 1;
-                    char* nl = strchr(val, '\n'); if (nl) *nl = '\0';
-                    strncpy(out, val, out_len - 1); out[out_len - 1] = '\0'; free(buf); fclose(f); return 0;
-                }
-                if (read_pos == 0 && i == 0) break;
-            }
+    if (ch == EOF) return -1;
+    key_buf[kpos] = '\0';
+    size_t vpos = 0;
+    while ((ch = fgetc(f)) != EOF) {
+        uint8_t b = (uint8_t)ch;
+        if (b == OP_END_RECORD) break;
+        if (vpos + 1 < val_len) val_buf[vpos++] = (char)b;
+    }
+    if (ch == EOF) return -1;
+    val_buf[vpos] = '\0';
+    int tail = fgetc(f);
+    if (tail != EOF && (uint8_t)tail != OP_NEWLINE) ungetc(tail, f);
+    return 0;
+}
+
+static int iterate_db_records(FILE* f, record_iter_cb cb, void* ctx) {
+    if (!f || !cb) return -1;
+    if (fseek(f, DB_MAGIC_LEN, SEEK_SET) != 0) return -1;
+    char key_buf[PATH_MAX];
+    char val_buf[PATH_MAX];
+    for (;;) {
+        int c = fgetc(f);
+        if (c == EOF) break;
+        uint8_t opcode = (uint8_t)c;
+        if (opcode == OP_BEGIN_RECORD) {
+            if (read_text_record(f, key_buf, sizeof(key_buf), val_buf, sizeof(val_buf)) != 0) return -1;
+            const char* val_ptr = val_buf[0] ? val_buf : NULL;
+            int cb_ret = cb(key_buf, val_ptr, ctx);
+            if (cb_ret < 0) return -1;
+            if (cb_ret > 0) break;
+        } else if (opcode == 0x10 || opcode == 0x20 || opcode == 0x21 || opcode == 0x22) {
+            if (skip_legacy_binary_record(f) != 0) return -1;
+        } else {
+            continue;
         }
-        if (read_pos == 0) break;
     }
-    free(buf); fclose(f); return -1;
+    return 0;
+}
+
+static int load_record_cb(const char* key, const char* value, void* ctx) {
+    (void)ctx;
+    return ht_set_internal(key, value);
 }
 
 static int backup_file(const char* path) {
@@ -452,52 +485,9 @@ int thumbdb_open_for_dir(const char* db_full_path) {
             fclose(f);
             ht_free_all(); thread_mutex_destroy(&db_mutex); thread_mutex_unlock(&db_open_mutex); return -1;
         }
-        size_t offset = DB_MAGIC_LEN;
-        while (offset < (size_t)fsize) {
-            uint8_t opcode;
-            if (fseek(f, offset, SEEK_SET) != 0) break;
-            if (fread(&opcode, 1, 1, f) != 1) break;
-            
-            if (opcode != OP_BEGIN_RECORD) {
-                offset++;
-                continue;
-            }
-            
-            offset++;
-            uint8_t sep;
-            if (fread(&sep, 1, 1, f) != 1 || sep != OP_SEPERATOR) break;
-            offset++;
-            char key[PATH_MAX] = "";
-            size_t key_len = 0;
-            while (offset < (size_t)fsize && key_len < sizeof(key) - 1) {
-                uint8_t ch;
-                if (fseek(f, offset, SEEK_SET) != 0) break;
-                if (fread(&ch, 1, 1, f) != 1) break;
-                if (ch == OP_SEPERATOR) {
-                    offset++;
-                    break;
-                }
-                key[key_len++] = ch;
-                offset++;
-            }
-            key[key_len] = '\0';
-            char value[PATH_MAX] = "";
-            size_t val_len = 0;
-            while (offset < (size_t)fsize && val_len < sizeof(value) - 1) {
-                uint8_t ch;
-                if (fseek(f, offset, SEEK_SET) != 0) break;
-                if (fread(&ch, 1, 1, f) != 1) break;
-                if (ch == OP_END_RECORD || ch == OP_NEWLINE) {
-                    offset++;
-                    break;
-                }
-                value[val_len++] = ch;
-                offset++;
-            }
-            value[val_len] = '\0';
-            if (key_len > 0) {
-                ht_set_internal(key, val_len > 0 ? value : NULL);
-            }
+        if (iterate_db_records(f, load_record_cb, NULL) != 0) {
+            fclose(f);
+            ht_free_all(); thread_mutex_destroy(&db_mutex); thread_mutex_unlock(&db_open_mutex); return -1;
         }
     }
     fclose(f);
@@ -573,55 +563,6 @@ static int rh_comp_cb(const char* key, const unsigned char* val, size_t val_len,
     return 0;
 }
 
-static int rh_write_bin_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    FILE* f = (FILE*)ctx;
-    if (!f || !key) return 0;
-    
-    uint8_t op_code;
-    
-    if (!val || val_len == 0) {
-        op_code = 0x22;
-    } else {
-        char* p = strstr(key, "-small.");
-        if (p) {
-            op_code = 0x20;
-        } else {
-            p = strstr(key, "-large.");
-            if (p) {
-                op_code = 0x21;
-            } else {
-                op_code = 0x10;
-            }
-        }
-    }
-    
-    uint32_t key_len = (uint32_t)strlen(key);
-    uint32_t out_val_len = 1;
-    uint8_t value_op_code = op_code;
-    
-    if (fwrite(&op_code, 1, 1, f) != 1) return -1;
-    
-    uint8_t sep = 0x5E;
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    
-    if (fwrite(&key_len, sizeof(uint32_t), 1, f) != 1) return -1;
-    
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    
-    if (fwrite(key, 1, key_len, f) != key_len) return -1;
-    
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    
-    if (fwrite(&out_val_len, sizeof(uint32_t), 1, f) != 1) return -1;
-    
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    
-    if (fwrite(&value_op_code, 1, 1, f) != 1) return -1;
-    
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    
-    return 0;
-}
 
 struct find_media_ctx { const char* media; char* out; size_t out_len; char best[PATH_MAX]; };
 static int rh_find_media_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
@@ -666,6 +607,15 @@ static int rh_collect_kv_cb(const char* key, const unsigned char* val, size_t va
     *c->countp = count + 1;
     return 0;
 }
+struct rebuild_iter_ctx { rh_table_t* table; };
+
+static int rebuild_record_cb(const char* key, const char* value, void* ctx) {
+    struct rebuild_iter_ctx* rc = (struct rebuild_iter_ctx*)ctx;
+    if (!rc || !rc->table || !key) return -1;
+    if (!value) return rh_remove(rc->table, key, strlen(key));
+    return rh_insert(rc->table, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+}
+
 static void* rebuild_worker(void* arg) {
     (void)arg;
     struct stat st;
@@ -686,81 +636,11 @@ static void* rebuild_worker(void* arg) {
         return NULL;
     }
 
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, DB_MAGIC_LEN, SEEK_SET);
-
-    size_t offset = DB_MAGIC_LEN;
-    while (offset < (size_t)fsize) {
-        fseek(f, offset, SEEK_SET);
-        uint8_t op_code = 0;
-        if (fread(&op_code, 1, 1, f) != 1) break;
-        offset += 1;
-        uint8_t sep = 0;
-        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) break;
-        offset += 1;
-        uint32_t key_len = 0;
-        if (fread(&key_len, sizeof(uint32_t), 1, f) != 1) break;
-        offset += sizeof(uint32_t);
-        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) break;
-        offset += 1;
-        if (key_len == 0 || offset + key_len > (size_t)fsize) break;
-        char* key = malloc(key_len + 1);
-        if (!key) {
-            LOG_ERROR("Failed to allocate key buffer in rebuild_worker");
-            break;
-        }
-        if (fread(key, 1, key_len, f) != key_len) { free(key); break; }
-        key[key_len] = '\0';
-        offset += key_len;
-        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) { free(key); break; }
-        offset += 1;
-        uint32_t val_len = 0;
-        if (fread(&val_len, sizeof(uint32_t), 1, f) != 1) { free(key); break; }
-        offset += sizeof(uint32_t);
-        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) { free(key); break; }
-        offset += 1;
-        unsigned char* val = NULL;
-        if (val_len > 0) {
-            if (offset + val_len > (size_t)fsize) { free(key); break; }
-            val = malloc(val_len + 1);
-            if (!val) {
-                LOG_ERROR("Failed to allocate value buffer in rebuild_worker");
-                free(key);
-                break;
-            }
-            if (fread(val, 1, val_len, f) != val_len) { free(key); free(val); break; }
-            val[val_len] = '\0';
-            offset += val_len;
-        }
-        if (fread(&sep, 1, 1, f) != 1 || sep != 0x5E) {
-            if (val) free(val);
-            free(key);
-            break;
-        }
-        offset += 1;
-        if ((op_code == 0x20 || op_code == 0x21) && val_len == 0) {
-            if (val) free(val);
-            free(key);
-            continue;
-        }
-        if (op_code == 0x22 && val_len > 0) {
-            if (val) free(val);
-            free(key);
-            continue;
-        }
-        if (op_code == 0x10) {
-            rh_insert(new_tbl, key, strlen(key), val, val_len);
-        } else if (op_code == 0x20) {
-            rh_insert(new_tbl, key, strlen(key), val, val_len);
-        } else if (op_code == 0x21) {
-            rh_insert(new_tbl, key, strlen(key), val, val_len);
-        } else if (op_code == 0x22) {
-            rh_insert(new_tbl, key, strlen(key), NULL, 0);
-        }
-        
-        if (val) free(val);
-        free(key);
+    struct rebuild_iter_ctx ctx = { new_tbl };
+    if (iterate_db_records(f, rebuild_record_cb, &ctx) != 0) {
+        fclose(f);
+        rh_destroy(new_tbl);
+        return NULL;
     }
     fclose(f);
 
@@ -873,16 +753,37 @@ int thumbdb_tx_commit(void) {
     
     
     tx_op_t* cur = tx_head;
+    int pending_ops = 0;
     while (cur) {
-        if (ht_set_internal(cur->key, cur->val) != 0) {
-            thread_mutex_unlock(&db_mutex);
-            LOG_ERROR("thumbdb_tx_commit: failed to set internal value for key: %s", cur->key ? cur->key : "(null)");
-            return -1;
+        const char* existing = ht_get(cur->key);
+        if (!existing && !cur->val) {
+            cur->skip = 1;
+        } else if (existing && cur->val && strcmp(existing, cur->val) == 0) {
+            cur->skip = 1;
+        } else {
+            cur->skip = 0;
+            pending_ops++;
         }
         cur = cur->next;
     }
-    
-    
+    if (pending_ops == 0) {
+        while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
+        tx_active = 0;
+        thread_mutex_unlock(&db_mutex);
+        LOG_DEBUG("thumbdb_tx_commit: no changes to persist");
+        return 0;
+    }
+    cur = tx_head;
+    while (cur) {
+        if (!cur->skip) {
+            if (ht_set_internal(cur->key, cur->val) != 0) {
+                thread_mutex_unlock(&db_mutex);
+                LOG_ERROR("thumbdb_tx_commit: failed to set internal value for key: %s", cur->key ? cur->key : "(null)");
+                return -1;
+            }
+        }
+        cur = cur->next;
+    }
     FILE* f = fopen(db_path, "ab");
     if (!f) {
         LOG_WARN("thumbdb: failed to open db for append during commit");
@@ -892,13 +793,15 @@ int thumbdb_tx_commit(void) {
     cur = tx_head;
     int committed_ops = 0;
     while (cur) {
-        if (append_line_to_file(f, cur->key, cur->val) != 0) {
-            fclose(f);
-            LOG_WARN("thumbdb: failed to write tx op during commit for key: %s", cur->key ? cur->key : "(null)");
-            thread_mutex_unlock(&db_mutex);
-            return -1;
+        if (!cur->skip) {
+            if (append_line_to_file(f, cur->key, cur->val) != 0) {
+                fclose(f);
+                LOG_WARN("thumbdb: failed to write tx op during commit for key: %s", cur->key ? cur->key : "(null)");
+                thread_mutex_unlock(&db_mutex);
+                return -1;
+            }
+            committed_ops++;
         }
-        committed_ops++;
         cur = cur->next;
     }
     if (fflush(f) != 0) {
@@ -936,6 +839,7 @@ static int tx_record_op(const char* key, const char* val) {
         if (cur->key && strcmp(cur->key, key) == 0) {
             free(cur->val);
             cur->val = val ? strdup(val) : NULL;
+            cur->skip = 0;
             return 0;
         }
         cur = cur->next;
@@ -1013,18 +917,17 @@ int thumbdb_set(const char* key, const char* value) {
     
     
     int r = ht_set_internal(db_key, db_value);
-    
-    
-    FILE* f = fopen(db_path, "ab");
-    if (f) {
-        append_line_to_file(f, db_key, db_value);
-        fflush(f);
-        platform_fsync(fileno(f));
-        fclose(f);
-        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
-    }
-    else {
-        LOG_WARN("thumbdb: failed to open db file for append in thumbdb_set");
+    if (r == 0) {
+        FILE* f = fopen(db_path, "ab");
+        if (f) {
+            append_line_to_file(f, db_key, db_value);
+            fflush(f);
+            platform_fsync(fileno(f));
+            fclose(f);
+            struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        } else {
+            LOG_WARN("thumbdb: failed to open db file for append in thumbdb_set");
+        }
     }
     
     thread_mutex_unlock(&db_mutex);
@@ -1082,6 +985,13 @@ int thumbdb_delete(const char* key) {
     }
 
     
+    const char* existing = ht_get(hash_key);
+
+    if (!tx_active && !existing) {
+        thread_mutex_unlock(&db_mutex);
+        return 0;
+    }
+
     if (tx_active) {
         int r = tx_record_op(hash_key, NULL);
         thread_mutex_unlock(&db_mutex);
@@ -1093,6 +1003,7 @@ int thumbdb_delete(const char* key) {
     tx_op_t single_op;
     single_op.key = (char*)hash_key;
     single_op.val = NULL;
+    single_op.skip = 0;
     single_op.next = NULL;
     int ret = persist_tx_ops(&single_op);
     if (ret == 0) {
@@ -1135,6 +1046,17 @@ int thumbdb_find_for_media(const char* media_path, char* out_key, size_t out_key
     return 1;
 }
 
+struct compact_write_ctx { FILE* f; int wrote; };
+
+static int rh_compact_write_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    struct compact_write_ctx* c = (struct compact_write_ctx*)ctx;
+    if (!c || !c->f || !key) return -1;
+    const char* value = (val && val_len > 0) ? (const char*)val : NULL;
+    if (append_line_to_file(c->f, key, value) != 0) return -1;
+    c->wrote++;
+    return 0;
+}
+
 int thumbdb_compact(void) {
     if (!db_inited) return -1;
     if (ensure_index_uptodate() != 0) return -1;
@@ -1164,7 +1086,8 @@ int thumbdb_compact(void) {
         return -1;
     }
     
-    int result = rh_iterate(rh_tbl, rh_write_bin_cb, out);
+    struct compact_write_ctx ctx = { out, 0 };
+    int result = rh_iterate(rh_tbl, rh_compact_write_cb, &ctx);
     if (result != 0) {
         LOG_WARN("thumbdb: iteration failed during processing");
         fclose(out);
@@ -1379,35 +1302,18 @@ int thumbdb_sweep_orphans(void) {
         ht_set_internal(dels[i], NULL);
     }
     
-    if (!db_binary_mode) {
-        FILE* f = fopen(db_path, "ab");
-        if (f) {
-            for (size_t i = 0; i < del_count; ++i) {
-                append_line_to_file(f, dels[i], NULL);
-            }
-            fflush(f);
-            platform_fsync(fileno(f));
-            fclose(f);
-            struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+    FILE* f = fopen(db_path, "ab");
+    if (f) {
+        for (size_t i = 0; i < del_count; ++i) {
+            append_line_to_file(f, dels[i], NULL);
         }
-        else {
-            LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
-        }
+        fflush(f);
+        platform_fsync(fileno(f));
+        fclose(f);
+        struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     }
     else {
-        FILE* f = fopen(db_path, "ab");
-        if (f) {
-            for (size_t i = 0; i < del_count; ++i) {
-                append_line_to_file(f, dels[i], NULL);
-            }
-            fflush(f);
-            platform_fsync(fileno(f));
-            fclose(f);
-            struct stat st; if (stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
-        }
-        else {
-            LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
-        }
+        LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
     }
     thread_mutex_unlock(&db_mutex);
 

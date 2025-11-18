@@ -1298,6 +1298,7 @@ void run_thumb_generation(const char* dir) {
     LOG_DEBUG("run_thumb_generation: print_skips completed");
 
     LOG_DEBUG("run_thumb_generation: starting final database processing");
+    thumbdb_sweep_orphans();
     thumbdb_compact();
     LOG_DEBUG("run_thumb_generation: final database processing completed");
 
