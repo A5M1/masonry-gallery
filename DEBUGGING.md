@@ -101,18 +101,59 @@ x *!main               # Find all 'main' symbols
 
 ### Example Debugging Session
 
+Here's how to debug the exception code 0xC000041D mentioned in the problem statement:
+
 ```
 # 1. Load the dump
 windbg -z dmp\crashdump_20251118_143025.dmp
 
-# 2. Analyze automatically
+# 2. Analyze automatically - this often identifies the root cause
 !analyze -v
 
-# 3. Set exception context
+# 3. Set exception context to see the exact state at crash
 .ecxr
 
-# 4. View stack trace
+# 4. View stack trace with all details
 kv
+
+# 5. Check the exception code - 0xC000041D typically means "Fatal App Exit"
+#    This usually indicates an unhandled exception was caught by a previous handler
+#    Look for the original exception by examining the call stack
+
+# 6. Examine the instruction pointer
+u @rip
+
+# 7. Check register values (they often contain useful clues)
+r
+
+# 8. If there's a faulting address, examine memory at that location
+dd <address>
+
+# 9. Look for symbols near the crash point
+ln @rip
+
+# 10. Check for nested exceptions or previous handlers
+!exchain
+```
+
+### Understanding Exception Code 0xC000041D
+
+The exception code **0xC000041D** (Fatal App Exit / Unhandled Exception) is special because it indicates:
+
+1. **Secondary Exception**: An exception occurred while handling another exception
+2. **Unhandled Exception Chain**: A previous exception handler caught an exception but couldn't properly handle it
+3. **Possible Causes**:
+   - Exception in exception handler code itself
+   - Stack corruption during exception handling
+   - Missing or incorrect exception handler setup
+   - Termination after failed exception handling
+
+**Debugging Strategy for 0xC000041D:**
+1. Look at the stack trace to identify what exception handler was active
+2. Check for any previous exceptions in the logs before the 0xC000041D
+3. Examine the recent commands log - often shows what operation triggered the original issue
+4. Review the register state and memory to understand the original fault
+5. Use `!analyze -v` output to find the "FAULTING_IP" and "EXCEPTION_RECORD" details
 
 # 5. Examine the faulting instruction
 u @rip
