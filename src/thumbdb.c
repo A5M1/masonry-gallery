@@ -146,6 +146,10 @@ static int compaction_mutex_inited = 0;
 static int compaction_requested = 0;
 static char compaction_target[PATH_MAX];
 
+static unsigned int thumbdb_wal_chunk_seq = 0;
+static thread_mutex_t thumbdb_wal_seq_mutex;
+static int thumbdb_wal_seq_mutex_inited = 0;
+
 static time_t db_last_mtime = 0;
 static off_t db_last_size = 0;
 static int db_rebuilding = 0;
@@ -382,6 +386,50 @@ static int persist_tx_ops(tx_op_t* ops) {
     fclose(f);
     struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     return 0;
+}
+
+static void build_wal_dir_from_dbpath(char* wal_dir_out, size_t out_len) {
+    wal_dir_out[0] = '\0';
+    if (!db_path || db_path[0] == '\0') return;
+    char per_thumbs_root[PATH_MAX];
+    strncpy(per_thumbs_root, db_path, sizeof(per_thumbs_root) - 1);
+    per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0';
+    char* last = strrchr(per_thumbs_root, DIR_SEP);
+    if (!last) return;
+    *last = '\0';
+    snprintf(wal_dir_out, out_len, "%s" DIR_SEP_STR "wal", per_thumbs_root);
+}
+
+static int thumbdb_write_wal_entry_internal(const char* per_thumbs_root, const char* key, const char* value) {
+    if (!per_thumbs_root || !key) return -1;
+    if (!thumbdb_wal_seq_mutex_inited) { if (thread_mutex_init(&thumbdb_wal_seq_mutex) == 0) thumbdb_wal_seq_mutex_inited = 1; }
+    if (!thumbdb_wal_seq_mutex_inited) return -1;
+    char wal_dir[PATH_MAX]; wal_dir[0] = '\0';
+    snprintf(wal_dir, sizeof(wal_dir), "%s" DIR_SEP_STR "wal", per_thumbs_root);
+    if (!is_dir(wal_dir)) platform_make_dir(wal_dir);
+    unsigned int seq = 0;
+    thread_mutex_lock(&thumbdb_wal_seq_mutex);
+    seq = ++thumbdb_wal_chunk_seq;
+    thread_mutex_unlock(&thumbdb_wal_seq_mutex);
+    long long ts = (long long)time(NULL);
+    if (ts < 0) ts = 0;
+    char chunk_path[PATH_MAX];
+    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR "chunk-%lld-%u-%u.wal", wal_dir, ts, seq, platform_get_pid());
+    FILE* f = platform_fopen(chunk_path, "w");
+    if (!f) return -1;
+    fprintf(f, "%s\n%s\n", key, value ? value : "");
+    fflush(f);
+    platform_fsync(fileno(f));
+    fclose(f);
+    LOG_DEBUG("thumbdb_write_wal_entry: wrote wal chunk %s for key=%s", chunk_path, key);
+    return 0;
+}
+
+static int thumbdb_write_wal_entry(const char* key, const char* value) {
+    char wal_dir[PATH_MAX]; wal_dir[0] = '\0';
+    build_wal_dir_from_dbpath(wal_dir, sizeof(wal_dir));
+    if (!wal_dir[0]) return -1;
+    return thumbdb_write_wal_entry_internal(wal_dir, key, value);
 }
 
 int thumbdb_open(void) {
@@ -802,6 +850,7 @@ void thumbdb_request_compaction(void) {
         strncpy(compaction_target, db_path, sizeof(compaction_target) - 1);
         compaction_target[sizeof(compaction_target) - 1] = '\0';
         compaction_requested = 1;
+        LOG_DEBUG("thumbdb_request_compaction: requested compaction for target=%s", compaction_target);
     }
     thread_mutex_unlock(&compaction_mutex);
 }
@@ -817,8 +866,12 @@ int thumbdb_perform_requested_compaction(void) {
         compaction_requested = 0;
         should_run = 1;
     }
+    else if (compaction_requested) {
+        LOG_DEBUG("thumbdb_perform_requested_compaction: compaction requested for %s but current db_path=%s", compaction_target, db_path);
+    }
     thread_mutex_unlock(&compaction_mutex);
     if (should_run) {
+        LOG_DEBUG("thumbdb_perform_requested_compaction: running compaction for %s", db_path);
         thumbdb_compact();
         return 1;
     }
@@ -1009,15 +1062,12 @@ int thumbdb_set(const char* key, const char* value) {
     
     int r = ht_set_internal(db_key, db_value);
     if (r == 0) {
-        FILE* f = platform_fopen(db_path, "ab");
-        if (f) {
-            append_db_record(f, db_key, db_value);
-            fflush(f);
-            platform_fsync(fileno(f));
-            fclose(f);
-            struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        int wal_ret = thumbdb_write_wal_entry(db_key, db_value);
+        if (wal_ret == 0) {
+            thumbdb_request_compaction();
         } else {
-            LOG_WARN("thumbdb: failed to open db file for append in thumbdb_set");
+            LOG_WARN("thumbdb_set: failed to write WAL entry for %s", db_key);
+            r = -1; // propagate failure to caller
         }
     }
     
@@ -1091,14 +1141,9 @@ int thumbdb_delete(const char* key) {
 
     ht_set_internal(hash_key, NULL);
 
-    tx_op_t single_op;
-    single_op.key = (char*)hash_key;
-    single_op.val = NULL;
-    single_op.skip = 0;
-    single_op.next = NULL;
-    int ret = persist_tx_ops(&single_op);
+    int ret = thumbdb_write_wal_entry(hash_key, NULL);
     if (ret == 0) {
-        struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+        thumbdb_request_compaction();
     }
     
     thread_mutex_unlock(&db_mutex);
@@ -1151,6 +1196,7 @@ static int rh_compact_write_cb(const char* key, const unsigned char* val, size_t
 int thumbdb_compact(void) {
     if (!db_inited) return -1;
     if (ensure_index_uptodate() != 0) return -1;
+    LOG_DEBUG("thumbdb_compact: starting for %s", db_path);
     thread_mutex_lock(&db_mutex);
     
     if (!rh_tbl) {
@@ -1393,19 +1439,11 @@ int thumbdb_sweep_orphans(void) {
         ht_set_internal(dels[i], NULL);
     }
     
-    FILE* f = platform_fopen(db_path, "ab");
-    if (f) {
-        for (size_t i = 0; i < del_count; ++i) {
-            append_db_record(f, dels[i], NULL);
-        }
-        fflush(f);
-        platform_fsync(fileno(f));
-        fclose(f);
-        struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
+    for (size_t i = 0; i < del_count; ++i) {
+        int wr = thumbdb_write_wal_entry(dels[i], NULL);
+        if (wr != 0) LOG_WARN("thumbdb_sweep_orphans: failed to write WAL deletion for %s", dels[i]);
     }
-    else {
-        LOG_WARN("thumbdb: failed to open db for appending orphan deletions");
-    }
+    thumbdb_request_compaction();
     thread_mutex_unlock(&db_mutex);
 
     for (size_t i = 0; i < del_count; ++i) free(dels[i]); free(dels);

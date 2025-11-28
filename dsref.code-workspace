@@ -2,6 +2,12 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "G:/msys64.new/home/Anon/mp4box"
+		},
+		{
+			"path": "E:/quickjs"
 		}
 	],
 	"settings": {

@@ -22,12 +22,23 @@ static void* start_background_wrapper(void* arg) {
 	return NULL;
 }
 
-typedef struct { char* key; char* val; } api_kv_t;
-typedef struct { api_kv_t* arr; size_t cap; size_t count; int err; } api_collect_ctx_t;
+typedef struct { 
+	char* key; 
+	char* val; 
+} api_kv_t;
+typedef struct { 
+	api_kv_t* arr; 
+	size_t cap; 
+	size_t count; 
+	int err; 
+} api_collect_ctx_t;
+
 static void api_thumbdb_collect_cb(const char* key, const char* value, void* uctx) {
 	api_collect_ctx_t* c = (api_collect_ctx_t*)uctx;
-	if (!c) return;
-	if (!key) return;
+	if (!c) 
+		return;
+	if (!key) 
+		return;
 	if (c->count + 1 > c->cap) {
 		size_t nc = c->cap ? c->cap * 2 : 256;
 		api_kv_t* tmp = realloc(c->arr, nc * sizeof(*tmp));
@@ -40,7 +51,10 @@ static void api_thumbdb_collect_cb(const char* key, const char* value, void* uct
 	}
 	c->arr[c->count].key = key ? strdup(key) : NULL;
 	c->arr[c->count].val = value ? strdup(value) : NULL;
-	if ((c->arr[c->count].key && !c->arr[c->count].key) || (value && !c->arr[c->count].val)) { c->err = 1; return; }
+	if ((c->arr[c->count].key && !c->arr[c->count].key) || (value && !c->arr[c->count].val)) { 
+		c->err = 1; 
+		return; 
+	}
 	c->count++;
 }
 
@@ -187,7 +201,10 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	snprintf(target, sizeof(target), "%s/%s", used_base, dir_to_use ? dir_to_use : "");
 	normalize_path(target);
 	char target_real[PATH_MAX]; char base_real[PATH_MAX];
-	if (!resolve_and_validate_target(used_base, dir_to_use, target_real, sizeof(target_real), base_real, sizeof(base_real))) { if (out_len) *out_len = 0; return NULL; }
+	if (!resolve_and_validate_target(used_base, dir_to_use, target_real, sizeof(target_real), base_real, sizeof(base_real))) { 
+		if (out_len) *out_len = 0;
+			return NULL; 
+	}
 	{
 		if (page <= 1) {
 			char* trg = strdup(target_real);
@@ -214,9 +231,17 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		}
 		dir_close(&it);
 	}
-	if (n == 0) { if (files) free(files); if (out_len) *out_len = 0; return NULL; }
+	if (n == 0) { 
+		if (files) free(files); 
+		if (out_len) *out_len = 0; 
+		return NULL; 
+	}
 	qsort(files, n, sizeof(char*), p_strcmp);
-	int total = (int)n; int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE; if (totalPages == 0) totalPages = 1; if (page < 1) page = 1; if (page > totalPages) page = totalPages;
+	int total = (int)n; 
+	int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE; 
+	if (totalPages == 0) totalPages = 1; 
+	if (page < 1) page = 1; 
+	if (page > totalPages) page = totalPages;
 	int start = (page - 1) * ITEMS_PER_PAGE; int end = start + ITEMS_PER_PAGE; if (end > total) end = total;
 
 	size_t hcap = 8192;
@@ -618,12 +643,16 @@ void handle_api_folders(int c, char* qs, bool keep_alive) {
 		if (v) { strncpy(dirparam, v, PATH_MAX - 1); dirparam[PATH_MAX - 1] = '\0'; SAFE_FREE(v); }
 	}
 	sanitize_dirparam(dirparam);
-	char target[PATH_MAX]; snprintf(target, sizeof(target), "%s/%s", BASE_DIR, dirparam); normalize_path(target);
+	char target[PATH_MAX]; 
+	snprintf(target, sizeof(target), "%s/%s", BASE_DIR, dirparam); 
+	normalize_path(target);
 	char base_real[PATH_MAX], target_real[PATH_MAX];
 	if (!real_path(BASE_DIR, base_real) || !real_path(target, target_real)
 		|| !safe_under(base_real, target_real) || !is_dir(target_real)) {
 		const char* msg = "{\"error\":\"Invalid directory\"}";
-		send_header(c, 400, "Bad Request", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send_header(c, 400, 
+			"Bad Request", 
+			"application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
 		send(c, msg, (int)strlen(msg), 0);
 		return;
 	}
@@ -632,10 +661,15 @@ void handle_api_folders(int c, char* qs, bool keep_alive) {
 	if (dir_open(&it, target_real)) {
 		const char* name;
 		while ((name = dir_next(&it))) {
-			if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
-			char full[PATH_MAX]; path_join(full, target_real, name);
+			if (!strcmp(name, ".") || !strcmp(name, "..")) 
+				continue;
+			char full[PATH_MAX]; 
+			path_join(full, target_real, name);
 			if (is_dir(full) && !has_nogallery(full) && has_media_rec(full)) {
-				if (n == alloc) { alloc = alloc ? alloc * 2 : 16; names = realloc(names, alloc * sizeof(char*)); }
+				if (n == alloc) { 
+					alloc = alloc ? alloc * 2 : 16; 
+					names = realloc(names, alloc * sizeof(char*)); 
+				}
 				names[n++] = strdup(name);
 			}
 		}

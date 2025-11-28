@@ -14,7 +14,7 @@ atomic_int ffmpeg_active = ATOMIC_VAR_INIT(0);
 static atomic_int magick_active = ATOMIC_VAR_INIT(0);
 #define MAX_MAGICK 2
 #define WAL_DIR_NAME "wal"
-#define WAL_CHUNK_FMT "chunk-%lld-%u.wal"
+#define WAL_CHUNK_FMT "chunk-%lld-%u-%u.wal"
 static atomic_uint wal_chunk_seq = ATOMIC_VAR_INIT(0);
 typedef struct {
     char input[PATH_MAX];
@@ -50,7 +50,7 @@ static int wal_write_entry(const char* per_thumbs_root, const char* key, const c
     long long ts = (long long)time(NULL);
     char chunk_path[PATH_MAX];
     if (ts < 0) ts = 0;
-    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq);
+    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq, platform_get_pid());
     FILE* f = platform_fopen(chunk_path, "w");
     if (!f) return -1;
     fprintf(f, "%s\n%s\n", key, value ? value : "");
@@ -1865,7 +1865,7 @@ void scan_and_generate_missing_thumbs(void) {
 }
 static void save_wal_chunk(int chunk_id, const char* data) {
     char chunk_path[PATH_MAX];
-    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_DIR_NAME DIR_SEP_STR WAL_CHUNK_FMT, BASE_DIR, (long long)time(NULL), chunk_id);
+    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_DIR_NAME DIR_SEP_STR WAL_CHUNK_FMT, BASE_DIR, (long long)time(NULL), chunk_id, platform_get_pid());
     FILE* f = platform_fopen(chunk_path, "w");
     if (f) {
         fprintf(f, "%s", data);
