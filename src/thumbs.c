@@ -1971,6 +1971,19 @@ void scan_and_generate_missing_thumbs(void) {
     char** folders = get_gallery_folders(&count);
     if (!folders || count == 0) return;
     for (size_t i = 0; i < count; ++i) {
+        diriter it;
+        if (!dir_open(&it, folders[i])) continue;
+        const char* name;
+        bool has_media = false;
+        while ((name = dir_next(&it))) {
+            if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "thumbs")) continue;
+            if (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS)) {
+                has_media = true;
+                break;
+            }
+        }
+        dir_close(&it);
+        if (!has_media) continue;
         {
             char tmpf[PATH_MAX]; strncpy(tmpf, folders[i], sizeof(tmpf) - 1); tmpf[sizeof(tmpf) - 1] = '\0'; strip_trailing_sep(tmpf);
             LOG_INFO("Scanning and generating missing thumbs for: %s", tmpf);

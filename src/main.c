@@ -49,7 +49,6 @@ int main(int argc, char** argv) {
         }
     }
     LOG_DEBUG("Scanning for missing thumbnails on startup...");
-    scan_and_generate_missing_thumbs();
     LOG_INFO("Starting periodic thumbnail maintenance...");
     start_periodic_thumb_maintenance(300);
     LOG_INFO("Starting WAL processing thread for periodic WAL chunk processing...");

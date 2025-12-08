@@ -126,37 +126,37 @@ $(call obj_dir,linux_arm)/%.o: $(SRC_DIR)/%.c
 # ======================================================
 # Linking rules
 all: x64
-x64: $(OBJS_X64)
+x64: buildbn $(OBJS_X64)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_X64)"
 	@$(CC_X64) -o $(EXEC_X64) $(OBJS_X64) $(LDFLAGS_WIN)
 	@$(MAKE) copy-assets
 
-arm: $(OBJS_ARM)
+arm: buildbn $(OBJS_ARM)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_ARM)"
 	@$(CC_ARM) -o $(EXEC_ARM) $(OBJS_ARM) $(LDFLAGS_WIN)
 	@$(MAKE) copy-assets
 
-debug: $(OBJS_X64_DEBUG)
+debug: buildbn $(OBJS_X64_DEBUG)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_X64_DEBUG)"
 	@$(CC_X64) -o $(EXEC_X64_DEBUG) $(OBJS_X64_DEBUG) $(LDFLAGS_WIN_DEBUG)
 	@$(MAKE) copy-assets
 
-debug-arm: $(OBJS_ARM_DEBUG)
+debug-arm: buildbn $(OBJS_ARM_DEBUG)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_ARM_DEBUG)"
 	@$(CC_ARM) -o $(EXEC_ARM_DEBUG) $(OBJS_ARM_DEBUG) $(LDFLAGS_WIN_DEBUG)
 	@$(MAKE) copy-assets
 
-linux-x64: $(OBJS_LINUX_X64)
+linux-x64: buildbn $(OBJS_LINUX_X64)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_LINUX_X64)"
 	@$(CC_LINUX_X64) -o $(EXEC_LINUX_X64) $(OBJS_LINUX_X64) $(LDFLAGS_LINUX)
 	@$(MAKE) copy-assets
 
-linux-arm: $(OBJS_LINUX_ARM)
+linux-arm: buildbn $(OBJS_LINUX_ARM)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_LINUX_ARM)"
 	@$(CC_LINUX_ARM) -o $(EXEC_LINUX_ARM) $(OBJS_LINUX_ARM) $(LDFLAGS_LINUX)
@@ -180,17 +180,24 @@ rust-debug:
 
 # ======================================================
 # Helpers and meta targets
-copy-assets: buildbn
-	@echo "[COPY] Copying assets (views/, public/)..."
-	@mkdir -p $(DIST_DIR)
-	@if [ -d "$(BUILDBN_DIR)/dist" ]; then echo "[COPY] copying buildbn/dist -> public/bundle"; mkdir -p public/bundle; cp -r $(BUILDBN_DIR)/dist/*.js public/bundle/ 2>/dev/null || true; cp -r $(BUILDBN_DIR)/dist/*.map public/bundle/ 2>/dev/null || true; fi
-	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
-	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi
-
-
 .PHONY: buildbn
 buildbn:
-	@if [ -d "$(BUILDBN_DIR)" ]; then echo "[BUILDBN] Building web bundle in $(BUILDBN_DIR)..."; cd $(BUILDBN_DIR) && if [ -f package.json ]; then npm run build || node build.js || true; else node build.js || true; fi; fi
+	@if [ -d "$(BUILDBN_DIR)" ]; then \
+		echo "[BUILDBN] Building web bundle..."; \
+		cd $(BUILDBN_DIR) && (npm run build || node build.js) 2>/dev/null || true; \
+	fi
+	@if [ -d "$(BUILDBN_DIR)/dist" ]; then \
+		echo "[COPY] buildbn/dist -> public/bundle"; \
+		mkdir -p public/bundle; \
+		cp $(BUILDBN_DIR)/dist/*.js public/bundle/ 2>/dev/null || true; \
+		cp $(BUILDBN_DIR)/dist/*.map public/bundle/ 2>/dev/null || true; \
+	fi
+
+copy-assets:
+	@echo "[COPY] Copying assets to $(DIST_DIR)..."
+	@mkdir -p $(DIST_DIR)
+	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
+	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi
 
 all-platforms: x64 arm linux-x64 linux-arm rust-release
 	@echo "[DONE] Built all platforms successfully."

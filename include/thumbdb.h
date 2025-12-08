@@ -22,5 +22,9 @@ int thumbdb_start_async_worker(void);
 void thumbdb_stop_async_worker(void);
 int thumbdb_set_async(const char* key, const char* value);
 int thumbdb_delete_async(const char* key);
+int thumbdb_validate(void);
+int thumbdb_verify_thumbnails(void);
+int thumbdb_verify_records(void);
+int thumbdb_seek_to_record(const char* filename, char* buf, size_t buflen);
 
 
