@@ -1172,6 +1172,7 @@ static int load_database(void) {
     current_record_seq = 0;
     int is_first = 1;
     long records_end_pos = 0;
+    int in_transaction = 0;
     while (!feof(f)) {
         uint8_t peek;
         long pos = ftell(f);
@@ -1180,6 +1181,30 @@ static int load_database(void) {
         if (file_header.has_index && peek == ((MV_CONSTANTS.index_magic >> 8) & 0xFF)) {
             records_end_pos = pos;
             break;
+        }
+        if (peek == MV_OPCODES.tx_begin) {
+            fgetc(f);
+            in_transaction = 1;
+            continue;
+        }
+        if (peek == MV_OPCODES.tx_end) {
+            fgetc(f);
+            in_transaction = 0;
+            continue;
+        }
+        if (peek == MV_OPCODES.delete_op) {
+            fgetc(f);
+            uint64_t filename_val;
+            uint64_t ts;
+            if (read_varint(f, &filename_val) == 0 && read_varint(f, &ts) == 0) {
+                uint8_t end_marker;
+                if (fread(&end_marker, 1, 1, f) == 1 && end_marker == MV_OPCODES.end) {
+                    char key[64];
+                    snprintf(key, sizeof(key), "%llu", (unsigned long long)filename_val);
+                    rh_remove(rh_tbl, key, strlen(key));
+                }
+            }
+            continue;
         }
         record_t rec = {0};
         rec.record_sequence = current_record_seq++;
@@ -1539,6 +1564,56 @@ int thumbdb_seek_to_record(const char* filename, char* buf, size_t buflen) {
     return 0;
 }
 
+static int copy_to_snapshot_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    rh_table_t* snap = (rh_table_t*)ctx;
+    rh_insert(snap, key, strlen(key), val, val_len);
+    return 0;
+}
+
+static int copy_from_snapshot_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    rh_table_t* tbl = (rh_table_t*)ctx;
+    rh_insert(tbl, key, strlen(key), val, val_len);
+    return 0;
+}
+
+static int write_changed_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    FILE* fp = (FILE*)ctx;
+    unsigned char* old_val = NULL;
+    size_t old_len = 0;
+    size_t key_len = strlen(key);
+    int found = rh_find(tx_snapshot, key, key_len, &old_val, &old_len);
+    if (found != 0 || !old_val || old_len != val_len || memcmp(old_val, val, val_len) != 0) {
+        char key_str[512];
+        if (key_len >= sizeof(key_str)) key_len = sizeof(key_str) - 1;
+        memcpy(key_str, key, key_len);
+        key_str[key_len] = '\0';
+        char val_str[PATH_MAX];
+        if (val_len >= sizeof(val_str)) val_len = sizeof(val_str) - 1;
+        memcpy(val_str, val, val_len);
+        val_str[val_len] = '\0';
+        record_t rec = {0};
+        rec.record_sequence = current_record_seq++;
+        rec.filename = strdup(key_str);
+        rec.timestamp = (uint64_t)time(NULL);
+        rec.meta.type = get_media_type_from_path(val_str);
+        rec.meta.animated = 0;
+        rec.meta.thumb_mode = 0;
+        rec.meta.hash_override = 0;
+        rec.meta.has_extensions = 0;
+        rec.meta.hash_mode = file_header.default_hash_mode;
+        if (parse_path_into_dirs(val_str, &rec.dir_indexes, &rec.dir_count) == 0) {
+            if (crypto_md5_file(val_str, rec.hash) != 0) {
+                memset(rec.hash, 0, sizeof(rec.hash));
+            }
+            rec.hash_len = get_hash_length(rec.meta.hash_mode);
+            int is_first = (rec.record_sequence == 0);
+            write_record(fp, &rec, is_first);
+        }
+        free_record(&rec);
+    }
+    return 0;
+}
+
 int thumbdb_tx_begin(void) {
     thread_mutex_lock(&db_mutex);
     if (tx_active) {
@@ -1551,6 +1626,7 @@ int thumbdb_tx_begin(void) {
         thread_mutex_unlock(&db_mutex);
         return -1;
     }
+    rh_iterate(rh_tbl, copy_to_snapshot_cb, tx_snapshot);
     tx_active = 1;
     thread_mutex_unlock(&db_mutex);
     return 0;
@@ -1562,7 +1638,12 @@ int thumbdb_tx_abort(void) {
         thread_mutex_unlock(&db_mutex);
         return -1;
     }
-    if (tx_snapshot) {
+    if (tx_snapshot && rh_tbl) {
+        rh_destroy(rh_tbl);
+        rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
+        if (rh_tbl) {
+            rh_iterate(tx_snapshot, copy_from_snapshot_cb, rh_tbl);
+        }
         rh_destroy(tx_snapshot);
         tx_snapshot = NULL;
     }
@@ -1577,6 +1658,15 @@ int thumbdb_tx_commit(void) {
         thread_mutex_unlock(&db_mutex);
         return -1;
     }
+    FILE* f = platform_fopen(db_path, "ab");
+    if (f) {
+        fputc(MV_OPCODES.tx_begin, f);
+        rh_iterate(rh_tbl, write_changed_cb, f);
+        fputc(MV_OPCODES.tx_end, f);
+        fflush(f);
+        platform_fsync(fileno(f));
+        fclose(f);
+    }
     if (tx_snapshot) {
         rh_destroy(tx_snapshot);
         tx_snapshot = NULL;
@@ -1590,40 +1680,42 @@ int thumbdb_set(const char* key, const char* value) {
     if (!rh_tbl || !key || !value) return -1;
     thread_mutex_lock(&db_mutex);
     
-    record_t rec = {0};
-    rec.record_sequence = current_record_seq++;
-    rec.filename = strdup(key);
-    rec.timestamp = (uint64_t)time(NULL);
-    rec.meta.type = get_media_type_from_path(value);
-    rec.meta.animated = 0;
-    rec.meta.thumb_mode = 0;
-    rec.meta.hash_override = 0;
-    rec.meta.has_extensions = 0;
-    rec.meta.hash_mode = file_header.default_hash_mode;
-    
-    if (parse_path_into_dirs(value, &rec.dir_indexes, &rec.dir_count) != 0) {
-        free(rec.filename);
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    if (crypto_md5_file(value, rec.hash) != 0) {
-        memset(rec.hash, 0, sizeof(rec.hash));
-    }
-    rec.hash_len = get_hash_length(rec.meta.hash_mode);
-    
-    FILE* f = platform_fopen(db_path, "ab");
-    if (f) {
-        int is_first = (rec.record_sequence == 0);
-        write_record(f, &rec, is_first);
-        fflush(f);
-        platform_fsync(fileno(f));
-        fclose(f);
+    if (!tx_active) {
+        record_t rec = {0};
+        rec.record_sequence = current_record_seq++;
+        rec.filename = strdup(key);
+        rec.timestamp = (uint64_t)time(NULL);
+        rec.meta.type = get_media_type_from_path(value);
+        rec.meta.animated = 0;
+        rec.meta.thumb_mode = 0;
+        rec.meta.hash_override = 0;
+        rec.meta.has_extensions = 0;
+        rec.meta.hash_mode = file_header.default_hash_mode;
+        
+        if (parse_path_into_dirs(value, &rec.dir_indexes, &rec.dir_count) != 0) {
+            free(rec.filename);
+            thread_mutex_unlock(&db_mutex);
+            return -1;
+        }
+        
+        if (crypto_md5_file(value, rec.hash) != 0) {
+            memset(rec.hash, 0, sizeof(rec.hash));
+        }
+        rec.hash_len = get_hash_length(rec.meta.hash_mode);
+        
+        FILE* f = platform_fopen(db_path, "ab");
+        if (f) {
+            int is_first = (rec.record_sequence == 0);
+            write_record(f, &rec, is_first);
+            fflush(f);
+            platform_fsync(fileno(f));
+            fclose(f);
+        }
+        free_record(&rec);
     }
     
     int ret = rh_insert(rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
     
-    free_record(&rec);
     thread_mutex_unlock(&db_mutex);
     return ret;
 }
@@ -1648,17 +1740,19 @@ int thumbdb_delete(const char* key) {
     if (!rh_tbl || !key) return -1;
     thread_mutex_lock(&db_mutex);
     
-    FILE* f = platform_fopen(db_path, "ab");
-    if (f) {
-        fputc(MV_OPCODES.delete_op, f);
-        uint64_t filename_val = strtoull(key, NULL, 10);
-        write_varint(f, filename_val);
-        uint64_t ts = (uint64_t)time(NULL);
-        write_varint(f, ts);
-        fputc(MV_OPCODES.end, f);
-        fflush(f);
-        platform_fsync(fileno(f));
-        fclose(f);
+    if (!tx_active) {
+        FILE* f = platform_fopen(db_path, "ab");
+        if (f) {
+            fputc(MV_OPCODES.delete_op, f);
+            uint64_t filename_val = strtoull(key, NULL, 10);
+            write_varint(f, filename_val);
+            uint64_t ts = (uint64_t)time(NULL);
+            write_varint(f, ts);
+            fputc(MV_OPCODES.end, f);
+            fflush(f);
+            platform_fsync(fileno(f));
+            fclose(f);
+        }
     }
     
     int ret = rh_remove(rh_tbl, key, strlen(key));
@@ -1672,6 +1766,91 @@ void thumbdb_iterate(void (*cb)(const char* key, const char* value, void* ctx), 
     struct iter_ctx { void (*cb)(const char*, const char*, void*); void* user; } ic = {cb, ctx};
     rh_iterate(rh_tbl, NULL, &ic);
     thread_mutex_unlock(&db_mutex);
+}
+
+char* thumbdb_get_record_detail(const char* key) {
+    if (!key) return NULL;
+    FILE* f = platform_fopen(db_path, "rb");
+    if (!f) return NULL;
+    uint8_t magic_hi, magic_lo;
+    if (fread(&magic_hi, 1, 1, f) != 1 || fread(&magic_lo, 1, 1, f) != 1) { fclose(f); return NULL; }
+    uint16_t magic = ((uint16_t)magic_hi << 8) | magic_lo;
+    if (magic != MV_CONSTANTS.db_magic) { fclose(f); return NULL; }
+    uint8_t version;
+    if (fread(&version, 1, 1, f) != 1) { fclose(f); return NULL; }
+    uint8_t flags;
+    if (fread(&flags, 1, 1, f) != 1) { fclose(f); return NULL; }
+    int has_index = (flags >> 7) & 1;
+    uint64_t record_count, base_timestamp, dir_table_size;
+    if (read_varint(f, &record_count) != 0) { fclose(f); return NULL; }
+    if (read_uint64_le(f, &base_timestamp) != 0) { fclose(f); return NULL; }
+    if (read_varint(f, &dir_table_size) != 0) { fclose(f); return NULL; }
+    for (uint64_t i = 0; i < dir_table_size; i++) {
+        uint64_t prefix_len, suffix_len;
+        if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); return NULL; }
+        if (suffix_len > 0) fseek(f, suffix_len, SEEK_CUR);
+    }
+    int is_first = 1;
+    while (!feof(f)) {
+        uint8_t peek;
+        long pos = ftell(f);
+        if (fread(&peek, 1, 1, f) != 1) break;
+        fseek(f, pos, SEEK_SET);
+        if (has_index && peek == ((MV_CONSTANTS.index_magic >> 8) & 0xFF)) break;
+        record_t rec = {0};
+        if (read_record(f, &rec, is_first) != 0) { if (feof(f)) break; free_record(&rec); continue; }
+        is_first = 0;
+        if (strcmp(rec.filename, key) == 0) {
+            char* result = malloc(8192);
+            if (!result) { free_record(&rec); fclose(f); return NULL; }
+            char hash_str[64] = "";
+            if (rec.hash_len > 0) {
+                char* hp = hash_str;
+                for (size_t i = 0; i < rec.hash_len && i < 16; i++) {
+                    hp += snprintf(hp, sizeof(hash_str) - (hp - hash_str), "%02x", rec.hash[i]);
+                }
+            }
+            const char* type_str = "unknown";
+            switch (rec.meta.type) {
+                case MEDIA_JPG: type_str = "JPG"; break;
+                case MEDIA_PNG: type_str = "PNG"; break;
+                case MEDIA_GIF: type_str = "GIF"; break;
+                case MEDIA_WEBP: type_str = "WEBP"; break;
+                case MEDIA_MP4: type_str = "MP4"; break;
+                case MEDIA_WEBM: type_str = "WEBM"; break;
+            }
+            const char* hash_mode_str = "unknown";
+            switch (rec.meta.hash_mode) {
+                case HASH_FULL_MD5: hash_mode_str = "FULL_MD5"; break;
+                case HASH_HALF_MD5: hash_mode_str = "HALF_MD5"; break;
+                case HASH_RIPEMD128: hash_mode_str = "RIPEMD128"; break;
+                case HASH_NONE: hash_mode_str = "NONE"; break;
+            }
+            snprintf(result, 8192, "{\"record_seq\":%llu,\"timestamp\":%llu,\"media_type\":\"%s\",\"animated\":%s,\"thumb_mode\":%d,\"hash_mode\":\"%s\",\"hash\":\"%s\",\"dir_count\":%zu,\"width\":%u,\"height\":%u,\"duration\":%u,\"crc32\":%u,\"orientation\":%u,\"gps_lat\":%.6f,\"gps_lon\":%.6f}",
+                (unsigned long long)rec.record_sequence,
+                (unsigned long long)rec.timestamp,
+                type_str,
+                rec.meta.animated ? "true" : "false",
+                rec.meta.thumb_mode,
+                hash_mode_str,
+                hash_str,
+                rec.dir_count,
+                rec.width,
+                rec.height,
+                rec.duration,
+                rec.crc32,
+                rec.orientation,
+                rec.gps_lat,
+                rec.gps_lon
+            );
+            free_record(&rec);
+            fclose(f);
+            return result;
+        }
+        free_record(&rec);
+    }
+    fclose(f);
+    return NULL;
 }
 
 int thumbdb_find_for_media(const char* media_path, char* out_key, size_t out_key_len) {
@@ -1811,7 +1990,7 @@ int thumbdb_compact(void) {
         LOG_WARN("thumbdb_compact: failed to write index block");
     } else {
         file_header.has_index = 1;
-        LOG_INFO("thumbdb_compact: wrote index with %zu entries", index_table.count);
+        LOG_DEBUG("thumbdb_compact: wrote index with %zu entries", index_table.count);
     }
     
     fflush(f);

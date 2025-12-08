@@ -26,5 +26,6 @@ int thumbdb_validate(void);
 int thumbdb_verify_thumbnails(void);
 int thumbdb_verify_records(void);
 int thumbdb_seek_to_record(const char* filename, char* buf, size_t buflen);
+char* thumbdb_get_record_detail(const char* key);
 
 

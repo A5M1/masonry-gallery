@@ -45,33 +45,43 @@
 	function renderList(items) {
 		var filter = el("filter").value.toLowerCase();
 		var out = [
-			"<table><thead><tr><th>Key</th><th>Thumb tokens</th><th>Path (preview)</th><th>Actions</th></tr></thead><tbody>"
+			"<table><thead><tr><th>Key</th><th>Type</th><th>Hash</th><th>Dimensions</th><th>Timestamp</th><th>Path</th><th>Actions</th></tr></thead><tbody>"
 		];
 		for (var i = 0; i < items.length; i++) {
 			var it = items[i];
 			if (!it || !it.key) continue;
 			var keyLower = it.key.toLowerCase();
 			if (filter && keyLower.indexOf(filter) === -1) continue;
-			var small = it.small && it.small !== "null" ? it.small : "";
-			var large = it.large && it.large !== "null" ? it.large : "";
-			var info =
-				"Small: " +
-				(small || "missing") +
-				" • Large: " +
-				(large || "missing");
 			var value = it.value || "";
-			var preview =
-				value.length > 120 ? value.substr(0, 120) + "..." : value;
+			var preview = value.length > 60 ? value.substr(0, 60) + "..." : value;
+			var detail = it.detail || {};
+			var type = detail.media_type || "?";
+			var animated = detail.animated ? "🎬" : "";
+			var hash = detail.hash ? detail.hash.substr(0, 8) + "..." : "none";
+			var dims = "";
+			if (detail.width && detail.height) {
+				dims = detail.width + "x" + detail.height;
+			}
+			if (detail.duration) {
+				dims += " (" + detail.duration + "s)";
+			}
+			var ts = detail.timestamp ? new Date(detail.timestamp * 1000).toISOString().substr(0, 19).replace("T", " ") : "";
 			out.push(
 				"<tr><td>" +
 					escapeHtml(it.key) +
 					"</td><td>" +
-					escapeHtml(info) +
-					'</td><td class="previewCell"><pre style="white-space:pre-wrap;">' +
+					escapeHtml(type + animated) +
+					"</td><td><code style='font-size:9px'>" +
+					escapeHtml(hash) +
+					"</code></td><td>" +
+					escapeHtml(dims) +
+					"</td><td style='font-size:10px'>" +
+					escapeHtml(ts) +
+					"</td><td style='font-size:11px'>" +
 					escapeHtml(preview) +
-					'</pre></td><td><button data-key="' +
+					'</td><td><button data-key="' +
 					escapeAttr(it.key) +
-					'" class="view">View</button></td></tr>'
+					'" class="view">Detail</button></td></tr>'
 			);
 		}
 		out.push("</tbody></table>");
@@ -94,17 +104,34 @@
 				return r.json();
 			})
 			.then(obj => {
-				var smallField = el("editorSmall");
-				var largeField = el("editorLarge");
 				el("editor").style.display = "block";
 				el("editorKey").textContent = obj.key;
 				el("editorValue").value = obj.value || "";
-				if (smallField)
-					smallField.value =
-						obj.small && obj.small !== "null" ? obj.small : "";
-				if (largeField)
-					largeField.value =
-						obj.large && obj.large !== "null" ? obj.large : "";
+				var detail = obj.detail || {};
+				var detailHtml = "<h3>Binary Format Fields (MediaVault v2.1)</h3>";
+				detailHtml += "<table style='width:100%;border-collapse:collapse'>";
+				detailHtml += "<tr><th style='text-align:left;padding:4px;border:1px solid #ccc'>Field</th><th style='text-align:left;padding:4px;border:1px solid #ccc'>Value</th></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Record Sequence</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.record_seq || 0) + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Filename</td><td style='padding:4px;border:1px solid #ccc'>" + escapeHtml(obj.key) + "</td></tr>";
+				var ts = detail.timestamp ? new Date(detail.timestamp * 1000).toISOString() : "N/A";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Timestamp</td><td style='padding:4px;border:1px solid #ccc'>" + ts + " (" + (detail.timestamp || 0) + ")</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Media Type</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.media_type || "unknown") + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Animated</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.animated ? "Yes" : "No") + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Thumb Mode</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.thumb_mode || 0) + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Hash Mode</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.hash_mode || "unknown") + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Hash</td><td style='padding:4px;border:1px solid #ccc'><code style='font-size:11px'>" + (detail.hash || "none") + "</code></td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Directory Count</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.dir_count || 0) + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Width</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.width || 0) + "px</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Height</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.height || 0) + "px</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Duration</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.duration || 0) + "s</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>CRC32</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.crc32 || 0) + "</td></tr>";
+				detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>Orientation</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.orientation || 0) + "</td></tr>";
+				if (detail.gps_lat || detail.gps_lon) {
+					detailHtml += "<tr><td style='padding:4px;border:1px solid #ccc'>GPS Coords</td><td style='padding:4px;border:1px solid #ccc'>" + (detail.gps_lat || 0).toFixed(6) + ", " + (detail.gps_lon || 0).toFixed(6) + "</td></tr>";
+				}
+				detailHtml += "</table>";
+				var detailDiv = el("editorDetail");
+				if (detailDiv) detailDiv.innerHTML = detailHtml;
 			})
 			.catch(e => {
 				alert("Failed to load entry");

@@ -534,6 +534,16 @@ static char* json_comma_safe(char* ptr, size_t* remLen) {
 	(*remLen)--;
 	return ptr;
 }
+static char* json_objAddRaw(char* ptr, const char* name, const char* raw_json, size_t* remLen) {
+	if (!ptr || !name || !raw_json || *remLen < strlen(name) + strlen(raw_json) + 10) return ptr;
+	ptr = json_comma_safe(ptr, remLen);
+	*ptr++ = '"'; (*remLen)--;
+	while (*name && *remLen > 0) { *ptr++ = *name++; (*remLen)--; }
+	*ptr++ = '"'; (*remLen)--;
+	*ptr++ = ':'; (*remLen)--;
+	while (*raw_json && *remLen > 0) { *ptr++ = *raw_json++; (*remLen)--; }
+	return ptr;
+}
 static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, const char* dir, const char* root) {
 	ensure_json_buf(pbuf, cap, *used, 4096);
 	char* ptr = *pbuf + *used;
@@ -1591,6 +1601,18 @@ static void format_thumbdb_value(const char* raw, const char* base_real, char* o
 	out[copy_len] = '\0';
 }
 
+static void get_thumbdb_detail(const char* key, char* json_out, size_t outlen) {
+	if (!json_out || outlen == 0) return;
+	json_out[0] = '\0';
+	if (!key) return;
+	char* detail = thumbdb_get_record_detail(key);
+	if (detail) {
+		strncpy(json_out, detail, outlen - 1);
+		json_out[outlen - 1] = '\0';
+		free(detail);
+	}
+}
+
 static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 	tdb_list_ctx_t* c = (tdb_list_ctx_t*)ctx;
 	if (!key) return;
@@ -1601,6 +1623,8 @@ static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 	}
 	char formatted[PATH_MAX] = "";
 	format_thumbdb_value(value, c->base_real, formatted, sizeof(formatted));
+	char detail_json[4096] = "";
+	get_thumbdb_detail(key, detail_json, sizeof(detail_json));
 	size_t used = c->used;
 	ensure_json_buf(&c->buf, &c->cap, used, 256 + strlen(key) + strlen(formatted));
 	char* ptr = c->buf + used;
@@ -1614,6 +1638,9 @@ static void thumbdb_list_cb(const char* key, const char* value, void* ctx) {
 	ptr = json_objOpen(ptr, NULL, &rem);
 	ptr = json_str(ptr, "key", key, &rem);
 	ptr = json_str(ptr, "value", formatted, &rem);
+	if (detail_json[0]) {
+		ptr = json_objAddRaw(ptr, "detail", detail_json, &rem);
+	}
 	ptr = json_objClose(ptr, &rem);
 	c->used = ptr - c->buf;
 }

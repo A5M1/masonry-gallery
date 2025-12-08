@@ -452,8 +452,36 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     char parent[PATH_MAX];
     parent[0] = '\0';
     get_parent_dir(job->input, parent, sizeof(parent));
+    
+    char relurl[PATH_MAX];
+    relurl[0] = '\0';
+    size_t gf_count = 0;
+    char** gfolders = get_gallery_folders(&gf_count);
+    for (size_t gi = 0; gi < gf_count && !relurl[0]; ++gi) {
+        char folder_real[PATH_MAX];
+        if (!real_path(gfolders[gi], folder_real)) continue;
+        size_t flen = strlen(folder_real);
+        if (strncmp(job->input, folder_real, flen) == 0) {
+            const char* rel = job->input + flen;
+            if (*rel == '/' || *rel == '\\') rel++;
+            strncpy(relurl, rel, sizeof(relurl) - 1);
+            relurl[sizeof(relurl) - 1] = '\0';
+            for (char* p = relurl; *p; p++) {
+                if (*p == '\\') *p = '/';
+            }
+        }
+    }
+    
+    char media_url[PATH_MAX];
+    if (relurl[0]) {
+        snprintf(media_url, sizeof(media_url), "/images/%s", relurl);
+    } else {
+        strncpy(media_url, job->input, sizeof(media_url) - 1);
+        media_url[sizeof(media_url) - 1] = '\0';
+    }
+    
     char msg[1024];
-    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\"}", job->input, bn);
+    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\"}", media_url, bn);
     if (r > 0) websocket_broadcast_topic(parent[0] ? parent : NULL, msg);
 }
 static void run_thumb_job(thumb_job_t* job) {
@@ -1234,11 +1262,8 @@ static void* thumb_maintenance_thread(void* args) {
             }
 
             dir_close(&it);
-            ensure_thumbs_in_dir(gallery, NULL);
-            clean_orphan_thumbs(gallery, NULL);
         }
 
-        thumbdb_sweep_orphans();
         if (!thumbdb_perform_requested_compaction())
             thumbdb_compact();
     }
@@ -1530,7 +1555,7 @@ void start_background_thumb_generation(const char* dir_path) {
     LOG_DEBUG("start_background_thumb_generation: checking for missing thumbs (shallow) in %s", dir_path);
 
     if (!dir_has_missing_thumbs_shallow(dir_path, 0)) {
-        LOG_INFO("No missing thumbnails (shallow) for: %s", dir_path);
+        LOG_DEBUG("No missing thumbnails (shallow) for: %s", dir_path);
         start_auto_thumb_watcher(dir_path);
         return;
     }
