@@ -1659,7 +1659,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 				ctx.base_real[sizeof(ctx.base_real) - 1] = '\0';
 				ctx.filter_enabled = 1;
 				char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0'; mk_dir(per_thumbs_root);
-				snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
+				snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dir);
@@ -1865,7 +1865,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 				char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
 				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
-				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
+				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
@@ -1930,7 +1930,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 				char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
 				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
-				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
+				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
@@ -1971,7 +1971,7 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 				char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
 				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
-				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.db", per_thumbs_root);
+				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);

@@ -1,0 +1,102 @@
+
+
+sequenceDiagram
+    autonumber
+    participant Main as Main Thread
+    participant Worker as Worker Thread
+    participant WALProc as WAL Processor Thread
+    participant FS as File System
+    participant DB as ThumbDB (thumbs.tdb)
+    participant Mem as In-Memory Hash Table
+
+    Note over Main: Phase 1: Initialization & Lock Acquisition
+
+    Main->>FS: Open per-directory thumbs.tdb
+    Main->>DB: thumbdb_open_for_dir(per_db)
+    DB->>FS: Load existing records with varint/delta decoding
+    DB->>Mem: Populate Robin Hood hash table
+    Main->>FS: Create .thumbs.lock (with PID)
+    Note right of Main: Lock prevents concurrent generation
+
+    Note over Main: Phase 2: Discovery & Scheduling
+
+    Main->>Main: ensure_thumbs_in_dir(dir)
+
+    loop For each media file
+        Main->>FS: platform_stat(media, small_thumb, large_thumb)
+        FS-->>Main: File missing or outdated
+        Main->>Worker: schedule_or_generate_thumb()
+        Note right of Main: Spawns detached thread<br/>MAX_THUMB_WORKERS limit
+    end
+
+    Note over Worker: Phase 3: Generation (Parallel)
+
+    Worker->>Worker: run_thumb_job()
+    Worker->>Worker: generate_thumb_c()
+    Worker->>FS: Execute ffmpeg/magick with limits
+    FS-->>Worker: JPEG/WebP image created
+    Worker->>Worker: record_thumb_job_completion()
+
+    Note over Worker: Phase 4: WAL Logging (Lock-Free)
+
+    Worker->>Worker: Extract MD5-based key from output
+    Worker->>FS: Check for duplicate WAL entries
+    Note right of Worker: Deduplicates by key before writing
+    Worker->>FS: wal_write_entry(per_thumbs_root, key, media_path)
+    Note right of FS: Creates "wal/chunk-{ts}-{seq}-{pid}.wal"<br/>Format: "key\nvalue\n"
+    Worker->>FS: fflush() & fsync()
+    Worker->>Worker: thumbdb_request_compaction()
+    Worker->>Worker: Broadcast websocket notification
+
+    Note over WALProc: Phase 5: Periodic WAL Processing
+
+    WALProc->>WALProc: Sleep interval (default 10s)
+    WALProc->>FS: Scan wal/ directory for .wal files
+
+    loop For each gallery directory
+        WALProc->>FS: Read all WAL chunks
+        WALProc->>WALProc: Deduplicate by key (keep latest mtime)
+        
+        loop For each deduplicated key
+            WALProc->>DB: thumbdb_tx_begin()
+            DB->>Mem: Acquire db_mutex, set tx_active=1
+            
+            alt Is Delete Operation
+                WALProc->>DB: thumbdb_delete(key)
+                DB->>Mem: rh_remove(key)
+            else Is Set Operation
+                WALProc->>DB: thumbdb_set(key, value)
+                DB->>FS: write_wal_entry() [nested WAL]
+                DB->>Mem: rh_insert(key, value)
+            end
+            
+            WALProc->>DB: thumbdb_tx_commit()
+            DB->>Mem: Release db_mutex, tx_active=0
+            WALProc->>FS: platform_file_delete(chunk_path)
+            Note right of WALProc: WAL chunk removed after commit
+        end
+        
+        WALProc->>DB: thumbdb_perform_requested_compaction()
+    end
+
+    Note over Main: Phase 6: Cleanup & Finalization
+
+    Main->>Main: wait_for_thumb_workers()
+    Main->>Main: process_wal_chunks()
+    Note right of Main: Final WAL flush
+
+    Main->>Main: clean_orphan_thumbs()
+    loop For each thumb file
+        Main->>DB: thumbdb_get(key)
+        alt Media file missing
+            Main->>FS: platform_file_delete(thumb)
+            Main->>FS: wal_write_entry(key, "__DELETE__")
+        end
+    end
+
+    Main->>DB: thumbdb_sweep_orphans()
+    Main->>DB: thumbdb_compact()
+    Note right of DB: Rewrites thumbs.tdb with:<br/>- Varint-encoded record sequences<br/>- Bit-packed directory indexes<br/>- Delta-encoded filenames/timestamps<br/>- CRC32 checksums per record
+
+    Main->>FS: platform_file_delete(.thumbs.lock)
+    Note right of Main: Lock released

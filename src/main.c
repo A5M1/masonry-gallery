@@ -50,6 +50,10 @@ int main(int argc, char** argv) {
     }
     LOG_DEBUG("Scanning for missing thumbnails on startup...");
     scan_and_generate_missing_thumbs();
+    LOG_INFO("Starting periodic thumbnail maintenance...");
+    start_periodic_thumb_maintenance(300);
+    LOG_INFO("Starting WAL processing thread for periodic WAL chunk processing...");
+    start_wal_processing_thread(10);
     LOG_DEBUG("startup: about to create_listen_socket");
     int port = 3000;
     int s = create_listen_socket(port);

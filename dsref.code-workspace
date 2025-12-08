@@ -113,7 +113,8 @@
 			"platform.h": "c"
 		},
 		"prettier.bracketSpacing": false,
-		"problemsFilter.autoFilterEnabled": true
+		"problemsFilter.autoFilterEnabled": true,
+		"liveServer.settings.multiRootWorkspaceName": "dsref"
 
 	},
 	"launch": {

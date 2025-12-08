@@ -2,8 +2,16 @@
 #include "logging.h"
 #include "common.h"
 
-static void write_u16(unsigned char* p, uint16_t v) { p[0] = (unsigned char)(v & 0xFF); p[1] = (unsigned char)((v >> 8) & 0xFF); }
-static void write_u32(unsigned char* p, uint32_t v) { p[0] = (unsigned char)(v & 0xFF); p[1] = (unsigned char)((v >> 8) & 0xFF); p[2] = (unsigned char)((v >> 16) & 0xFF); p[3] = (unsigned char)((v >> 24) & 0xFF); }
+static void write_u16(unsigned char* p, uint16_t v) { 
+    p[0] = (unsigned char)(v & 0xFF); 
+    p[1] = (unsigned char)((v >> 8) & 0xFF); 
+}
+static void write_u32(unsigned char* p, uint32_t v) { 
+    p[0] = (unsigned char)(v & 0xFF); 
+    p[1] = (unsigned char)((v >> 8) & 0xFF); 
+    p[2] = (unsigned char)((v >> 16) & 0xFF); 
+    p[3] = (unsigned char)((v >> 24) & 0xFF); 
+}
 static uint16_t read_u16(const unsigned char* p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 static uint32_t read_u32(const unsigned char* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 

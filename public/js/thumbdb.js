@@ -4,7 +4,8 @@
 	}
 	function normalizeItems(items) {
 		if (!items) return [];
-		if (Array.isArray(items)) return items.map(normalizeEntry).filter(Boolean);
+		if (Array.isArray(items))
+			return items.map(normalizeEntry).filter(Boolean);
 		return Object.keys(items)
 			.map(function (key) {
 				var entry = items[key];
@@ -22,7 +23,8 @@
 		var large = typeof raw.large === "string" ? raw.large : "";
 		var value = "";
 		if (raw.value !== undefined && raw.value !== null) {
-			value = typeof raw.value === "string" ? raw.value : String(raw.value);
+			value =
+				typeof raw.value === "string" ? raw.value : String(raw.value);
 		}
 		return {key: key, small: small, large: large, value: value};
 	}
@@ -52,9 +54,14 @@
 			if (filter && keyLower.indexOf(filter) === -1) continue;
 			var small = it.small && it.small !== "null" ? it.small : "";
 			var large = it.large && it.large !== "null" ? it.large : "";
-			var info = "Small: " + (small || "missing") + " • Large: " + (large || "missing");
+			var info =
+				"Small: " +
+				(small || "missing") +
+				" • Large: " +
+				(large || "missing");
 			var value = it.value || "";
-			var preview = value.length > 120 ? value.substr(0, 120) + "..." : value;
+			var preview =
+				value.length > 120 ? value.substr(0, 120) + "..." : value;
 			out.push(
 				"<tr><td>" +
 					escapeHtml(it.key) +
@@ -92,8 +99,12 @@
 				el("editor").style.display = "block";
 				el("editorKey").textContent = obj.key;
 				el("editorValue").value = obj.value || "";
-				if (smallField) smallField.value = obj.small && obj.small !== "null" ? obj.small : "";
-				if (largeField) largeField.value = obj.large && obj.large !== "null" ? obj.large : "";
+				if (smallField)
+					smallField.value =
+						obj.small && obj.small !== "null" ? obj.small : "";
+				if (largeField)
+					largeField.value =
+						obj.large && obj.large !== "null" ? obj.large : "";
 			})
 			.catch(e => {
 				alert("Failed to load entry");

@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediaVault Binary Media Record Format Specification</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+
+        * { box-sizing: border-box; }
+
+        html { 
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+            min-height: 100vh;
+        }
+
+        body {
+            background-color: rgba(26, 26, 26, 0.8);
+            color: #d0d0d0;
+            font-family: 'Inter', sans-serif;
+            font-size: 11pt;
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 32px;
+            box-shadow: 0 0 60px rgba(0, 0, 0, 0.5);
+        }
+
+        h1, h2, h3 { 
+            color: #ffffff; 
+            line-height: 1.3; 
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        
+        h1 { 
+            font-size: 36pt; 
+            text-align: center; 
+            margin: 0 0 12pt; 
+            color: #ffffff;
+        }
+        
+        h2 { 
+            font-size: 18pt; 
+            margin: 36pt 0 16pt; 
+            padding-bottom: 8pt;
+            border-bottom: 2px solid #2a2a2a;
+            color: #f0f0f0;
+        }
+        
+        h3 { 
+            font-size: 14pt; 
+            margin: 24pt 0 12pt; 
+            color: #e0e0e0;
+            font-weight: 600;
+        }
+
+        p { margin: 0 0 14pt 0; }
+        
+        ul, ol { 
+            margin: 0 0 16pt 24px; 
+            padding: 0; 
+        }
+        
+        li { 
+            margin-bottom: 8pt;
+            line-height: 1.6;
+        }
+
+        strong { 
+            color: #ffffff; 
+            font-weight: 600; 
+        }
+
+        table {
+            border-collapse: collapse;
+            margin: 16pt 0 32pt;
+            width: 100%;
+            background-color: #242424;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        th, td {
+            border: 1pt solid #333;
+            padding: 12pt 16pt;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        th { 
+            background: linear-gradient(180deg, #2d2d2d 0%, #252525 100%);
+            color: #f0f0f0; 
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 9pt;
+            letter-spacing: 0.05em;
+        }
+
+        tbody tr:hover {
+            background-color: #2a2a2a;
+            transition: background-color 0.2s ease;
+        }
+
+        .meta { 
+            color: #888; 
+            font-size: 10pt; 
+            margin-bottom: 6pt;
+            text-align: center;
+        }
+        
+        .code { 
+            font-family: 'JetBrains Mono', 'Courier New', monospace; 
+            background: linear-gradient(135deg, #1e1e1e 0%, #252525 100%);
+            color: #e0e0e0;
+            padding: 3pt 8pt; 
+            border-radius: 4px;
+            border: 1px solid #333;
+            font-size: 10pt;
+            font-weight: 500;
+        }
+
+        ol > li::marker {
+            color: #c0c0c0;
+            font-weight: 600;
+        }
+
+        ul > li::marker {
+            color: #a0a0a0;
+        }
+
+        a {
+            color: #e0e0e0;
+            text-decoration: none;
+            border-bottom: 1px solid #555;
+            transition: all 0.2s ease;
+        }
+
+        a:hover {
+            color: #ffffff;
+            border-bottom-color: #ffffff;
+        }
+
+        mjx-container {
+            color: #f0f0f0 !important;
+        }
+
+        mjx-container[display="true"] {
+            margin: 16pt 0 !important;
+            padding: 12pt;
+            background-color: #1e1e1e;
+            border-left: 3px solid #555;
+            border-radius: 4px;
+        }
+
+        mjx-math {
+            color: #f0f0f0 !important;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.min.js" integrity="sha512-6FaAxxHuKuzaGHWnV00ftWqP3luSBRSopnNAA2RvQH1fOfnF/A1wOfiUWF7cLIOFcfb1dEhXwo5VG3DAisocRw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+<body>
+    <h1>MediaVault Binary Media Record Format Specification</h1>
+    
+    <p class="meta"><strong>Version:</strong> 2.1</p>
+    <p class="meta"><strong>Status:</strong> Specification</p>
+    <p class="meta"><strong>Date:</strong> 2025-12-08</p>
+
+    <h2>1. Introduction</h2>
+    <p>MediaVault is a compact binary format designed for high-density storage of media records. It utilizes predictive numeric delta encoding, bit-packed directory indexes, and consolidated metadata fields to minimize storage overhead. This format is optimized for streaming, deterministic decoding, sequential media archives, and robust error detection.</p>
+
+    <h3>1.1 Key Features</h3>
+    <ul>
+        <li><strong>Predictive Filename Compression:</strong> Utilization of numeric delta encoding for sequential filenames with support for non-numeric patterns.</li>
+        <li><strong>Bit-Packed Directory Indexes:</strong> Adaptive bit-width indexing into a global directory table with front-coding compression.</li>
+        <li><strong>Consolidated Metadata:</strong> A single META_BYTE contains media type, animation status, optimized thumbnail flags, hash compression mode, and extension indicator.</li>
+        <li><strong>Variable-Length Integers (Varint):</strong> 7-bit MSB continuation encoding for scalars.</li>
+        <li><strong>Flexible Integrity Checks:</strong> Support for Full MD5, Half MD5, RIPEMD-128, Murmur128, and optional no-hash mode.</li>
+        <li><strong>Delta Timestamps:</strong> Relative timestamp storage with configurable precision and base reference.</li>
+        <li><strong>Per-Record Error Detection:</strong> CRC32 checksums for individual record validation.</li>
+        <li><strong>Extension Mechanism:</strong> Forward-compatible extension fields for optional metadata.</li>
+        <li><strong>Random Access Indexing:</strong> Optional index block for direct record access.</li>
+        <li><strong>Transaction Support:</strong> Atomic multi-record operations with transaction markers.</li>
+    </ul>
+
+    <h2>2. File Structure</h2>
+    <p>A MediaVault file consists of three major sections:</p>
+    <ol>
+        <li><strong>File Header:</strong> Contains magic number, version, flags, directory table, and base timestamp.</li>
+        <li><strong>Record Stream:</strong> Sequential records with optional transaction markers.</li>
+        <li><strong>Index Block (Optional):</strong> Offset table for random access.</li>
+    </ol>
+
+    <h3>2.1 File Header</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Field Name</th>
+                <th>Type</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>MAGIC</td>
+                <td>2 Bytes</td>
+                <td>Magic number: 0x4D56 ("MV")</td>
+            </tr>
+            <tr>
+                <td>VERSION</td>
+                <td>Byte</td>
+                <td>Format version (0x21 for v2.1)</td>
+            </tr>
+            <tr>
+                <td>FLAGS</td>
+                <td>Byte</td>
+                <td>Bit flags (see section 2.1.1)</td>
+            </tr>
+            <tr>
+                <td>RECORD_COUNT</td>
+                <td>Varint</td>
+                <td>Total number of records in file</td>
+            </tr>
+            <tr>
+                <td>BASE_TIMESTAMP</td>
+                <td>8 Bytes</td>
+                <td>Base timestamp (Unix epoch, little-endian)</td>
+            </tr>
+            <tr>
+                <td>DIR_TABLE_SIZE</td>
+                <td>Varint</td>
+                <td>Number of directory entries</td>
+            </tr>
+            <tr>
+                <td>DIR_TABLE</td>
+                <td>Variable</td>
+                <td>Front-coded directory table (see section 3.3)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h4>2.1.1 Header FLAGS Byte</h4>
+    <table>
+        <thead>
+            <tr>
+                <th>Bit</th>
+                <th>Name</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>7</td>
+                <td>HAS_INDEX</td>
+                <td>1 = Index block present at end of file</td>
+            </tr>
+            <tr>
+                <td>6</td>
+                <td>TIMESTAMP_PRECISION</td>
+                <td>0 = Seconds, 1 = Milliseconds</td>
+            </tr>
+            <tr>
+                <td>5-4</td>
+                <td>DEFAULT_HASH_MODE</td>
+                <td>Default hash mode (00=Full MD5, 01=Half, 10=RIPEMD-128, 11=None)</td>
+            </tr>
+            <tr>
+                <td>3-0</td>
+                <td>RESERVED</td>
+                <td>Reserved for future use (must be 0)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>2.2 Record Structure</h3>
+    <p>A single RECORD is defined by the following byte sequence. Fields marked with asterisk (*) are conditional based on flags.</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Sequence</th>
+                <th>Field Name</th>
+                <th>Type</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>1</td>
+                <td>OP_BEGIN</td>
+                <td>Byte</td>
+                <td>Start Sentinel (0xAA)</td>
+            </tr>
+            <tr>
+                <td>2</td>
+                <td>RECORD_SEQUENCE</td>
+                <td>Varint</td>
+                <td>Sequential record number for error detection</td>
+            </tr>
+            <tr>
+                <td>3</td>
+                <td>DIR_COUNT_VARINT</td>
+                <td>Varint</td>
+                <td>Number of directory components (\(N\))</td>
+            </tr>
+            <tr>
+                <td>4</td>
+                <td>DIR_INDEX_BITS</td>
+                <td>Bitstream</td>
+                <td>\(N\) indexes packed consecutively</td>
+            </tr>
+            <tr>
+                <td>5</td>
+                <td>FILENAME_FIELD</td>
+                <td>Variable</td>
+                <td>Numeric delta (varint) or string (see section 3.4)</td>
+            </tr>
+            <tr>
+                <td>6</td>
+                <td>META_BYTE</td>
+                <td>Byte</td>
+                <td>Bit-flags for type, mode, thumbnails, and extensions</td>
+            </tr>
+            <tr>
+                <td>7*</td>
+                <td>EXTENSION_DATA</td>
+                <td>Variable</td>
+                <td>Present if META_BYTE extension bit is set</td>
+            </tr>
+            <tr>
+                <td>8</td>
+                <td>TIMESTAMP_DELTA_VARINT</td>
+                <td>Varint</td>
+                <td>Delta from BASE_TIMESTAMP or previous record</td>
+            </tr>
+            <tr>
+                <td>9*</td>
+                <td>DIMENSIONS</td>
+                <td>2x Varint</td>
+                <td>Optional: Width and height (via extension tag)</td>
+            </tr>
+            <tr>
+                <td>10*</td>
+                <td>DURATION</td>
+                <td>Varint</td>
+                <td>Optional: Video duration in milliseconds (via extension tag)</td>
+            </tr>
+            <tr>
+                <td>11*</td>
+                <td>HASH_DATA</td>
+                <td>Bytes</td>
+                <td>Hash data (length depends on META_BYTE or header default)</td>
+            </tr>
+            <tr>
+                <td>12</td>
+                <td>CRC32</td>
+                <td>4 Bytes</td>
+                <td>CRC32 checksum of all preceding record fields</td>
+            </tr>
+            <tr>
+                <td>13</td>
+                <td>OP_END</td>
+                <td>Byte</td>
+                <td>End Sentinel (0xFF)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>2.3 Transaction Markers</h3>
+    <p>For atomic multi-record operations:</p>
+    <ul>
+        <li><strong>OP_TX_BEGIN (0xBB):</strong> Marks start of transaction block</li>
+        <li><strong>OP_TX_END (0xCC):</strong> Marks end of transaction block</li>
+        <li><strong>OP_DELETE (0xDD):</strong> Tombstone record, followed by varint(filename_reference)</li>
+    </ul>
+
+    <h3>2.4 Index Block</h3>
+    <p>If HAS_INDEX flag is set in header, an index block is appended after all records:</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Field Name</th>
+                <th>Type</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>INDEX_MAGIC</td>
+                <td>2 Bytes</td>
+                <td>0x4958 ("IX")</td>
+            </tr>
+            <tr>
+                <td>INDEX_COUNT</td>
+                <td>Varint</td>
+                <td>Number of index entries</td>
+            </tr>
+            <tr>
+                <td>INDEX_ENTRIES</td>
+                <td>Array</td>
+                <td>Each entry: varint(file_offset) + varint(filename_value)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>3. Encoding Definitions</h2>
+
+    <h3>3.1 Opcodes</h3>
+    <p>Sentinel and control values used throughout the format.</p>
+    <ul>
+        <li><strong>OP_BEGIN:</strong> 0xAA (Record start)</li>
+        <li><strong>OP_END:</strong> 0xFF (Record end)</li>
+        <li><strong>OP_TX_BEGIN:</strong> 0xBB (Transaction start)</li>
+        <li><strong>OP_TX_END:</strong> 0xCC (Transaction end)</li>
+        <li><strong>OP_DELETE:</strong> 0xDD (Tombstone record)</li>
+    </ul>
+
+    <h3>3.2 Varint Encoding</h3>
+    <p>Used for DIR_COUNT, FILENAME_DELTA, and TIMESTAMP_DELTA.</p>
+    <ul>
+        <li><strong>Format:</strong> 7 bits of data per byte.</li>
+        <li><strong>Continuation:</strong> The Most Significant Bit (MSB) indicates if more bytes follow.
+            <ul>
+                <li>MSB = 1: Continuation (more bytes follow).</li>
+                <li>MSB = 0: Termination (last byte).</li>
+            </ul>
+        </li>
+    </ul>
+
+    <h3>3.3 Directory Table &amp; Indexing</h3>
+    <p>Directories are stored in a global lookup table using front-coding compression for similar paths.</p>
+    
+    <h4>3.3.1 Directory Table Encoding</h4>
+    <p>Each directory entry in the header uses front-coding:</p>
+    <ul>
+        <li><strong>Entry Format:</strong> varint(prefix_length) + varint(suffix_length) + suffix_bytes</li>
+        <li><strong>First Entry:</strong> prefix_length = 0, full path stored</li>
+        <li><strong>Subsequent Entries:</strong> Reuse common prefix from previous entry</li>
+    </ul>
+    <p><strong>Example:</strong></p>
+    <ul>
+        <li>Entry 0: "E:\f\newtest" → 0, 11, "E:\f\newtest"</li>
+        <li>Entry 1: "E:\f\newtest2" → 11, 1, "2"</li>
+        <li>Entry 2: "E:\f\photos" → 4, 6, "photos"</li>
+    </ul>
+    
+    <h4>3.3.2 Directory Index Bit-Packing</h4>
+    <ul>
+        <li><strong>Count:</strong> DIR_COUNT_VARINT defines how many indexes follow.</li>
+        <li><strong>Bit-Packing:</strong>
+            <ul>
+                <li>Minimum bits per index = \(\lceil \log_2(\text{DIR_TABLE_SIZE}) \rceil\).</li>
+                <li>Indexes are packed contiguously into the byte stream.</li>
+                <li>Padding is added only at the end of the sequence to align to the next byte boundary.</li>
+            </ul>
+        </li>
+    </ul>
+
+    <h3>3.4 Filename Encoding</h3>
+    <p>Supports both numeric sequential filenames and arbitrary string filenames.</p>
+    
+    <h4>3.4.1 Numeric Filenames (Default)</h4>
+    <p>For purely numeric sequential filenames, predictive delta encoding is used:</p>
+    <ul>
+        <li><strong>Record 0:</strong> Stores absolute numeric filename value as varint.</li>
+        <li><strong>Record N:</strong> Stores \((\text{Value}_N - \text{Value}_{N-1})\) as signed varint.</li>
+    </ul>
+    
+    <h4>3.4.2 Non-Numeric Filenames</h4>
+    <p>When a filename cannot be represented as a delta:</p>
+    <ul>
+        <li><strong>Indicator:</strong> Delta value of 0x00 signals "string follows"</li>
+        <li><strong>Format:</strong> varint(string_length) + UTF-8 bytes</li>
+        <li><strong>Subsequent Records:</strong> Resume delta encoding from new base value if possible</li>
+    </ul>
+    
+    <h4>3.4.3 Special Filename Patterns</h4>
+    <p>Reserved delta values for common patterns:</p>
+    <ul>
+        <li><strong>0x00:</strong> Non-numeric string follows</li>
+        <li><strong>Negative values:</strong> Backward deltas (earlier timestamps)</li>
+    </ul>
+    
+    <h3>3.5 Timestamp Delta Encoding</h3>
+    <p>Timestamps are stored relative to BASE_TIMESTAMP in the file header.</p>
+    <ul>
+        <li><strong>Record 0:</strong> Stores delta from BASE_TIMESTAMP as varint.</li>
+        <li><strong>Record N:</strong> Stores \((\text{Time}_N - \text{Time}_{N-1})\) as signed varint.</li>
+        <li><strong>Precision:</strong> Determined by TIMESTAMP_PRECISION flag in header (seconds or milliseconds).</li>
+    </ul>
+
+    <h2>4. Metadata Field (META_BYTE)</h2>
+    <p>The META_BYTE is a complex bit-field responsible for defining the record's properties and the presence of extension fields.</p>
+    <p><strong>Layout (Bits 7 to 0):</strong> TTT A TT O H</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Bit Position</th>
+                <th>Label</th>
+                <th>Name</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>7-5</td>
+                <td>TTT</td>
+                <td>Media Type</td>
+                <td>3-bit Media Type ID (See <a href="#section-4-1">4.1</a>)</td>
+            </tr>
+            <tr>
+                <td>4</td>
+                <td>A</td>
+                <td>Animated</td>
+                <td>1 = Animated, 0 = Still</td>
+            </tr>
+            <tr>
+                <td>3-2</td>
+                <td>TT</td>
+                <td>Thumbnail Mode</td>
+                <td>00 = None, 01 = Small, 10 = Large, 11 = Both</td>
+            </tr>
+            <tr>
+                <td>1</td>
+                <td>O</td>
+                <td>Hash Override</td>
+                <td>1 = Record-specific hash mode follows, 0 = Use header default</td>
+            </tr>
+            <tr>
+                <td>0</td>
+                <td>H</td>
+                <td>Has Extensions</td>
+                <td>1 = Extension data present, 0 = No extensions</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3 id="section-4-1">4.1 Media Type Encoding (Bits 7-5)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Binary</th>
+                <th>Decimal</th>
+                <th>Format</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>000</td><td>0</td><td>JPG</td></tr>
+            <tr><td>001</td><td>1</td><td>PNG</td></tr>
+            <tr><td>010</td><td>2</td><td>GIF</td></tr>
+            <tr><td>011</td><td>3</td><td>WEBP</td></tr>
+            <tr><td>100</td><td>4</td><td>MP4</td></tr>
+            <tr><td>101</td><td>5</td><td>WEBM</td></tr>
+        </tbody>
+    </table>
+
+    <h3 id="section-4-2">4.2 Hash Mode Encoding</h3>
+    <p>Hash mode can be set globally in the file header (DEFAULT_HASH_MODE) or overridden per-record when the Hash Override bit is set.</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Binary</th>
+                <th>Mode</th>
+                <th>Algorithm</th>
+                <th>Length</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>00</td><td>Full</td><td>MD5</td><td>16 Bytes</td></tr>
+            <tr><td>01</td><td>Half</td><td>MD5 (Truncated)</td><td>8 Bytes</td></tr>
+            <tr><td>10</td><td>Alt-128</td><td>RIPEMD-128</td><td>16 Bytes</td></tr>
+            <tr><td>11</td><td>None</td><td>No Hash</td><td>0 Bytes</td></tr>
+        </tbody>
+    </table>
+    <p><strong>Note:</strong> When Hash Override bit is 1 in META_BYTE, a single byte containing the 2-bit hash mode (bits 1-0) follows immediately after META_BYTE.</p>
+    
+    <h3>4.3 Extension Data Format</h3>
+    <p>When the Has Extensions bit (bit 0) is set in META_BYTE, extension data follows immediately after the META_BYTE (and optional hash override byte).</p>
+    <p><strong>Format:</strong></p>
+    <ul>
+        <li><strong>EXTENSION_LENGTH:</strong> Varint indicating total bytes of extension data</li>
+        <li><strong>EXTENSION_FIELDS:</strong> Sequence of tag-length-value triplets:</li>
+    </ul>
+    <table>
+        <thead>
+            <tr>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>TAG</td><td>Byte</td><td>Extension field identifier</td></tr>
+            <tr><td>LENGTH</td><td>Varint</td><td>Length of value in bytes</td></tr>
+            <tr><td>VALUE</td><td>Bytes</td><td>Extension-specific data</td></tr>
+        </tbody>
+    </table>
+    
+    <h4>4.3.1 Standard Extension Tags</h4>
+    <table>
+        <thead>
+            <tr>
+                <th>Tag</th>
+                <th>Name</th>
+                <th>Value Format</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>0x01</td><td>DIMENSIONS_DELTA</td><td>None (flag only)</td><td>Signals that dimensions changed from previous record</td></tr>
+            <tr><td>0x02</td><td>ORIENTATION</td><td>Byte</td><td>Image orientation: 0=0°, 1=90°, 2=180°, 3=270°, 4=H-flip, 5=V-flip</td></tr>
+            <tr><td>0x03</td><td>CODEC_INFO</td><td>String</td><td>Video codec identifier (e.g., "H264", "VP9")</td></tr>
+            <tr><td>0x04</td><td>GPS_COORDS</td><td>8 bytes</td><td>Latitude (float32) + Longitude (float32)</td></tr>
+            <tr><td>0x05</td><td>PERCEPTUAL_HASH</td><td>8 bytes</td><td>pHash or dHash for duplicate detection</td></tr>
+            <tr><td>0xF0-0xFF</td><td>CUSTOM</td><td>Variable</td><td>Application-specific extensions</td></tr>
+        </tbody>
+    </table>
+
+    <h2>5. Media-Specific Metadata (Optional)</h2>
+    <p>Additional optional metadata fields stored as extension data. All fields in this section are optional and only included when the Has Extensions bit is set in META_BYTE.</p>
+    
+    <h3>5.1 Dimensions</h3>
+    <p>Width and height are optionally stored via extension fields.</p>
+    <ul>
+        <li><strong>Extension Tag:</strong> 0x01 (DIMENSIONS_DELTA) followed by varint(width) + varint(height)</li>
+        <li><strong>Usage:</strong> Include when dimensions are relevant to the application</li>
+        <li><strong>Optimization:</strong> Can be omitted for subsequent records with identical dimensions</li>
+    </ul>
+    
+    <h3>5.2 Video Duration</h3>
+    <p>Duration can optionally be stored for video media types.</p>
+    <ul>
+        <li><strong>Format:</strong> varint(milliseconds) after dimensions (if present) or timestamp</li>
+        <li><strong>Presence:</strong> Optional; include when duration information is available and useful</li>
+    </ul>
+    
+    <h3>5.3 Orientation</h3>
+    <p>Image orientation is optionally stored as an extension field.</p>
+    <ul>
+        <li><strong>Extension Tag:</strong> 0x02 (ORIENTATION)</li>
+        <li><strong>Values:</strong> 0=Normal, 1=90°CW, 2=180°, 3=270°CW, 4=H-flip, 5=V-flip, 6=H-flip+90°CW, 7=V-flip+90°CW</li>
+    </ul>
+
+    <h2>6. Error Detection and Recovery</h2>
+    
+    <h3>6.1 Record-Level CRC32</h3>
+    <p>Each record contains a CRC32 checksum covering all fields from OP_BEGIN through HASH_DATA (or last metadata field).</p>
+    <ul>
+        <li><strong>Algorithm:</strong> CRC-32/ISO-HDLC (polynomial 0x04C11DB7)</li>
+        <li><strong>Byte Order:</strong> Little-endian</li>
+        <li><strong>Coverage:</strong> All bytes from OP_BEGIN through the last data field before CRC32</li>
+    </ul>
+    
+    <h3>6.2 Record Sequence Numbers</h3>
+    <p>Sequential numbering allows detection of missing or reordered records.</p>
+    <ul>
+        <li><strong>First Record:</strong> Sequence number 0</li>
+        <li><strong>Subsequent Records:</strong> Increment by 1</li>
+        <li><strong>Gap Detection:</strong> Missing sequence numbers indicate corruption or truncation</li>
+    </ul>
+    
+    <h3>6.3 Recovery Strategies</h3>
+    <ul>
+        <li><strong>CRC Mismatch:</strong> Skip record and continue to next OP_BEGIN sentinel</li>
+        <li><strong>Sequence Gap:</strong> Flag as missing records, continue processing</li>
+        <li><strong>Truncation:</strong> Detect via RECORD_COUNT in header vs. actual records read</li>
+        <li><strong>Index Validation:</strong> Cross-check index block offsets against actual file positions</li>
+    </ul>
+
+    <h2>7. Random Access and Indexing</h2>
+    
+    <h3>7.1 Index Block Structure</h3>
+    <p>When the HAS_INDEX flag is set in the file header, an index block is appended after all records.</p>
+    <ul>
+        <li><strong>Purpose:</strong> Enable direct seeking to specific records without sequential scanning</li>
+        <li><strong>Location:</strong> End of file, before any trailing metadata</li>
+    </ul>
+    
+    <h3>7.2 Index Entry Format</h3>
+    <p>Each index entry maps a filename to its byte offset in the file:</p>
+    <ul>
+        <li><strong>Byte Offset:</strong> Varint encoding of absolute position from file start</li>
+        <li><strong>Filename Value:</strong> Varint encoding of numeric filename or hash of string filename</li>
+    </ul>
+    
+    <h3>7.3 Index Usage</h3>
+    <ol>
+        <li>Binary search index entries by filename value</li>
+        <li>Seek to corresponding byte offset</li>
+        <li>Read and validate record starting at that position</li>
+    </ol>
+    
+    <h3>7.4 Chunk Markers</h3>
+    <p>For very large files, optional chunk markers can be inserted every \(N\) records (e.g., every 1000):</p>
+    <ul>
+        <li><strong>Marker:</strong> 0xEE byte followed by varint(records_since_last_marker)</li>
+        <li><strong>Purpose:</strong> Enable faster seeking even without full index</li>
+    </ul>
+
+    <h2>8. Transaction Support</h2>
+    
+    <h3>8.1 Transaction Boundaries</h3>
+    <p>Groups of related records can be marked as atomic transactions using transaction markers.</p>
+    <ul>
+        <li><strong>OP_TX_BEGIN (0xBB):</strong> Marks start of transaction</li>
+        <li><strong>OP_TX_END (0xCC):</strong> Marks successful completion</li>
+        <li><strong>Incomplete Transaction:</strong> Missing OP_TX_END indicates rollback required</li>
+    </ul>
+    
+    <h3>8.2 Delete Operations</h3>
+    <p>Records can be marked as deleted without physically removing them:</p>
+    <ul>
+        <li><strong>OP_DELETE (0xDD):</strong> Tombstone marker</li>
+        <li><strong>Format:</strong> OP_DELETE + varint(filename_reference) + varint(timestamp) + OP_END</li>
+        <li><strong>Processing:</strong> Readers should skip records matching deleted filenames</li>
+    </ul>
+    
+    <h3>8.3 Transaction Example</h3>
+    <p class="code">BB [OP_TX_BEGIN]<br>
+AA ... FF [Record 1]<br>
+AA ... FF [Record 2]<br>
+DD ... FF [Delete Record]<br>
+CC [OP_TX_END]</p>
+
+    <h2>9. Implementation Example</h2>
+    <p><strong>Scenario (Version 2.1):</strong></p>
+    <ul>
+        <li><strong>Path:</strong> E:\f\newtest\new2\1600663438666.webm</li>
+        <li><strong>Hash:</strong> 22f66b59c9d56f213f3706bd1ccb8a51 (Half MD5 per header default)</li>
+        <li><strong>Timestamp:</strong> 1600663438 (200 seconds after BASE_TIMESTAMP)</li>
+        <li><strong>Dimensions:</strong> 1920x1080 (optional metadata included)</li>
+        <li><strong>Duration:</strong> 15320 ms (optional metadata included)</li>
+        <li><strong>Context:</strong> First record (Absolute filename, optional dimensions and duration included).</li>
+    </ul>
+
+    <h3>9.1 File Header</h3>
+    <ol>
+        <li><span class="code">4D 56</span> (MAGIC "MV")</li>
+        <li><span class="code">21</span> (VERSION 2.1)</li>
+        <li><span class="code">40</span> (FLAGS: HAS_INDEX=0, TIMESTAMP_PRECISION=1 (millisec), DEFAULT_HASH_MODE=00 (Full MD5))</li>
+        <li><span class="code">E8 07</span> (RECORD_COUNT = 1000 records in file)</li>
+        <li><span class="code">8E E9 90 F3 5F 00 00 00</span> (BASE_TIMESTAMP = 1600663238)</li>
+        <li><span class="code">03</span> (DIR_TABLE_SIZE = 3 entries)</li>
+        <li><span class="code">00 03 45 3A 5C 66</span> (Dir 0: prefix=0, len=3, "E:\f")</li>
+        <li><span class="code">03 08 5C 6E 65 77 74 65 73 74</span> (Dir 1: prefix=3, len=8, "\newtest")</li>
+        <li><span class="code">0B 05 5C 6E 65 77 32</span> (Dir 2: prefix=11, len=5, "\new2")</li>
+    </ol>
+
+    <h3>9.2 Record Stream</h3>
+    <ol>
+        <li><span class="code">AA</span> (OP_BEGIN)</li>
+        <li><span class="code">00</span> (RECORD_SEQUENCE = 0)</li>
+        <li><span class="code">03</span> (DIR_COUNT = 3)</li>
+        <li><span class="code">1A</span> (DIR_INDEXES: 0, 1, 2 packed as 00 01 10)</li>
+        <li><span class="code">E2 C8 94 FE AC 05</span> (FILENAME = 1600663438666)</li>
+        <li><span class="code">AF</span> (META_BYTE)
+            <ul>
+                <li>Type 101 (WEBM)</li>
+                <li>Anim 1 (Yes)</li>
+                <li>Thumb 11 (Both)</li>
+                <li>Hash Override 0 (Use header default)</li>
+                <li>Extensions 1 (Has extensions)</li>
+                <li>Binary: 10101111 → Hex: AF</li>
+            </ul>
+        </li>
+        <li><span class="code">03 01 00</span> (EXTENSION_DATA: length=3, TAG=0x01 DIMENSIONS_DELTA, length=0)</li>
+        <li><span class="code">C8 01</span> (TIMESTAMP_DELTA = 200 seconds from BASE)</li>
+        <li><span class="code">80 0F</span> (WIDTH = 1920)</li>
+        <li><span class="code">38 08</span> (HEIGHT = 1080)</li>
+        <li><span class="code">D8 77</span> (DURATION = 15320 ms)</li>
+        <li><span class="code">22 F6 6B 59 C9 D5 6F 21</span> (HASH_DATA: First 8 bytes per header default Half MD5 mode)</li>
+        <li><span class="code">A3 2F 1C 8E</span> (CRC32 checksum)</li>
+        <li><span class="code">FF</span> (OP_END)</li>
+    </ol>
+</body>
+</html>

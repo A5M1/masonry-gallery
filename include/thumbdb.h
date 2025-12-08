@@ -17,5 +17,10 @@ int thumbdb_tx_commit(void);
 int thumbdb_tx_abort(void);
 void thumbdb_request_compaction(void);
 int thumbdb_perform_requested_compaction(void);
+int thumbdb_start_repair_task(int interval_seconds);
+int thumbdb_start_async_worker(void);
+void thumbdb_stop_async_worker(void);
+int thumbdb_set_async(const char* key, const char* value);
+int thumbdb_delete_async(const char* key);
 
 

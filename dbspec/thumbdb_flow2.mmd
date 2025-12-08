@@ -1,0 +1,53 @@
+---
+config:
+  layout: elk
+  theme: neo-dark
+  look: neo
+---
+flowchart LR
+ subgraph Storage["PERSISTENT STORAGE"]
+        direction TB
+        TDB[("thumbs.tdb<br/>━━━━━━━━━━<br/>Header: Magic 0x4D56<br/>Version: 0x21<br/>━━━━━━━━━━<br/>Dir Table (prefix-compressed)<br/>━━━━━━━━━━<br/>Binary Records:<br/>• Varint sequences<br/>• Bit-packed indexes<br/>• Delta encoding<br/>• CRC32 per record")]
+        WAL[("wal/<br/>━━━━━━━━━━<br/>chunk-TS-SEQ-PID.wal<br/>━━━━━━━━━━<br/>Plaintext:<br/>key<br/>value")]
+        THUMBS[("Thumbnails<br/>━━━━━━━━━━<br/>MD5-small.jpg<br/>MD5-large.jpg")]
+        LOCK[(".thumbs.lock<br/>━━━━━━━━━━<br/>Contains PID<br/>Prevents concurrent<br/>generation")]
+  end
+ subgraph Memory["IN-MEMORY STRUCTURES"]
+        direction TB
+        RHHash["Robin Hood Hash Table<br/>━━━━━━━━━━<br/>key → value<br/>Fast O(1) lookups<br/>Loaded from thumbs.tdb"]
+        DirTable["Directory Table<br/>━━━━━━━━━━<br/>Path component cache<br/>Used for bit-packing"]
+        TxState["Transaction State<br/>━━━━━━━━━━<br/>tx_active flag<br/>db_mutex lock<br/>tx_snapshot"]
+  end
+ subgraph Workers["WORKER THREADS"]
+        direction TB
+        ThumbWorkers["Thumbnail Workers<br/>━━━━━━━━━━<br/>MAX_THUMB_WORKERS<br/>Parallel generation<br/>ffmpeg/magick"]
+        WALProcessor["WAL Processor<br/>━━━━━━━━━━<br/>10s interval<br/>Deduplicates + commits<br/>Triggers compaction"]
+        MaintenanceThread["Maintenance Thread<br/>━━━━━━━━━━<br/>300s interval<br/>Orphan cleanup<br/>Migration tasks"]
+  end
+ subgraph Operations["KEY OPERATIONS"]
+        direction TB
+        Read["READ<br/>━━━━━━━━━━<br/>thumbdb_get()<br/>→ Check RHHash<br/>→ Return cached value"]
+        Write["WRITE<br/>━━━━━━━━━━<br/>thumbdb_set()<br/>→ Write WAL chunk<br/>→ Update RHHash<br/>→ Request compaction"]
+        Delete["DELETE<br/>━━━━━━━━━━<br/>thumbdb_delete()<br/>→ WAL: __DELETE__<br/>→ Remove from RHHash"]
+        Compact["COMPACT<br/>━━━━━━━━━━<br/>thumbdb_compact()<br/>→ Create .tmp file<br/>→ Rewrite w/ compression<br/>→ Atomic rename"]
+  end
+    TDB -->|Load on init| RHHash
+    TDB -->|Load dir paths| DirTable
+    ThumbWorkers -->|Generate| THUMBS
+    ThumbWorkers -->|Write key/value| WAL
+    WAL -->|Periodic read| WALProcessor
+    WALProcessor -->|Deduplicate & commit| TxState
+    TxState -->|Update| RHHash
+    TxState -->|Append records| TDB
+    WALProcessor -->|Delete after commit| WAL
+    WALProcessor -->|Trigger| Compact
+    Compact -->|Rewrite| TDB
+    Read -->|Query| RHHash
+    Write -->|Insert| WAL
+    Write -->|Update| RHHash
+    Delete -->|Mark delete| WAL
+    Delete -->|Remove| RHHash
+    MaintenanceThread -->|Cleanup| THUMBS
+    MaintenanceThread -->|Process| WAL
+    LOCK -.->|Protects| ThumbWorkers
+    DirTable -.->|Used by| Compact

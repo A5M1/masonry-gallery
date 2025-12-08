@@ -40,8 +40,6 @@ static const char* exception_code_description(DWORD code) {
 static void write_backtrace_with_symbols(void) {
     void* frames[128];
     USHORT fcount = CaptureStackBackTrace(0, 128, frames, NULL);
-    
-    // Initialize symbol handler for better stack traces
     HANDLE process = GetCurrentProcess();
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
     BOOL sym_init = SymInitialize(process, NULL, TRUE);
@@ -57,7 +55,6 @@ static void write_backtrace_with_symbols(void) {
         
         DWORD64 displacement = 0;
         if (sym_init && SymFromAddr(process, addr, &displacement, symbol)) {
-            // Try to get line information
             IMAGEHLP_LINE64 line;
             line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
             DWORD line_displacement = 0;
@@ -132,13 +129,6 @@ static void write_minidump_with_filename(EXCEPTION_POINTERS* ep) {
     mei.ThreadId = GetCurrentThreadId();
     mei.ExceptionPointers = ep;
     mei.ClientPointers = FALSE;
-
-    // Use enhanced minidump options for better debugging
-    // MiniDumpWithDataSegs: Include data segments (global and static variables)
-    // MiniDumpWithHandleData: Include handle information
-    // MiniDumpWithFullMemoryInfo: Include memory region information
-    // MiniDumpWithThreadInfo: Include thread state information
-    // MiniDumpWithUnloadedModules: Include recently unloaded modules
     MINIDUMP_TYPE dump_type = (MINIDUMP_TYPE)(
         MiniDumpWithDataSegs | 
         MiniDumpWithHandleData | 
@@ -209,7 +199,6 @@ static LONG WINAPI exception_filter(EXCEPTION_POINTERS* ep) {
     LOG_ERROR("Exception Code: 0x%08x (%s)", (unsigned)code, desc);
     LOG_ERROR("Exception Address: %p", ep->ExceptionRecord->ExceptionAddress);
     
-    // Additional information for specific exception types
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
         ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
         ULONG_PTR address = ep->ExceptionRecord->ExceptionInformation[1];

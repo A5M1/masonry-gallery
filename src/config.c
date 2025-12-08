@@ -9,6 +9,12 @@
 static char** gallery_folders = NULL;
 static size_t gallery_folder_count = 0;
 int server_port = 3000;
+int log_threads_enabled = 0;
+int db_repair_interval = 3600;
+int db_compact_interval = 7200;
+int db_sweep_interval = 1800;
+int exif_extraction_enabled = 0;
+char exif_tool_path[PATH_MAX] = {0};
 
 void load_config(void) {
 	FILE* f = fopen(CONFIG_FILE, "r");
@@ -35,6 +41,32 @@ void load_config(void) {
 				if (p > 0 && p < 65536) server_port = p;
 				LOG_INFO("Loaded server port from config: %d", server_port);
 			}
+			else if (ascii_stricmp(key, "db_repair_interval") == 0) {
+				int v = atoi(val);
+				if (v > 0) db_repair_interval = v;
+				LOG_INFO("Loaded db_repair_interval from config: %d", db_repair_interval);
+			}
+			else if (ascii_stricmp(key, "db_compact_interval") == 0) {
+				int v = atoi(val);
+				if (v > 0) db_compact_interval = v;
+				LOG_INFO("Loaded db_compact_interval from config: %d", db_compact_interval);
+			}
+			else if (ascii_stricmp(key, "db_sweep_interval") == 0) {
+				int v = atoi(val);
+				if (v > 0) db_sweep_interval = v;
+				LOG_INFO("Loaded db_sweep_interval from config: %d", db_sweep_interval);
+			}
+			else if (ascii_stricmp(key, "exif_extraction") == 0) {
+				if (ascii_stricmp(val, "enabled") == 0 || ascii_stricmp(val, "true") == 0 || ascii_stricmp(val, "1") == 0) {
+					exif_extraction_enabled = 1;
+					LOG_INFO("EXIF extraction enabled");
+				}
+			}
+			else if (ascii_stricmp(key, "exiftool_path") == 0) {
+				strncpy(exif_tool_path, val, PATH_MAX - 1);
+				exif_tool_path[PATH_MAX - 1] = '\0';
+				LOG_INFO("EXIF tool path set to: %s", exif_tool_path);
+			}
 			else {
 				LOG_WARN("Unknown config key: %s", key);
 			}
@@ -52,6 +84,26 @@ void load_config(void) {
 	fclose(f);
 	if (gallery_folder_count == 0) {
 		add_gallery_folder(BASE_DIR);
+	}
+
+	if (exif_tool_path[0] == '\0' && exif_extraction_enabled) {
+		char default_path[PATH_MAX];
+		snprintf(default_path, sizeof(default_path), "%s%cdata%coptionaltools%cexiftool.exe", BASE_DIR, DIR_SEP, DIR_SEP, DIR_SEP);
+		if (is_file(default_path)) {
+			strncpy(exif_tool_path, default_path, PATH_MAX - 1);
+			exif_tool_path[PATH_MAX - 1] = '\0';
+			LOG_INFO("Auto-detected EXIF tool at: %s", exif_tool_path);
+		} else {
+			snprintf(default_path, sizeof(default_path), "%s%cdata%coptionaltools%cexiftool", BASE_DIR, DIR_SEP, DIR_SEP, DIR_SEP);
+			if (is_file(default_path)) {
+				strncpy(exif_tool_path, default_path, PATH_MAX - 1);
+				exif_tool_path[PATH_MAX - 1] = '\0';
+				LOG_INFO("Auto-detected EXIF tool at: %s", exif_tool_path);
+			} else {
+				LOG_WARN("EXIF extraction enabled but exiftool not found at %s", default_path);
+				exif_extraction_enabled = 0;
+			}
+		}
 	}
 
 	if (gallery_folder_count > 0 && gallery_folders[0] && gallery_folders[0][0]) {
@@ -73,6 +125,14 @@ void save_config(void) {
 	fprintf(f, "# Each other non-comment line should contain a path to a gallery folder\n\n");
 
 	fprintf(f, "port=%d\n", server_port);
+	fprintf(f, "db_repair_interval=%d\n", db_repair_interval);
+	fprintf(f, "db_compact_interval=%d\n", db_compact_interval);
+	fprintf(f, "db_sweep_interval=%d\n", db_sweep_interval);
+	fprintf(f, "exif_extraction=%s\n", exif_extraction_enabled ? "enabled" : "disabled");
+	if (exif_tool_path[0]) {
+		fprintf(f, "exiftool_path=%s\n", exif_tool_path);
+	}
+	fprintf(f, "\n");
 
 	for (size_t i = 0; i < gallery_folder_count; i++) {
 		fprintf(f, "%s\n", gallery_folders[i]);
@@ -128,4 +188,12 @@ bool is_gallery_folder(const char* path) {
 char** get_gallery_folders(size_t* count) {
 	*count = gallery_folder_count;
 	return gallery_folders;
+}
+
+const char* get_exiftool_path(void) {
+	return exif_tool_path[0] ? exif_tool_path : NULL;
+}
+
+int is_exif_extraction_enabled(void) {
+	return exif_extraction_enabled;
 }
