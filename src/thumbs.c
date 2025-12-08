@@ -27,6 +27,7 @@ typedef struct {
 static void record_thumb_job_completion(const thumb_job_t* job);
 static void run_thumb_job(thumb_job_t* job);
 static void generate_thumb_inline_and_record(const char* input, const char* output, int scale, int q, int index, int total);
+static int wal_read_entry(const char* chunk_path, char* key, size_t key_len, char* value, size_t value_len);
 static void sleep_ms(int ms) { platform_sleep_ms(ms); }
 static atomic_int thumb_workers_active = ATOMIC_VAR_INIT(0);
 
