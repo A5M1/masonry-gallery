@@ -49,6 +49,7 @@
 			"**/.features":true,
 			"**/.roo":true,
 			"**/logs": true,
+            "**/dist": true,
 			"**/license": true,
 			"**/tools": true,
 			".hintrc": true,
