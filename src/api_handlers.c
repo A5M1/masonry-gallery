@@ -464,14 +464,22 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		}
 		char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 
+		uint8_t digest[MD5_DIGEST_LENGTH];
+		char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
+		md5hex[0] = '\0';
+		if (crypto_md5_file(full_path, digest) == 0) {
+			for (size_t di = 0; di < MD5_DIGEST_LENGTH; ++di)
+				snprintf(md5hex + (di * 2), 3, "%02x", digest[di]);
+		}
+
 		char dim_attr[64]; dim_attr[0] = '\0';
 		int is_video = has_ext(files[i], VIDEO_EXTS);
 		int thumb_status = small_exists ? 1 : 0;
 		if (is_video) {
-			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"video\"><a data-fancybox=\"gallery\" href=\"%s\" data-thumb-status=\"%d\" data-type=\"video\" data-src=\"%s\">", href_esc, thumb_status, href_esc);
+			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"video\" data-hash=\"%s\"><a data-fancybox=\"gallery\" href=\"%s\" data-thumb-status=\"%d\" data-type=\"video\" data-src=\"%s\">", md5hex, href_esc, thumb_status, href_esc);
 		}
 		else {
-			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"image\"><a data-fancybox=\"gallery\" href=\"%s\" data-thumb-status=\"%d\">", href_esc, thumb_status);
+			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"image\" data-hash=\"%s\"><a data-fancybox=\"gallery\" href=\"%s\" data-thumb-status=\"%d\">", md5hex, href_esc, thumb_status);
 		}
 		if (small_exists)
 			appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\"%s class=\"thumb-img\">", small_esc, small_esc, large_esc, dim_attr);
@@ -987,7 +995,22 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 				}
 			}
 			char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
-			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\"><a data-fancybox=\"gallery\" href=\"%s\">", href_esc);
+
+			uint8_t digest[MD5_DIGEST_LENGTH];
+			char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
+			md5hex[0] = '\0';
+			if (crypto_md5_file(full_path, digest) == 0) {
+				for (size_t di = 0; di < MD5_DIGEST_LENGTH; ++di)
+					snprintf(md5hex + (di * 2), 3, "%02x", digest[di]);
+			}
+
+			int is_video = has_ext(files[i], VIDEO_EXTS);
+			if (is_video) {
+				appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"video\" data-hash=\"%s\"><a data-fancybox=\"gallery\" href=\"%s\" data-type=\"video\" data-src=\"%s\">", md5hex, href_esc, href_esc);
+			}
+			else {
+				appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"image\" data-hash=\"%s\"><a data-fancybox=\"gallery\" href=\"%s\">", md5hex, href_esc);
+			}
 			if (small_exists)
 				appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", small_esc, small_esc, large_esc);
 			else if (large_exists)
@@ -1652,9 +1675,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 	size_t used = 0;
 	char* ptr = buf;
 	size_t rem = cap;
-	ptr = json_objOpen(ptr, NULL, &rem);
-	ptr = json_arrOpen(ptr, "items", &rem);
-	used = ptr - buf;
+	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
 	tdb_list_ctx_t ctx;
 	ctx.buf = buf; ctx.cap = cap; ctx.used = used; ctx.first = 1; ctx.filter_enabled = 0; ctx.per_thumbs_root[0] = '\0'; ctx.base_real[0] = '\0';
 	if (qs) {
@@ -1687,10 +1708,65 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 				ctx.filter_enabled = 1;
 				char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0'; mk_dir(per_thumbs_root);
 				snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+				strncpy(requested_dir_param, dir, sizeof(requested_dir_param) - 1);
+				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
+				LOG_DEBUG("handle_api_thumbdb_list: requested dir param=%s per_db=%s", requested_dir_param, per_db);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dir);
 		}
+	}
+	if (!requested_dir_param[0]) {
+		strncpy(requested_dir_param, BASE_DIR, sizeof(requested_dir_param) - 1);
+		requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
+	}
+	if (requested_dir_param[0]) {
+		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
+		make_safe_dir_name_from(requested_dir_param, safe_dir, sizeof(safe_dir));
+		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+		char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
+		mk_dir(per_thumbs_root);
+		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		LOG_DEBUG("handle_api_thumbdb_delete: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
+		thumbdb_open_for_dir(per_db);
+	}
+	if (requested_dir_param[0]) {
+		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
+		make_safe_dir_name_from(requested_dir_param, safe_dir, sizeof(safe_dir));
+		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+		char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
+		mk_dir(per_thumbs_root);
+		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		LOG_DEBUG("handle_api_thumbdb_set: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
+		thumbdb_open_for_dir(per_db);
+	}
+	if (requested_dir_param[0]) {
+		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
+		make_safe_dir_name_from(requested_dir_param, safe_dir, sizeof(safe_dir));
+		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+		char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
+		mk_dir(per_thumbs_root);
+		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		LOG_DEBUG("handle_api_thumbdb_get: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
+		thumbdb_open_for_dir(per_db);
+	}
+	ptr = json_objOpen(ptr, NULL, &rem);
+	ptr = json_str(ptr, "requested_dir", requested_dir_param, &rem);
+	ptr = json_arrOpen(ptr, "items", &rem);
+	used = ptr - buf;
+	if (ctx.per_thumbs_root[0] == '\0') {
+		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
+		make_safe_dir_name_from(requested_dir_param, safe_dir, sizeof(safe_dir));
+		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+		if (safe_dir[0]) snprintf(ctx.per_thumbs_root, sizeof(ctx.per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
+		else snprintf(ctx.per_thumbs_root, sizeof(ctx.per_thumbs_root), "%s", thumbs_root);
+		strncpy(ctx.base_real, requested_dir_param, sizeof(ctx.base_real) - 1);
+		ctx.base_real[sizeof(ctx.base_real) - 1] = '\0';
+		ctx.filter_enabled = 1;
+		char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0'; mk_dir(per_thumbs_root);
+		snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		LOG_DEBUG("handle_api_thumbdb_list: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
+		thumbdb_open_for_dir(per_db);
 	}
 	char* plain_flag = NULL;
 	if (qs) plain_flag = query_get(qs, "plain");
@@ -1878,6 +1954,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 	if (!qs) { send_text(c, 400, "Bad Request", "Missing query", keep_alive); return; }
 	char* k = query_get(qs, "key");
 	if (!k) { send_text(c, 400, "Bad Request", "Missing key", keep_alive); return; }
+	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
 	if (qs) {
 		char* dirq = query_get(qs, "dir");
 		if (dirq) {
@@ -1893,10 +1970,17 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
 				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
+				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
+				LOG_DEBUG("handle_api_thumbdb_get: opening db=%s for requested_dir=%s", per_db, requested_dir_param[0] ? requested_dir_param : BASE_DIR);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
 		}
+	}
+	if (!requested_dir_param[0]) {
+		strncpy(requested_dir_param, BASE_DIR, sizeof(requested_dir_param) - 1);
+		requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 	}
 
 	char val[65536]; val[0] = '\0';
@@ -1930,6 +2014,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 	if (!buf) { SAFE_FREE(k); send_text(c, 500, "Internal Server Error", "Out of memory", keep_alive); return; }
 	size_t rem = cap; char* ptr = buf;
 	ptr = json_objOpen(ptr, NULL, &rem);
+	ptr = json_str(ptr, "requested_dir", requested_dir_param, &rem);
 	ptr = json_str(ptr, "key", k, &rem);
 	ptr = json_str(ptr, "small", smalltok, &rem);
 	ptr = json_str(ptr, "large", largetok, &rem);
@@ -1943,6 +2028,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 
 void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
+	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
 	if (g_request_qs) {
 		char* dirq = query_get(g_request_qs, "dir");
 		if (dirq) {
@@ -1958,10 +2044,17 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
 				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
+				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
+				LOG_DEBUG("handle_api_thumbdb_set: opening db=%s for requested_dir=%s", per_db, requested_dir_param[0] ? requested_dir_param : BASE_DIR);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
 		}
+	}
+	if (!requested_dir_param[0]) {
+		strncpy(requested_dir_param, BASE_DIR, sizeof(requested_dir_param) - 1);
+		requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 	}
 	const char* kstart = strstr(body, "\"key\":\"");
 	const char* vstart = strstr(body, "\"value\":\"");
@@ -1984,6 +2077,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 
 void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
+	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
 	if (g_request_qs) {
 		char* dirq = query_get(g_request_qs, "dir");
 		if (dirq) {
@@ -1999,10 +2093,17 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
 				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
+				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
+				LOG_DEBUG("handle_api_thumbdb_delete: opening db=%s for requested_dir=%s", per_db, requested_dir_param[0] ? requested_dir_param : BASE_DIR);
 				thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
 		}
+	}
+	if (!requested_dir_param[0]) {
+		strncpy(requested_dir_param, BASE_DIR, sizeof(requested_dir_param) - 1);
+		requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 	}
 	const char* kstart = strstr(body, "\"key\":\"");
 	if (!kstart) { send_text(c, 400, "Bad Request", "Missing key", keep_alive); return; }

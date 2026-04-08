@@ -102,12 +102,11 @@ int platform_file_delete(const char* path) {
             LOG_WARN("platform_file_delete: attempt=%d DeleteFileW retry after SetFileAttributesW failed for %s err=%lu", attempts + 1, path, (unsigned long)err2);
         }
         if (err == ERROR_SHARING_VIOLATION) {
-            int backoff = 50 * (attempts + 1);
-            if (backoff < 100) backoff = 100;
-            if (backoff > 2000) backoff = 2000;
+            int backoff = 50 * (1 << attempts); // Exponential backoff
+            if (backoff > 5000) backoff = 5000; // Cap at 5000ms
+            LOG_WARN("platform_file_delete: retrying after %d ms due to sharing violation", backoff);
             platform_sleep_ms(backoff);
-        }
-        else {
+        } else {
             platform_sleep_ms(50);
         }
         attempts++;

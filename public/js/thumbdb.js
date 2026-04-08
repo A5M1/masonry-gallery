@@ -35,6 +35,7 @@
 		fetch(url)
 			.then(r => r.json())
 			.then(data => {
+				if (data && data.requested_dir && el("dir")) el("dir").value = data.requested_dir;
 				renderList(normalizeItems(data && data.items));
 			})
 			.catch(e => {
@@ -104,6 +105,7 @@
 				return r.json();
 			})
 			.then(obj => {
+				if (obj && obj.requested_dir && el("dir")) el("dir").value = obj.requested_dir;
 				el("editor").style.display = "block";
 				el("editorKey").textContent = obj.key;
 				el("editorValue").value = obj.value || "";

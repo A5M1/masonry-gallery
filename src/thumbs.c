@@ -392,18 +392,7 @@ void make_safe_dir_name_from(const char* dir, char* out, size_t outlen) {
     normalize_path(tmp);
     strip_trailing_sep(tmp);
 
-    bool has_alpha = false;
-    bool all_upper = true;
-    for (size_t ii = 0; tmp[ii]; ++ii) {
-        unsigned char uc = (unsigned char)tmp[ii];
-        if (isalpha(uc)) {
-            has_alpha = true;
-            if (islower(uc)) { all_upper = false; break; }
-        }
-    }
-
     int to_lower = 1;
-    if (has_alpha && all_upper) to_lower = 0;
 
     size_t si = 0;
     bool last_was_dash = false;
@@ -452,7 +441,7 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     char parent[PATH_MAX];
     parent[0] = '\0';
     get_parent_dir(job->input, parent, sizeof(parent));
-    
+
     char relurl[PATH_MAX];
     relurl[0] = '\0';
     size_t gf_count = 0;
@@ -471,7 +460,7 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
             }
         }
     }
-    
+
     char media_url[PATH_MAX];
     if (relurl[0]) {
         snprintf(media_url, sizeof(media_url), "/images/%s", relurl);
@@ -479,9 +468,17 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
         strncpy(media_url, job->input, sizeof(media_url) - 1);
         media_url[sizeof(media_url) - 1] = '\0';
     }
-    
+
+    uint8_t digest[MD5_DIGEST_LENGTH];
+    char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
+    md5hex[0] = '\0';
+    if (crypto_md5_file(job->input, digest) == 0) {
+        for (size_t di = 0; di < MD5_DIGEST_LENGTH; ++di)
+            snprintf(md5hex + (di * 2), 3, "%02x", digest[di]);
+    }
+
     char msg[1024];
-    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\"}", media_url, bn);
+    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\",\"hash\":\"%s\"}", media_url, bn, md5hex);
     if (r > 0) websocket_broadcast_topic(parent[0] ? parent : NULL, msg);
 }
 static void run_thumb_job(thumb_job_t* job) {
@@ -1065,6 +1062,7 @@ static void thumb_watcher_cb(const char* dir) {
 
         char per_db[PATH_MAX];
         snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+        LOG_DEBUG("thumb_watcher_cb: opening DB %s for dir=%s", per_db, dir);
         thumbdb_open_for_dir(per_db);
 
         count_media_in_dir(dir, &quick_prog);
@@ -1188,6 +1186,7 @@ static void* thumbnail_generation_thread(void* args) {
     run_thumb_generation(dir_path);
     strip_trailing_sep(dir_path);
     LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
+
     if (!running_mutex_inited && thread_mutex_init(&running_mutex) == 0) running_mutex_inited = 1;
     if (running_mutex_inited) {
         thread_mutex_lock(&running_mutex);
@@ -1441,10 +1440,10 @@ void run_thumb_generation(const char* dir) {
     snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
     int tbr = thumbdb_open_for_dir(per_db);
     if (tbr != 0) {
-        LOG_WARN("run_thumb_generation: thumbdb_open_for_dir failed for %s (rc=%d)", per_db, tbr);
+        LOG_WARN("run_thumb_generation: thumbdb_open_for_dir failed for %s (rc=%d) for dir=%s", per_db, tbr, dir);
     }
     else {
-        LOG_DEBUG("run_thumb_generation: opened DB %s", per_db);
+        LOG_DEBUG("run_thumb_generation: opened DB %s for dir=%s", per_db, dir);
         process_wal_chunks(per_thumbs_root);
     }
 
@@ -1925,6 +1924,7 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
     }
     char per_db[PATH_MAX];
     snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", thumbs_path);
+    LOG_DEBUG("clean_orphan_thumbs: opening DB %s for dir=%s", per_db, dir);
     thumbdb_open_for_dir(per_db);
     const char* tname;
     char tname_copy[PATH_MAX];

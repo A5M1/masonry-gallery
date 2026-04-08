@@ -453,11 +453,28 @@
 							"-small.",
 							"-large."
 						);
-						var sel1 = 'a[href="' + o.media + '"] img.thumb-img';
-						var sel2 = '[data-src="' + o.media + '"] img.thumb-img';
-						var els = Array.from(
-							document.querySelectorAll(sel1)
-						).concat(Array.from(document.querySelectorAll(sel2)));
+						var hash = o.hash || "";
+						var els = [];
+						if (hash) {
+							var hashSel =
+								'.masonry-item[data-hash="' +
+								hash +
+								'"] img.thumb-img';
+							els = Array.from(
+								document.querySelectorAll(hashSel)
+							);
+						}
+						if (els.length === 0) {
+							var sel1 =
+								'a[href="' + o.media + '"] img.thumb-img';
+							var sel2 =
+								'[data-src="' + o.media + '"] img.thumb-img';
+							els = Array.from(
+								document.querySelectorAll(sel1)
+							).concat(
+								Array.from(document.querySelectorAll(sel2))
+							);
+						}
 						els.forEach(function (el) {
 							try {
 								var currentSrc = el.getAttribute("src") || "";
