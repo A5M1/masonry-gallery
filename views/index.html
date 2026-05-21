@@ -9,11 +9,16 @@
     <link rel="stylesheet" href="/css/jquery.fancybox.css" type="text/css" />
     <link rel="stylesheet" href="/css/galleria.css" type="text/css" />
     <script src="/bundled"></script>
+    <script src="/js/gallery.js"></script>
+    <script>$(document).ready(function () { w(); m(); f(); v(); });</script>
+    <script>(function () { const debug = !1; try { var proto = (location.protocol === 'https:') ? 'wss://' : 'ws://'; var wsUrl = proto + location.host + '/ws'; var ws = new WebSocket(wsUrl); ws.addEventListener('open', function () { if (debug) { console.log('WebSocket connected to', wsUrl) } }); ws.addEventListener('message', function (evt) { try { var data = evt.data; if (debug) { console.log('WS message', data) } } catch (e) { console.error(e) } }); ws.addEventListener('close', function () { if (debug) { console.log('WebSocket disconnected') } }) } catch (e) { console.error('WebSocket init failed', e) } })()</script>
 </head>
 
 <body>
     <button class="sidebar-toggle-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
-    <!--<button class="scroll-to-top-btn" onclick="scrollToTopAndReset()">⬆️ Reset</button>-->
+    <!--[
+        refactor functionality ->   <button class="scroll-to-top-btn" onclick="scrollToTopAndReset()">⬆️ Reset</button> 
+    ]-->
     <div class="sidebar">
         <div class="sidebar-header"></div>
         <li class="folder-item" data-path="/">
@@ -26,50 +31,12 @@
         </li>
         <div id="folder-tree-container"></div>
     </div>
-
     <div class="gallery-container">
         <div id="gallery" class="masonry" style="overflow: hidden">
             <div class="grid-sizer"></div>
         </div>
         <div id="loading" class="loading">Loading...</div>
     </div>
-
-    <script src="/js/gallery.js"></script>
-    <script>
-        $(document).ready(function () {
-            w();
-            m();
-            f();
-            v();
-        });
-    </script>
-    <script>
-        (function () {
-            const debug = false;
-            try {
-                var proto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
-                var wsUrl = proto + location.host + '/ws';
-                var ws = new WebSocket(wsUrl);
-                ws.addEventListener('open', function () {
-                    console.log('WebSocket connected to', wsUrl);
-                });
-                ws.addEventListener('message', function (evt) {
-                    try {
-                        var data = evt.data;
-                        if (debug) {
-                            console.log('WS message', data);
-                        }
-                    } catch (e) { console.error(e) }
-                });
-                ws.addEventListener('close', function () {
-                    if (debug) {
-                        console.log('WebSocket disconnected');
-                    }
-                });
-            } catch (e) { console.error('WebSocket init failed', e) }
-        })();
-    </script>
-
 </body>
 
 </html>

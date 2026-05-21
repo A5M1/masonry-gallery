@@ -128,3 +128,5 @@ SECURITY_ASSESSMENT_REPORT.md
 SPEC.md
 public/css/GLYPHICON.css
 /public/fonts
+public/js/fancybox.umd.js
+public/css/v6-fancybox.css
