@@ -35,7 +35,14 @@
     </div>
 
     <script src="/js/gallery.js"></script>
-    <script>$(document).ready(function () {w();m();f();v();});</script>
+    <script>
+        $(document).ready(function () {
+            w();
+            m();
+            f();
+            v();
+        });
+    </script>
     <script>
         (function () {
             const debug = false;
@@ -49,11 +56,15 @@
                 ws.addEventListener('message', function (evt) {
                     try {
                         var data = evt.data;
-                        if (debug) console.log('WS message', data);
+                        if (debug) {
+                            console.log('WS message', data);
+                        }
                     } catch (e) { console.error(e) }
                 });
                 ws.addEventListener('close', function () {
-                    if (debug) console.log('WebSocket disconnected');
+                    if (debug) {
+                        console.log('WebSocket disconnected');
+                    }
                 });
             } catch (e) { console.error('WebSocket init failed', e) }
         })();
