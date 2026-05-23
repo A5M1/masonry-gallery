@@ -23,12 +23,18 @@ function isVideoFile(path) {
 
 function getVideoMime(ext) {
 	switch (ext) {
-		case "mp4": return "video/mp4";
-		case "webm": return "video/webm";
-		case "mov": return "video/quicktime";
-		case "avi": return "video/x-msvideo";
-		case "mkv": return "video/x-matroska";
-		default: return "";
+		case "mp4":
+			return "video/mp4";
+		case "webm":
+			return "video/webm";
+		case "mov":
+			return "video/quicktime";
+		case "avi":
+			return "video/x-msvideo";
+		case "mkv":
+			return "video/x-matroska";
+		default:
+			return "";
 	}
 }
 
@@ -63,15 +69,57 @@ function buildTree(paths) {
 
 function renderTree(container, tree, isLeft) {
 	container.innerHTML = "";
+	let displayTree = {};
+
+	if (isLeft) {
+		displayTree = tree;
+	} else {
+		const counts = {};
+		const sortedKeys = Object.keys(tree).sort((a, b) =>
+			a.localeCompare(b, undefined, {sensitivity: "base"})
+		);
+
+		for (const key of sortedKeys) {
+			const firstChar = key.trim().charAt(0).toUpperCase();
+			const letterGroup =
+				firstChar >= "A" && firstChar <= "Z" ? firstChar : "#";
+			counts[letterGroup] = (counts[letterGroup] || 0) + 1;
+		}
+
+		for (const key of sortedKeys) {
+			const firstChar = key.trim().charAt(0).toUpperCase();
+			const letterGroup =
+				firstChar >= "A" && firstChar <= "Z" ? firstChar : "#";
+
+			if (counts[letterGroup] > 1) {
+				if (!displayTree[letterGroup]) {
+					displayTree[letterGroup] = {
+						_virtual: true,
+						_children: {}
+					};
+				}
+				displayTree[letterGroup]._children[key] = tree[key];
+			} else {
+				displayTree[key] = tree[key];
+			}
+		}
+	}
 
 	function createNode(name, data) {
 		const wrapper = document.createElement("div");
-		const hasChildren = Object.keys(data._children).length > 0;
+		const childrenKeys = Object.keys(data._children || {}).sort((a, b) =>
+			a.localeCompare(b, undefined, {sensitivity: "base"})
+		);
+		const hasChildren = childrenKeys.length > 0;
 		const label = document.createElement("div");
 		label.className = "folder";
 		label.textContent = name;
-		const fullPath = data._full;
-		label.dataset.full = fullPath;
+
+		if (data._virtual) {
+			label.classList.add("virtual-letter");
+		} else {
+			label.dataset.full = data._full;
+		}
 
 		if (hasChildren) {
 			label.classList.add("has-children");
@@ -82,59 +130,62 @@ function renderTree(container, tree, isLeft) {
 			arrow.onclick = e => {
 				e.stopPropagation();
 				wrapper.classList.toggle("expanded");
-				arrow.textContent = wrapper.classList.contains("expanded") ? "▾" : "▸";
+				arrow.textContent =
+					wrapper.classList.contains("expanded") ? "▾" : "▸";
 			};
 			label.appendChild(arrow);
 			label.appendChild(document.createTextNode(name));
 		}
 
-		if (isLeft && normalizePath(fullPath) === normalizePath(dir)) {
-			label.classList.add("selected");
-			expandAncestors(wrapper, container);
-			setTimeout(() => label.scrollIntoView({ block: "center" }), 50);
-		}
-
-		label.onclick = e => {
-			e.stopPropagation();
-			if (isLeft) {
-				const url = new URL(location.href);
-				url.searchParams.set("dir", fullPath);
-				location.href = url.toString();
-			} else {
-				target = fullPath;
-				const url = new URL(location.href);
-				url.searchParams.set("target", target);
-				window.history.replaceState({}, "", url.toString());
-				document.querySelectorAll("#targetFolder .folder").forEach(el => el.classList.remove("selected"));
+		const currentTarget = normalizePath(
+			new URLSearchParams(location.search).get("target") || target
+		);
+		if (!data._virtual) {
+			if (isLeft && normalizePath(data._full) === normalizePath(dir)) {
 				label.classList.add("selected");
-				setTimeout(() => label.scrollIntoView({ block: "center" }), 50);
-				log("target selected", target);
+				expandAncestors(wrapper, container);
+				setTimeout(() => label.scrollIntoView({block: "center"}), 50);
+			} else if (!isLeft && normalizePath(data._full) === currentTarget) {
+				label.classList.add("selected");
+				expandAncestors(wrapper, container);
+				setTimeout(() => label.scrollIntoView({block: "center"}), 50);
 			}
-		};
+		}
 
 		wrapper.appendChild(label);
 
 		if (hasChildren) {
 			const nested = document.createElement("div");
 			nested.className = "nested";
-			for (const key in data._children) nested.appendChild(createNode(key, data._children[key]));
+			for (const key of childrenKeys) {
+				nested.appendChild(createNode(key, data._children[key]));
+			}
 			wrapper.appendChild(nested);
 		}
 
 		return wrapper;
 	}
 
-	for (const key in tree) container.appendChild(createNode(key, tree[key]));
+	const sortedRootKeys = Object.keys(displayTree).sort((a, b) =>
+		a.localeCompare(b, undefined, {sensitivity: "base"})
+	);
+	for (const key of sortedRootKeys) {
+		container.appendChild(createNode(key, displayTree[key]));
+	}
 }
 
 function handleFolderClick(e, isLeft) {
 	const label = e.target.closest(".folder");
-	if (!label) return;
+	if (!label || label.classList.contains("virtual-letter")) return;
 	e.stopPropagation();
 	const fullPath = label.dataset.full;
 
 	if (isLeft) {
 		log("left folder click", fullPath);
+		document
+			.querySelectorAll("#folderList .folder")
+			.forEach(el => el.classList.remove("selected"));
+		label.classList.add("selected");
 		const url = new URL(location.href);
 		url.searchParams.set("dir", fullPath);
 		location.href = url.toString();
@@ -150,28 +201,37 @@ function handleFolderClick(e, isLeft) {
 				f.style.display = "flex";
 				f.classList.remove("highlight");
 			});
-			document.querySelectorAll("#targetFolder .expanded").forEach(el => el.classList.remove("expanded"));
+			document
+				.querySelectorAll("#targetFolder .expanded")
+				.forEach(el => el.classList.remove("expanded"));
 		}
 
 		const url = new URL(location.href);
 		url.searchParams.set("target", target);
 		window.history.replaceState({}, "", url.toString());
 
-		document.querySelectorAll("#targetFolder .folder").forEach(el => el.classList.remove("selected"));
+		document
+			.querySelectorAll("#targetFolder .folder")
+			.forEach(el => el.classList.remove("selected"));
 		label.classList.add("selected");
-		setTimeout(() => label.scrollIntoView({ block: "center" }), 50);
+		expandAncestors(
+			label.parentElement,
+			document.getElementById("targetFolder")
+		);
+		setTimeout(() => label.scrollIntoView({block: "center"}), 50);
 	}
 }
 
 function expandAncestors(el, container) {
 	while (el && el !== container) {
-		if (el.classList.contains("nested")) el.parentElement.classList.add("expanded");
+		if (el.classList.contains("nested"))
+			el.parentElement.classList.add("expanded");
 		el = el.parentElement;
 	}
 }
 
 async function loadMedia() {
-	log("loadMedia()", { dir });
+	log("loadMedia()", {dir});
 	const res = await fetch(`/files?dir=${encodeURIComponent(dir)}`);
 	mediaList = await res.json();
 	currentIndex = 0;
@@ -188,13 +248,14 @@ function animateSwipe(direction) {
 		showCurrent();
 	}, 300);
 }
+
 function ensureFancyboxVideoHolder(src, mime) {
 	let holder = document.getElementById("fancybox-video-holder");
 	if (!holder) {
 		holder = document.createElement("div");
 		holder.id = "fancybox-video-holder";
 		holder.style.display = "none";
-		holder.className="";
+		holder.className = "";
 		document.body.appendChild(holder);
 	}
 
@@ -207,7 +268,6 @@ function ensureFancyboxVideoHolder(src, mime) {
 			playsinline
 			controls
 			preload="auto"
-
 		>
 			<source src="${src}" type="${mime}">
 			Your browser doesn't support HTML5 video.
@@ -221,14 +281,14 @@ function openMedia(src) {
 	const ext = (src || "").split(".").pop().toLowerCase();
 	const video = videoExts.has(ext);
 
-	log("openMedia()", { src, ext, video });
+	log("openMedia()", {src, ext, video});
 
 	if (!video) {
-		Fancybox.show([{ src, type: "image" }], {
+		Fancybox.show([{src, type: "image"}], {
 			Animated: false,
 			showClass: false,
 			hideClass: false,
-			Toolbar: { display: { left: [], middle: [], right: ["close"] } }
+			Toolbar: {display: {left: [], middle: [], right: ["close"]}}
 		});
 		return;
 	}
@@ -236,36 +296,46 @@ function openMedia(src) {
 	const mime = getVideoMime(ext);
 	const holder = ensureFancyboxVideoHolder(src, mime);
 
-	Fancybox.show([{
-		src: "#fancybox-video-holder",
-		type: "inline",
-	}], {
-		Animated: false,
-		showClass: false,
-		hideClass: false,
-		Toolbar: { display: { left: [], middle: [], right: ["close"] } },
-		on: {
-			done: () => {
-				setTimeout(() => {
-					const videoEl = document.getElementById("fancyboxVideoPlayer");
-					if (!videoEl) return;
+	Fancybox.show(
+		[
+			{
+				src: "#fancybox-video-holder",
+				type: "inline"
+			}
+		],
+		{
+			Animated: false,
+			showClass: false,
+			hideClass: false,
+			Toolbar: {display: {left: [], middle: [], right: ["close"]}},
+			on: {
+				done: () => {
+					setTimeout(() => {
+						const videoEl = document.getElementById(
+							"fancyboxVideoPlayer"
+						);
+						if (!videoEl) return;
 
-					videoEl.style.maxWidth = "100%";
-					videoEl.style.maxHeight = "80vh";
-					videoEl.style.width = "auto";
-					videoEl.style.height = "auto";
-					videoEl.loop = true;
-					videoEl.muted = true;
-					videoEl.autoplay = true;
-					videoEl.playsInline = true;
-					videoEl.controls = true;
-					videoEl.load();
-					videoEl.play().catch(err => error("play() rejected", { src, err }));
-				}, 0);
+						videoEl.style.maxWidth = "100%";
+						videoEl.style.maxHeight = "80vh";
+						videoEl.style.width = "auto";
+						videoEl.style.height = "auto";
+						videoEl.loop = true;
+						videoEl.muted = true;
+						videoEl.autoplay = true;
+						videoEl.playsInline = true;
+						videoEl.controls = true;
+						videoEl.load();
+						videoEl
+							.play()
+							.catch(err => error("play() rejected", {src, err}));
+					}, 0);
+				}
 			}
 		}
-	});
+	);
 }
+
 function setupSwipeHandlers() {
 	const preview = document.getElementById("preview");
 	if (!preview) return;
@@ -284,7 +354,7 @@ function setupSwipeHandlers() {
 		pointerId = e.pointerId;
 		preview.setPointerCapture(pointerId);
 		preview.style.transition = "none";
-		log("pointerdown", { startX, startY, pointerId });
+		log("pointerdown", {startX, startY, pointerId});
 	});
 
 	preview.addEventListener("pointermove", function (e) {
@@ -312,7 +382,7 @@ function setupSwipeHandlers() {
 		preview.style.transform = "";
 		preview.style.opacity = "";
 
-		log("finish()", { dx, dy, currentIndex, item: mediaList[currentIndex] });
+		log("finish()", {dx, dy, currentIndex, item: mediaList[currentIndex]});
 
 		if (Math.abs(dx) < 5 && Math.abs(dy) < 5) {
 			const item = mediaList[currentIndex];
@@ -367,24 +437,34 @@ function showCurrent() {
 	const item = mediaList[currentIndex];
 	const ext = item.split(".").pop().toLowerCase();
 
-	log("showCurrent()", { currentIndex, item, ext });
+	log("showCurrent()", {currentIndex, item, ext});
 
 	if (["jpg", "jpeg", "png", "gif", "webp", "bmp"].includes(ext)) {
 		preview.innerHTML = `<img src="${item}" style="cursor:pointer;" />`;
 	} else if (isVideoFile(item)) {
 		preview.innerHTML = `
-			<video id="previewVideo" autoplay muted loop playsinline  style="cursor:pointer; max-width:100%; max-height:100%;">
+			<video id="previewVideo" autoplay muted loop playsinline style="cursor:pointer; max-width:100%; max-height:100%;">
 				<source src="${item}" type="${getVideoMime(ext)}">
 			</video>`;
 		const video = document.getElementById("previewVideo");
 		if (video) {
-			video.addEventListener("loadedmetadata", () => log("preview loadedmetadata", { item, duration: video.duration }));
-			video.addEventListener("canplay", () => log("preview canplay", { item, readyState: video.readyState }));
-			video.addEventListener("play", () => log("preview play", { item }));
-			video.addEventListener("pause", () => log("preview pause", { item }));
-			video.addEventListener("ended", () => log("preview ended", { item, loop: video.loop }));
-			video.addEventListener("error", () => error("preview error", { item, error: video.error }));
-			video.play().catch(err => warn("preview play rejected", { item, err }));
+			video.addEventListener("loadedmetadata", () =>
+				log("preview loadedmetadata", {item, duration: video.duration})
+			);
+			video.addEventListener("canplay", () =>
+				log("preview canplay", {item, readyState: video.readyState})
+			);
+			video.addEventListener("play", () => log("preview play", {item}));
+			video.addEventListener("pause", () => log("preview pause", {item}));
+			video.addEventListener("ended", () =>
+				log("preview ended", {item, loop: video.loop})
+			);
+			video.addEventListener("error", () =>
+				error("preview error", {item, error: video.error})
+			);
+			video
+				.play()
+				.catch(err => warn("preview play rejected", {item, err}));
 		}
 	} else {
 		preview.innerHTML = `<div>${item}</div>`;
@@ -394,12 +474,12 @@ function showCurrent() {
 async function accept() {
 	if (!target) return alert("Select a target folder first");
 	const fromPath = mediaList[currentIndex];
-	log("accept()", { fromPath, target });
+	log("accept()", {fromPath, target});
 
 	await fetch("/move", {
 		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ fromPath, targetFolder: target })
+		headers: {"Content-Type": "application/json"},
+		body: JSON.stringify({fromPath, targetFolder: target})
 	});
 
 	currentIndex++;
@@ -407,7 +487,7 @@ async function accept() {
 }
 
 function reject() {
-	log("reject()", { currentIndex });
+	log("reject()", {currentIndex});
 	currentIndex++;
 	animateSwipe("swipe-left");
 }
@@ -445,18 +525,19 @@ async function submitDelete() {
 		return;
 	}
 
-	log("submitDelete()", { item });
+	log("submitDelete()", {item});
 
 	try {
 		const res = await fetch("/api/delete-file", {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ fromPath: item })
+			headers: {"Content-Type": "application/json"},
+			body: JSON.stringify({fromPath: item})
 		});
 
 		if (res.ok) {
 			mediaList.splice(currentIndex, 1);
-			if (currentIndex >= mediaList.length) currentIndex = Math.max(0, mediaList.length - 1);
+			if (currentIndex >= mediaList.length)
+				currentIndex = Math.max(0, mediaList.length - 1);
 			hideDeleteDialog();
 			showCurrent();
 		} else {
@@ -481,32 +562,33 @@ async function submitAddFolder() {
 		return;
 	}
 
-	const body = targetInput ? { name, target: targetInput } : { name };
+	const body = targetInput ? {name, target: targetInput} : {name};
 
 	log("submitAddFolder()", body);
 
 	try {
 		const res = await fetch("/addfolder", {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: {"Content-Type": "application/json"},
 			body: JSON.stringify(body)
 		});
 		const txt = await res.text();
 
 		if (res.ok) {
 			document.getElementById("addFolderMsg").style.color = "#4caf50";
-			document.getElementById("addFolderMsg").innerText = "Folder created.";
+			document.getElementById("addFolderMsg").innerText =
+				"Folder created.";
 			hideAddFolderDialog();
 
-			const newPath = targetInput
-				? normalizePath(targetInput)
-					? `${normalizePath(targetInput)}/${name}`
-					: name
-				: name;
+			const newPath =
+				targetInput ?
+					normalizePath(targetInput) ?
+						`${normalizePath(targetInput)}/${name}`
+					:	name
+				:	name;
 
 			if (folders.indexOf(newPath) === -1) folders.push(newPath);
 
-			// Update the active target logic
 			target = newPath;
 			const url = new URL(location.href);
 			url.searchParams.set("target", target);
@@ -516,23 +598,11 @@ async function submitAddFolder() {
 			try {
 				const tree = buildTree(folders);
 				renderTree(document.getElementById("folderList"), tree, true);
-				renderTree(document.getElementById("targetFolder"), tree, false);
-
-				const container = document.getElementById("targetFolder");
-				requestAnimationFrame(() => {
-					// Clear previous selections first
-					container.querySelectorAll(".folder").forEach(el => el.classList.remove("selected"));
-					
-					const folderEls = container.querySelectorAll(".folder");
-					for (const el of folderEls) {
-						if (normalizePath(el.dataset.full) === normalizePath(newPath)) {
-							el.classList.add("selected");
-							expandAncestors(el.parentElement, container);
-							setTimeout(() => el.scrollIntoView({ block: "center" }), 100);
-							break;
-						}
-					}
-				});
+				renderTree(
+					document.getElementById("targetFolder"),
+					tree,
+					false
+				);
 			} catch (e) {
 				warn("Failed to update folders in DOM after add:", e);
 			}
@@ -546,6 +616,7 @@ async function submitAddFolder() {
 		error("add folder request error", e);
 	}
 }
+
 function setupFolderSearch() {
 	const searchInput = document.getElementById("folderSearch");
 	if (!searchInput) return;
@@ -559,9 +630,17 @@ function setupFolderSearch() {
 				f.style.display = "flex";
 				f.classList.remove("highlight");
 			});
-			document.querySelectorAll("#folderList .expanded").forEach(el => el.classList.remove("expanded"));
-			const selected = document.querySelector("#folderList .folder.selected");
-			if (selected) expandAncestors(selected, document.getElementById("folderList"));
+			document
+				.querySelectorAll("#folderList .expanded")
+				.forEach(el => el.classList.remove("expanded"));
+			const selected = document.querySelector(
+				"#folderList .folder.selected"
+			);
+			if (selected)
+				expandAncestors(
+					selected,
+					document.getElementById("folderList")
+				);
 			return;
 		}
 
@@ -593,13 +672,22 @@ function setupTargetSearch() {
 				f.style.display = "flex";
 				f.classList.remove("highlight");
 			});
-			document.querySelectorAll("#targetFolder .expanded").forEach(el => el.classList.remove("expanded"));
-			const selected = document.querySelector("#targetFolder .folder.selected");
-			if (selected) expandAncestors(selected, document.getElementById("targetFolder"));
+			document
+				.querySelectorAll("#targetFolder .expanded")
+				.forEach(el => el.classList.remove("expanded"));
+			const selected = document.querySelector(
+				"#targetFolder .folder.selected"
+			);
+			if (selected)
+				expandAncestors(
+					selected,
+					document.getElementById("targetFolder")
+				);
 			return;
 		}
 
 		folders.forEach(f => {
+			if (f.classList.contains("virtual-letter")) return;
 			const name = f.textContent.toLowerCase();
 			const match = name.includes(queryText);
 			if (match) {
@@ -637,7 +725,7 @@ function setupWebsocket() {
 				log("WebSocket open");
 				reconnectDelay = 1000;
 				try {
-					ws.send(JSON.stringify({ type: "subscribe", path: "" }));
+					ws.send(JSON.stringify({type: "subscribe", path: ""}));
 					log("WebSocket subscribed");
 				} catch (e) {
 					warn("WS subscribe failed", e);
@@ -653,36 +741,16 @@ function setupWebsocket() {
 					if (o.type === "folder_added" || o.type === "folderAdded") {
 						const rawPath = o.path || "";
 						const newPath = rawPath.replace(/\\/g, "/");
-						log("folder added event", { rawPath, newPath });
+						log("folder added event", {rawPath, newPath});
 
-						loadFolders()
-							.then(() => {
-								try {
-									const container = document.getElementById("targetFolder");
-									if (!container) return;
-									const folderEls = container.querySelectorAll(".folder");
-									const normNew = normalizePath(newPath);
-									const newLast = normNew && normNew.split("/").length ? normNew.split("/").pop() : "";
+						target = newPath;
+						const url = new URL(location.href);
+						url.searchParams.set("target", target);
+						window.history.replaceState({}, "", url.toString());
 
-									for (const el of folderEls) {
-										const elp = normalizePath(el.dataset.full || "");
-										if (elp === normNew || (newLast && elp.split("/").pop() === newLast)) {
-											document.querySelectorAll("#targetFolder .folder").forEach(ele => ele.classList.remove("selected"));
-											el.classList.add("selected");
-											expandAncestors(el.parentElement, container);
-											setTimeout(() => el.scrollIntoView({ block: "center" }), 100);
-											target = el.dataset.full;
-											const url = new URL(location.href);
-											url.searchParams.set("target", target);
-											window.history.replaceState({}, "", url.toString());
-											break;
-										}
-									}
-								} catch (e) {
-									warn("Failed to select new folder after WS event", e);
-								}
-							})
-							.catch(err => warn("loadFolders after WS failed", err));
+						loadFolders().catch(err =>
+							warn("loadFolders after WS failed", err)
+						);
 					}
 				} catch (e) {
 					warn("WS message parse error", e);
@@ -721,38 +789,31 @@ function goBack() {
 }
 
 async function init() {
+	const targetParam = normalizePath(query.get("target"));
+	if (targetParam) {
+		target = targetParam;
+	}
+
 	await loadFolders();
 	setupFolderSearch();
 	setupTargetSearch();
 	setupWebsocket();
 
 	const leftContainer = document.getElementById("folderList");
-	if (leftContainer) leftContainer.addEventListener("click", e => handleFolderClick(e, true));
+	if (leftContainer)
+		leftContainer.addEventListener("click", e =>
+			handleFolderClick(e, true)
+		);
 
 	const rightContainer = document.getElementById("targetFolder");
-	if (rightContainer) rightContainer.addEventListener("click", e => handleFolderClick(e, false));
+	if (rightContainer)
+		rightContainer.addEventListener("click", e =>
+			handleFolderClick(e, false)
+		);
 
 	setupSwipeHandlers();
 
 	if (dir) await loadMedia();
-
-	const targetParam = normalizePath(query.get("target"));
-	if (targetParam) {
-		const container = document.getElementById("targetFolder");
-		requestAnimationFrame(() => {
-			const folderEls = container.querySelectorAll(".folder");
-			for (const el of folderEls) {
-				if (normalizePath(el.dataset.full) === targetParam) {
-					el.classList.add("selected");
-					expandAncestors(el.parentElement, container);
-					setTimeout(() => el.scrollIntoView({ block: "center" }), 100);
-					target = el.dataset.full;
-					log("target restored from URL", target);
-					break;
-				}
-			}
-		});
-	}
 }
 
 init();

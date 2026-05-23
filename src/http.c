@@ -218,7 +218,7 @@ static void ensure_range_reqs_init(void) {
 
 static int range_request_allowed(int sock, const char* path) {
 	const long WINDOW_MS = 60 * 1000L;
-	const int MAX_PER_WINDOW = 6;
+	const int MAX_PER_WINDOW = 50;
 	long now = now_ms_local();
 	ensure_range_reqs_init();
 	thread_mutex_lock(&g_range_req_mutex);
