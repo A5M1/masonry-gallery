@@ -64,25 +64,19 @@ void derive_paths(const char* argv0) {
 
 int create_listen_socket(int port) {
 	int s=socket(AF_INET, SOCK_STREAM, 0);
-	if(s<0) {
-		exit(1);
-	}
+	if(s<0) exit(1);
 	int opt=1;
-#ifndef _WIN32
-	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#else
+#ifdef _WIN32
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
 	struct sockaddr_in a;
 	memset(&a, 0, sizeof(a));
 	a.sin_family=AF_INET;
 	a.sin_addr.s_addr=htonl(INADDR_ANY);
 	a.sin_port=htons((unsigned short)port);
-	if(bind(s, (struct sockaddr*)&a, sizeof(a))<0) {
-		exit(1);
-	}
-	if(listen(s, 1024)<0) {
-		exit(1);
-	}
+	if(bind(s, (struct sockaddr*)&a, sizeof(a))<0) exit(1);
+	if(listen(s, 1024)<0) exit(1);
 	return s;
 }
