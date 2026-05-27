@@ -248,7 +248,6 @@ function animateSwipe(direction) {
 		showCurrent();
 	}, 300);
 }
-
 function ensureFancyboxVideoHolder(src, mime) {
 	let holder = document.getElementById("fancybox-video-holder");
 	if (!holder) {
@@ -260,19 +259,19 @@ function ensureFancyboxVideoHolder(src, mime) {
 	}
 
 	holder.innerHTML = `
-		<video
-			class="f-html5video"
-			autoplay
-			muted
-			loop
-			playsinline
-			controls
-			preload="auto"
-		>
-			<source src="${src}" type="${mime}">
-			Your browser doesn't support HTML5 video.
-		</video>
-	`;
+        <video
+            id="fancyboxVideoPlayer"
+            autoplay
+            muted
+            loop
+            playsinline
+            controls="controls"
+            preload="auto"
+        >
+            <source src="${src}" type="${mime}">
+            Your browser doesn't support HTML5 video.
+        </video>
+    `;
 
 	return holder;
 }
@@ -309,11 +308,10 @@ function openMedia(src) {
 			hideClass: false,
 			Toolbar: {display: {left: [], middle: [], right: ["close"]}},
 			on: {
-				done: () => {
+				done: fancybox => {
 					setTimeout(() => {
-						const videoEl = document.getElementById(
-							"fancyboxVideoPlayer"
-						);
+						const videoEl =
+							fancybox.$container.querySelector("video");
 						if (!videoEl) return;
 
 						videoEl.style.maxWidth = "100%";
@@ -335,7 +333,6 @@ function openMedia(src) {
 		}
 	);
 }
-
 function setupSwipeHandlers() {
 	const preview = document.getElementById("preview");
 	if (!preview) return;
