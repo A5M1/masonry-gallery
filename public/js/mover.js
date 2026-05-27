@@ -201,24 +201,27 @@ function handleFolderClick(e, isLeft) {
 				f.style.display = "flex";
 				f.classList.remove("highlight");
 			});
-			document
-				.querySelectorAll("#targetFolder .expanded")
-				.forEach(el => el.classList.remove("expanded"));
 		}
 
-		const url = new URL(location.href);
-		url.searchParams.set("target", target);
-		window.history.replaceState({}, "", url.toString());
+		const targetContainer = document.getElementById("targetFolder");
+		document.querySelectorAll("#targetFolder .expanded").forEach(el => {
+			el.classList.remove("expanded");
+			const arrow = el.querySelector(".arrow");
+			if (arrow) arrow.textContent = "▸";
+		});
 
 		document
 			.querySelectorAll("#targetFolder .folder")
 			.forEach(el => el.classList.remove("selected"));
 		label.classList.add("selected");
 		
-		const targetContainer = document.getElementById("targetFolder");
 		expandAncestors(label.parentElement, targetContainer);
 		expandToPath(label, targetContainer);
 		
+		const url = new URL(location.href);
+		url.searchParams.set("target", target);
+		window.history.replaceState({}, "", url.toString());
+
 		setTimeout(() => label.scrollIntoView({block: "center"}), 50);
 	}
 }
