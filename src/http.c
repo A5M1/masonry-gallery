@@ -259,9 +259,12 @@ void send_header(int c, int status, const char* text, const char* ctype, long le
 	int off=snprintf(hbuf, sizeof(hbuf),
 		"HTTP/1.1 %d %s\r\nConnection: %s\r\nContent-Type: %s\r\n",
 		status, text, keep ? "keep-alive" : "close", ctype);
-	if (ctype && (strstr(ctype, "image/") || strstr(ctype, "video/")))
-		off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Disposition: inline\r\n");
-	if(keep)off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Keep-Alive: timeout=%d, max=100\r\n", 5);
+	if (ctype) {
+		off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Accept-Ranges: bytes\r\n");
+		if (strstr(ctype, "image/") || strstr(ctype, "video/"))
+			off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Disposition: inline\r\n");
+	}
+	if(keep)off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Keep-Alive: timeout=%d, max=100\r\n", 15);
 	if(r&&r->is_range) {
 		off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Range: bytes %ld-%ld/%ld\r\n", r->start, r->end, fs);
 		off+=snprintf(hbuf+off, sizeof(hbuf)-off, "Content-Length: %ld\r\n", r->end-r->start+1);
