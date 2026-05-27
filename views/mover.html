@@ -11,7 +11,7 @@
     
     <!-- umd is broken, using bundled jquery version of fancybox for now, will refactor later -->
 
-    
+
     <link rel="stylesheet" href="/css/mover.css" />
     <link rel="stylesheet" href="/css/jquery.fancybox.css" />
     <script src="/bundled"></script>
@@ -19,57 +19,57 @@
 
 </head>
 <body>
-    <div id="left">
-        <div class="sidebar-header">
-            <h3>📁 Source</h3>
-            <input id="folderSearch" type="text" placeholder="Search folders..." />
-        </div>
-        <div id="breadcrumbs"></div>
-        <div id="folderList"></div>
-    </div>
-    
-    <div id="center">
-        <div id="preview">Loading...</div>
-        
-        <div class="control-bar">
-            <button onclick="goBack()">⬅ Back</button>
-            <button onclick="reject()" class="btn-reject">Reject</button>
-            <button onclick="accept()" class="btn-accept">Accept</button>
-            <button onclick="showDeleteDialog()" class="btn-delete">Delete</button>
-            <button onclick="showAddFolderDialog()">Add Folder</button>
+    <div id="main-container">
+        <div id="left">
+            <div class="sidebar-header">
+                <h3 style="margin:0;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:#aaa;">📁 Source</h3>
+                <input id="folderSearch" type="text" placeholder="Search..." />
+            </div>
+            <div id="folderList"></div>
         </div>
         
-        <div id="addFolderModal" class="modal-overlay">
-            <div class="modal-content">
-                <h2 class="modal-title">Add Folder</h2>
-                <input id="folderName" class="modal-input" placeholder="Folder Name">
-                <input id="folderTarget" class="modal-input" placeholder="Target (optional)">
-                <div class="modal-actions">
-                    <button onclick="hideAddFolderDialog()" class="btn-cancel">Cancel</button>
-                    <button onclick="submitAddFolder()" class="btn-create">Create</button>
-                </div>
-                <div id="addFolderMsg" class="modal-status-msg"></div>
+        <div id="center">
+            <div id="preview">Loading...</div>
+            <div class="control-bar">
+                <button onclick="goBack()" class="btn-back">← Back</button>
+                <button onclick="reject()" class="btn-reject">✕ Reject</button>
+                <button onclick="accept()" class="btn-accept">✓ Accept</button>
+                <button onclick="showDeleteDialog()" class="btn-delete">🗑 Delete</button>
+                <button onclick="showAddFolderDialog()" class="btn-add">+ Add Folder</button>
             </div>
         </div>
         
-        <div id="deleteConfirmModal" class="modal-overlay">
-            <div class="modal-content modal-content-wide">
-                <h2 class="modal-title">Delete File</h2>
-                <div id="deleteMsg" class="modal-body-text">Are you sure you want to delete this file?</div>
-                <div class="modal-actions">
-                    <button onclick="hideDeleteDialog()" class="btn-cancel">Cancel</button>
-                    <button id="confirmDeleteBtn" onclick="submitDelete()" class="btn-confirm-delete">Delete</button>
-                </div>
+        <div id="right">
+            <div class="sidebar-header">
+                <h3 style="margin:0;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:#aaa;">📁 Target</h3>
+                <input id="targetSearch" type="text" placeholder="Search..." />
             </div>
+            <div id="targetFolder"></div>
         </div>
     </div>
     
-    <div id="right">
-        <div class="sidebar-header">
-            <h3>📁 Target</h3>
-            <input id="targetSearch" type="text" placeholder="Search folders..." />
+    <div id="addFolderModal" class="modal-overlay">
+        <div class="modal-content">
+            <h2 class="modal-title">New Folder</h2>
+            <input id="folderName" class="modal-input" placeholder="Folder name" />
+            <input id="folderTarget" class="modal-input" placeholder="Target (optional)" />
+            <div class="modal-actions">
+                <button onclick="hideAddFolderDialog()" class="btn-cancel">Cancel</button>
+                <button onclick="submitAddFolder()" class="btn-create">Create</button>
+            </div>
+            <div id="addFolderMsg" class="modal-status-msg"></div>
         </div>
-        <div id="targetFolder"></div>
+    </div>
+    
+    <div id="deleteConfirmModal" class="modal-overlay">
+        <div class="modal-content modal-content-wide">
+            <h2 class="modal-title">Delete File</h2>
+            <div id="deleteMsg" class="modal-body-text">Are you sure you want to delete this file?</div>
+            <div class="modal-actions">
+                <button onclick="hideDeleteDialog()" class="btn-cancel">Cancel</button>
+                <button id="confirmDeleteBtn" onclick="submitDelete()" class="btn-confirm-delete">Delete</button>
+            </div>
+        </div>
     </div>
 </body>
 </html>

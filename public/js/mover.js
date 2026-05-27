@@ -214,11 +214,35 @@ function handleFolderClick(e, isLeft) {
 			.querySelectorAll("#targetFolder .folder")
 			.forEach(el => el.classList.remove("selected"));
 		label.classList.add("selected");
-		expandAncestors(
-			label.parentElement,
-			document.getElementById("targetFolder")
-		);
+		
+		const targetContainer = document.getElementById("targetFolder");
+		expandAncestors(label.parentElement, targetContainer);
+		expandToPath(label, targetContainer);
+		
 		setTimeout(() => label.scrollIntoView({block: "center"}), 50);
+	}
+}
+
+function expandToPath(folderElement, container) {
+	const fullPath = folderElement.querySelector(".folder").dataset.full;
+	if (!fullPath) return;
+	
+	const parts = fullPath.split("/").filter(Boolean);
+	let current = container;
+	
+	for (let i = 0; i < parts.length; i++) {
+		const folders = current.querySelectorAll(":scope > div > .folder");
+		for (const folder of folders) {
+			const dataFull = folder.dataset.full;
+			if (dataFull && dataFull === parts.slice(0, i + 1).join("/")) {
+				const wrapper = folder.parentElement;
+				if (wrapper && wrapper.classList.contains("nested")) {
+					wrapper.parentElement.classList.add("expanded");
+				}
+				current = wrapper;
+				break;
+			}
+		}
 	}
 }
 
@@ -465,11 +489,11 @@ function reject() {
 }
 
 function showAddFolderDialog() {
-	document.getElementById("addFolderModal").style.display = "flex";
+	document.getElementById("addFolderModal").classList.add("show");
 }
 
 function hideAddFolderDialog() {
-	document.getElementById("addFolderModal").style.display = "none";
+	document.getElementById("addFolderModal").classList.remove("show");
 	document.getElementById("folderName").value = "";
 	document.getElementById("folderTarget").value = "";
 	document.getElementById("addFolderMsg").innerText = "";
@@ -481,13 +505,13 @@ function showDeleteDialog() {
 	if (!modal || !msg) return;
 	const item = mediaList[currentIndex] || "";
 	msg.textContent = `Are you sure you want to delete ${item}?`;
-	modal.style.display = "flex";
+	modal.classList.add("show");
 }
 
 function hideDeleteDialog() {
 	const modal = document.getElementById("deleteConfirmModal");
 	if (!modal) return;
-	modal.style.display = "none";
+	modal.classList.remove("show");
 }
 
 async function submitDelete() {
@@ -767,6 +791,11 @@ async function init() {
 	}
 
 	await loadFolders();
+	
+	if (targetParam) {
+		autoExpandTarget(targetParam);
+	}
+	
 	setupFolderSearch();
 	setupTargetSearch();
 	setupWebsocket();
@@ -786,6 +815,25 @@ async function init() {
 	setupSwipeHandlers();
 
 	if (dir) await loadMedia();
+}
+
+function autoExpandTarget(targetPath) {
+	const parts = targetPath.split("/").filter(Boolean);
+	const rightContainer = document.getElementById("targetFolder");
+	
+	for (let i = parts.length; i > 0; i--) {
+		const pathToFind = parts.slice(0, i).join("/");
+		const folders = rightContainer.querySelectorAll(".folder[data-full]");
+		
+		for (const folder of folders) {
+			if (normalizePath(folder.dataset.full) === normalizePath(pathToFind)) {
+				folder.classList.add("selected");
+				expandAncestors(folder.parentElement, rightContainer);
+				setTimeout(() => folder.scrollIntoView({block: "center"}), 50);
+				return;
+			}
+		}
+	}
 }
 
 init();
