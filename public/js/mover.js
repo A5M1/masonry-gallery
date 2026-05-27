@@ -193,6 +193,10 @@ function handleFolderClick(e, isLeft) {
 		target = fullPath;
 		log("right folder click", fullPath);
 
+		const url = new URL(location.href);
+		url.searchParams.set("target", fullPath);
+		window.history.replaceState({}, "", url.toString());
+
 		const targetSearchInput = document.getElementById("targetSearch");
 		if (targetSearchInput) {
 			targetSearchInput.value = "";
@@ -217,10 +221,6 @@ function handleFolderClick(e, isLeft) {
 		
 		expandAncestors(label.parentElement, targetContainer);
 		expandToPath(label, targetContainer);
-		
-		const url = new URL(location.href);
-		url.searchParams.set("target", target);
-		window.history.replaceState({}, "", url.toString());
 
 		setTimeout(() => label.scrollIntoView({block: "center"}), 50);
 	}
