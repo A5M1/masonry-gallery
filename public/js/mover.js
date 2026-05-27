@@ -248,41 +248,12 @@ function animateSwipe(direction) {
 		showCurrent();
 	}, 300);
 }
-function ensureFancyboxVideoHolder(src, mime) {
-	let holder = document.getElementById("fancybox-video-holder");
-	if (!holder) {
-		holder = document.createElement("div");
-		holder.id = "fancybox-video-holder";
-		holder.style.display = "none";
-		holder.className = "";
-		document.body.appendChild(holder);
-	}
-
-	holder.innerHTML = `
-        <video
-            id="fancyboxVideoPlayer"
-            autoplay
-            muted
-            loop
-            playsinline
-            controls="controls"
-            preload="auto"
-        >
-            <source src="${src}" type="${mime}">
-            Your browser doesn't support HTML5 video.
-        </video>
-    `;
-
-	return holder;
-}
 
 function openMedia(src) {
 	const ext = (src || "").split(".").pop().toLowerCase();
-	const video = videoExts.has(ext);
+	const isVideo = videoExts.has(ext);
 
-	log("openMedia()", {src, ext, video});
-
-	if (!video) {
+	if (!isVideo) {
 		Fancybox.show([{src, type: "image"}], {
 			Animated: false,
 			showClass: false,
@@ -292,47 +263,51 @@ function openMedia(src) {
 		return;
 	}
 
-	const mime = getVideoMime(ext);
-	const holder = ensureFancyboxVideoHolder(src, mime);
-
-	Fancybox.show(
-		[
-			{
-				src: "#fancybox-video-holder",
-				type: "inline"
-			}
-		],
+	/*
+	const html5videoTpl = `<video class="f-html5video" playsinline controls controlsList="nodownload" poster="" muted autoplay loop><source src="{{src}}" type="{{format}}" />Sorry, your browser doesn't support embedded videos.</video>`;
+	Fancybox.show([{src, type: "html5video", html5videoFormat: getVideoMime(ext)}], {
+		Animated: false,
+		showClass: false,
+		hideClass: false,
+		Toolbar: {display: {left: [], middle: [], right: ["close"]}},
+		Video: {autoplay: true, html5videoTpl}
+	});
+	*/
+	$.fancybox.open([
 		{
-			Animated: false,
-			showClass: false,
-			hideClass: false,
-			Toolbar: {display: {left: [], middle: [], right: ["close"]}},
-			on: {
-				done: fancybox => {
-					setTimeout(() => {
-						const videoEl =
-							fancybox.$container.querySelector("video");
-						if (!videoEl) return;
-
-						videoEl.style.maxWidth = "100%";
-						videoEl.style.maxHeight = "80vh";
-						videoEl.style.width = "auto";
-						videoEl.style.height = "auto";
-						videoEl.loop = true;
-						videoEl.muted = true;
-						videoEl.autoplay = true;
-						videoEl.playsInline = true;
-						videoEl.controls = true;
-						videoEl.load();
-						videoEl
-							.play()
-							.catch(err => error("play() rejected", {src, err}));
-					}, 0);
+			src,
+			type: "video"
+		}
+	], {
+		buttons: ["close"],
+		loop: true,
+		video: {
+			autoplay: true,
+			preload: "metadata",
+			controls: true,
+			loop: true
+		},
+		afterShow: function (instance, current) {
+			const video = current.$content.find("video").get(0);
+			if (video) {
+				Object.assign(video, {
+					controls: true,
+					preload: "metadata",
+					muted: true,
+					loop: true
+				});
+				const playPromise = video.play();
+				if (playPromise && typeof playPromise.then === "function") {
+					playPromise.catch(() => {
+						video.muted = true;
+						video.play();
+					});
 				}
 			}
 		}
-	);
+	});
 }
+
 function setupSwipeHandlers() {
 	const preview = document.getElementById("preview");
 	if (!preview) return;
