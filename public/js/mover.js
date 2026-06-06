@@ -279,27 +279,13 @@ function animateSwipe(direction) {
 function openMedia(src) {
 	const ext = (src || "").split(".").pop().toLowerCase();
 	const isVideo = videoExts.has(ext);
-
 	if (!isVideo) {
-		Fancybox.show([{src, type: "image"}], {
-			Animated: false,
-			showClass: false,
-			hideClass: false,
-			Toolbar: {display: {left: [], middle: [], right: ["close"]}}
-		});
-		return;
-	}
+			$.fancybox.open([{src, type: "image"}], {
+				buttons: ["close"]
+			});
+			return;
+		}
 
-	/*
-	const html5videoTpl = `<video class="f-html5video" playsinline controls controlsList="nodownload" poster="" muted autoplay loop><source src="{{src}}" type="{{format}}" />Sorry, your browser doesn't support embedded videos.</video>`;
-	Fancybox.show([{src, type: "html5video", html5videoFormat: getVideoMime(ext)}], {
-		Animated: false,
-		showClass: false,
-		hideClass: false,
-		Toolbar: {display: {left: [], middle: [], right: ["close"]}},
-		Video: {autoplay: true, html5videoTpl}
-	});
-	*/
 	$.fancybox.open([
 		{
 			src,
@@ -439,7 +425,7 @@ function showCurrent() {
 	log("showCurrent()", {currentIndex, item, ext});
 
 	if (["jpg", "jpeg", "png", "gif", "webp", "bmp"].includes(ext)) {
-		preview.innerHTML = `<img src="${item}" style="cursor:pointer;" />`;
+		preview.innerHTML = `<img data-fancybox src="${item}" style="cursor:pointer;" />`;
 	} else if (isVideoFile(item)) {
 		preview.innerHTML = `
 			<video id="previewVideo" autoplay muted loop playsinline style="cursor:pointer; max-width:100%; max-height:100%;">
