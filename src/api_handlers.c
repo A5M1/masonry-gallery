@@ -2279,14 +2279,6 @@ void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 		}
 	}
 	if (delete_success) {
-		char db_key[PATH_MAX];
-		uint64_t filename_numeric = 0;
-		if (sscanf(fname, "%llu", &filename_numeric) == 1 || strtoull(fname, NULL, 10) != 0) {
-			snprintf(db_key, sizeof(db_key), "%s", fname);
-			if (thumbdb_delete(db_key) != 0) {
-				LOG_WARN("Failed to delete thumbdb entry for key: %s (may have broken entry, continuing anyway)", db_key);
-			}
-		}
 		const char* ok = "{\"status\":\"ok\"}";
 		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
 		send(c, ok, (int)strlen(ok), 0);

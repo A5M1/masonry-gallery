@@ -1060,11 +1060,7 @@ static void thumb_watcher_cb(const char* dir) {
         snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
         if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
 
-        char per_db[PATH_MAX];
-        snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
-        LOG_DEBUG("thumb_watcher_cb: opening DB %s for dir=%s", per_db, dir);
-        thumbdb_open_for_dir(per_db);
-
+        LOG_DEBUG("thumb_watcher_cb: checking for missing thumbnails in %s", dir);
         count_media_in_dir(dir, &quick_prog);
 
         diriter tit;
@@ -1076,17 +1072,19 @@ static void thumb_watcher_cb(const char* dir) {
                 char base_key[PATH_MAX];
                 thumbname_to_base_local(tname, base_key, sizeof(base_key));
                 if (!base_key[0]) continue;
-                char media_val[PATH_MAX];
-                if (thumbdb_get(base_key, media_val, sizeof(media_val)) != 0) continue;
-                if (!is_file(media_val)) {
-                    char thumb_full[PATH_MAX];
-                    path_join(thumb_full, per_thumbs_root, tname);
+                char thumb_full[PATH_MAX];
+                path_join(thumb_full, per_thumbs_root, tname);
+                char media_file[PATH_MAX];
+                if (base_key[0] == DIR_SEP) {
+                    strncpy(media_file, base_key, sizeof(media_file) - 1);
+                } else {
+                    path_join(media_file, dir, base_key);
+                }
+                media_file[sizeof(media_file) - 1] = '\0';
+                if (!is_file(media_file)) {
                     if (is_file(thumb_full)) {
                         platform_file_delete(thumb_full);
-                        LOG_INFO("thumb_watcher_cb: deleted orphan thumb %s (media missing: %s)", thumb_full, media_val);
-                    }
-                    if (wal_write_entry(per_thumbs_root, base_key, "__DELETE__") == 0) {
-                        LOG_INFO("thumb_watcher_cb: queued WAL delete for %s", base_key);
+                        LOG_INFO("thumb_watcher_cb: deleted orphan thumb %s (media missing: %s)", thumb_full, media_file);
                     }
                 }
             }
