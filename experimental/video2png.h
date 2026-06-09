@@ -24,7 +24,7 @@ void v2p_cleanup(void);
  * @param output_png_path    Path where the output PNG will be saved.
  * @param seek_time_seconds  Time in seconds from the start of the video to seek to.
  *                           Must be >= 0.
- *
+ * @param size_preset        Optional string specifying the output PNG size preset.
  * @return 0 on success, negative error code otherwise:
  *         -1 : failed to open input video file
  *         -2 : no video stream found
@@ -34,7 +34,7 @@ void v2p_cleanup(void);
  *         -6 : CUDA memory allocation or kernel launch failed
  */
 int v2p_extract_frame_to_png(const char *video_path, const char *output_png_path,
-                             double seek_time_seconds);
+                             double seek_time_seconds, const char *size_preset);
 
 #ifdef __cplusplus
 }

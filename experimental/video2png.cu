@@ -14,6 +14,32 @@ extern "C" {
 
 #define PNG_FILTER_SUB 1
 
+typedef struct {
+    const char *name;
+    int width;
+    int height;
+} ResolutionPreset;
+
+static const ResolutionPreset size_map[] = {
+    {"1080p", 1920, 1080},
+    {"720p", 1280, 720},
+    {"480p", 854, 480},
+    {"360p", 640, 360}
+};
+
+static void get_resolution(const char *preset, int *w, int *h) {
+    *w = 0;
+    *h = 0;
+    if (!preset) return;
+    for (size_t i = 0; i < sizeof(size_map) / sizeof(size_map[0]); i++) {
+        if (strcmp(preset, size_map[i].name) == 0) {
+            *w = size_map[i].width;
+            *h = size_map[i].height;
+            return;
+        }
+    }
+    sscanf(preset, "%dx%d", w, h);
+}
 
 __global__ void png_filter_row_kernel(unsigned char* output, const unsigned char* input,
                                       int width, int filter_type) {
@@ -91,10 +117,9 @@ void write_png_chunk(FILE *f, const char* type, const unsigned char* data, uint3
     fwrite(&crc_be, 1, 4, f);
 }
 
-
-static int encode_frame_to_png(AVFrame *frame, const char *output_filename) {
-    int image_width = frame->width;
-    int image_height = frame->height;
+static int encode_frame_to_png(AVFrame *frame, const char *output_filename, int target_w, int target_h) {
+    int image_width = (target_w > 0) ? target_w : frame->width;
+    int image_height = (target_h > 0) ? target_h : frame->height;
     int bpp = 4;
     size_t image_size = image_width * image_height * bpp;
     size_t filtered_size = image_height * (image_width * bpp + 1);
@@ -106,12 +131,12 @@ static int encode_frame_to_png(AVFrame *frame, const char *output_filename) {
     av_frame_get_buffer(rgb_frame, 32);
 
     struct SwsContext *sws_ctx = sws_getContext(
-        image_width, image_height, (AVPixelFormat)frame->format,
+        frame->width, frame->height, (AVPixelFormat)frame->format,
         image_width, image_height, AV_PIX_FMT_RGBA,
         SWS_BILINEAR, NULL, NULL, NULL
     );
 
-    sws_scale(sws_ctx, frame->data, frame->linesize, 0, image_height,
+    sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
               rgb_frame->data, rgb_frame->linesize);
 
     unsigned char *d_raw_pixels, *d_filtered_data, *d_compressed_data;
@@ -196,9 +221,14 @@ int v2p_init(void) {
 void v2p_cleanup(void) {
     cudaDeviceReset();
 }
+
 int v2p_extract_frame_to_png(const char *video_path, const char *output_png_path,
-                             double seek_time_seconds) {
+                             double seek_time_seconds, const char *size_preset) {
     if (seek_time_seconds < 0) return -3;
+
+    int target_w = 0;
+    int target_h = 0;
+    get_resolution(size_preset, &target_w, &target_h);
 
     av_log_set_level(AV_LOG_DEBUG);
 
@@ -238,7 +268,7 @@ int v2p_extract_frame_to_png(const char *video_path, const char *output_png_path
         if (pkt->stream_index == stream_idx) {
             if (avcodec_send_packet(dec_ctx, pkt) == 0) {
                 if (avcodec_receive_frame(dec_ctx, frame) == 0) {
-                    ret = encode_frame_to_png(frame, output_png_path);
+                    ret = encode_frame_to_png(frame, output_png_path, target_w, target_h);
                     break;
                 }
             }
