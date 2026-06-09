@@ -11,6 +11,7 @@ typedef struct progress {
     skip_counter_t* skip_head;
     size_t processed_files;
     size_t total_files;
+    
 } progress_t;
 void get_thumb_rel_names(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len);
 void get_thumb_rel_names_quick(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len);

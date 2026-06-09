@@ -177,6 +177,10 @@
 									el.getAttribute("data-thumb-small");
 								const large =
 									el.getAttribute("data-thumb-large");
+								const mediaPath =
+									el.getAttribute("data-media-path") ||
+									el.closest('[data-media-path]')?.getAttribute('data-media-path') ||
+									"";
 								if (!small) return false;
 								const src = el.getAttribute("src") || "";
 								if (
@@ -185,6 +189,12 @@
 									src === ""
 								)
 									el.src = small;
+								if (mediaPath && !large) {
+									el.setAttribute("data-generating-for", mediaPath);
+									fetch("/api/thumbnail/generate?path=" + encodeURIComponent(mediaPath) + "&size=large")
+										.then(r => r.json())
+										.catch(e => console.error("Thumbnail generation failed", e));
+								}
 								const onLoad = () => {
 									scheduleLayout();
 									if (!large)
@@ -442,6 +452,12 @@
 			var ws = new WebSocket(wsUrl);
 			ws.addEventListener("open", function () {
 				console.log("Thumbnail WebSocket connected");
+				if (currentDir) {
+					ws.send(JSON.stringify({
+						type: "subscribe",
+						path: currentDir
+					}));
+				}
 			});
 			ws.addEventListener("message", function (evt) {
 				try {
@@ -494,6 +510,17 @@
 									};
 									img.src = largeUrl;
 								}
+							} catch (e) {}
+						});
+					}
+					if (o.status === "generated" && o.url) {
+						var imgSel = 'img.thumb-img[data-generating-for="' + (o.media || o.path || '') + '"]';
+						var els = Array.from(document.querySelectorAll(imgSel));
+						els.forEach(function (el) {
+							try {
+								el.src = o.url;
+								el.removeAttribute("data-generating-for");
+								scheduleLayout();
 							} catch (e) {}
 						});
 					}

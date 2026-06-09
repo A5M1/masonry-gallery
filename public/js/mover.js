@@ -504,40 +504,29 @@ function hideDeleteDialog() {
 }
 
 async function submitDelete() {
-	const item = mediaList[currentIndex];
-	if (!item) {
-		hideDeleteDialog();
-		return;
-	}
-
-	log("submitDelete()", {item});
-
-	try {
-		const res = await fetch("/api/delete-file", {
-			method: "POST",
-			headers: {"Content-Type": "application/json"},
-			body: JSON.stringify({fromPath: item})
-		});
-
-		if (res.ok) {
-			mediaList.splice(currentIndex, 1);
-			if (currentIndex >= mediaList.length)
-				currentIndex = Math.max(0, mediaList.length - 1);
-			hideDeleteDialog();
-			showCurrent();
-		} else {
-			const txt = await res.text();
-			const msg = document.getElementById("deleteMsg");
-			if (msg) msg.textContent = txt || "Delete failed";
-			warn("delete failed", txt);
-		}
-	} catch (e) {
-		const msg = document.getElementById("deleteMsg");
-		if (msg) msg.textContent = "Request failed.";
-		error("delete request error", e);
-	}
+  const item = mediaList[currentIndex];
+  if (!item) { hideDeleteDialog(); return; }
+  try {
+    const res = await fetch('/api/delete-file', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ fromPath: item })
+    });
+    if (res.ok) {
+      mediaList.splice(currentIndex, 1);
+      if (currentIndex >= mediaList.length) currentIndex = Math.max(0, mediaList.length - 1);
+      hideDeleteDialog();
+      showCurrent();
+    } else {
+      const txt = await res.text();
+      const msg = document.getElementById('deleteMsg');
+      if (msg) msg.textContent = txt || 'Delete failed';
+    }
+  } catch (e) {
+    const msg = document.getElementById('deleteMsg');
+    if (msg) msg.textContent = 'Request failed.';
+  }
 }
-
 async function submitAddFolder() {
 	const name = document.getElementById("folderName").value.trim();
 	const targetInput = document.getElementById("folderTarget").value.trim();

@@ -1090,6 +1090,45 @@ static int enqueue_async_op(const char* key, const char* value, int is_delete) {
     return 0;
 }
 
+static int thumbdb_recover_from_corruption(void) {
+    LOG_WARN("thumbdb: database corrupted, attempting recovery");
+    if (!db_path || db_path[0] == '\0') return -1;
+    char backup_path[PATH_MAX];
+    snprintf(backup_path, sizeof(backup_path), "%s.corrupt", db_path);
+    platform_move_file(db_path, backup_path);
+    LOG_INFO("thumbdb: backed up corrupted database to %s", backup_path);
+    if (rh_tbl) rh_destroy(rh_tbl);
+    rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
+    if (!rh_tbl) return -1;
+    dir_table.count = 0;
+    dir_table.capacity = 0;
+    if (dir_table.dirs) { free(dir_table.dirs); dir_table.dirs = NULL; }
+    FILE* f_new = platform_fopen(db_path, "wb");
+    if (f_new) {
+        uint8_t magic_hi = (MV_CONSTANTS.db_magic >> 8) & 0xFF;
+        uint8_t magic_lo = MV_CONSTANTS.db_magic & 0xFF;
+        fwrite(&magic_hi, 1, 1, f_new);
+        fwrite(&magic_lo, 1, 1, f_new);
+        uint8_t version = MV_CONSTANTS.version;
+        fwrite(&version, 1, 1, f_new);
+        uint8_t flags = MV_BITMASKS.flags_init;
+        fwrite(&flags, 1, 1, f_new);
+        uint64_t record_count = 0;
+        write_varint(f_new, record_count);
+        uint64_t base_timestamp = (uint64_t)time(NULL);
+        write_uint64_le(f_new, base_timestamp);
+        file_header.base_timestamp = base_timestamp;
+        uint64_t dir_table_size = 0;
+        write_varint(f_new, dir_table_size);
+        fflush(f_new);
+        platform_fsync(fileno(f_new));
+        fclose(f_new);
+        LOG_INFO("thumbdb: recovered database at %s", db_path);
+        return 0;
+    }
+    return -1;
+}
+
 static int load_database(void) {
     FILE* f = platform_fopen(db_path, "rb");
     if (!f) return 0;
@@ -1399,9 +1438,15 @@ int thumbdb_open_for_dir(const char* db_full_path) {
         }
     } else {
         fclose(f_check);
-        load_database();
+        if (load_database() != 0) {
+            LOG_WARN("thumbdb: load_database returned error, attempting recovery");
+            thumbdb_recover_from_corruption();
+        } else if (thumbdb_validate() != 0) {
+            LOG_WARN("thumbdb: validation failed, attempting recovery");
+            thumbdb_recover_from_corruption();
+        }
         process_wal_chunks();
-        LOG_INFO("thumbdb: loaded database %s", db_path);
+        LOG_INFO("thumbdb: loaded and validated database %s", db_path);
     }
     thread_mutex_unlock(&db_open_mutex);
     return 0;
@@ -1739,23 +1784,23 @@ int thumbdb_get(const char* key, char* buf, size_t buflen) {
 int thumbdb_delete(const char* key) {
     if (!rh_tbl || !key) return -1;
     thread_mutex_lock(&db_mutex);
-    
+    int ret = -1;
     if (!tx_active) {
         FILE* f = platform_fopen(db_path, "ab");
         if (f) {
-            fputc(MV_OPCODES.delete_op, f);
-            uint64_t filename_val = strtoull(key, NULL, 10);
-            write_varint(f, filename_val);
-            uint64_t ts = (uint64_t)time(NULL);
-            write_varint(f, ts);
-            fputc(MV_OPCODES.end, f);
-            fflush(f);
-            platform_fsync(fileno(f));
+            if (fputc(MV_OPCODES.delete_op, f) != EOF &&
+                write_varint(f, strtoull(key, NULL, 10)) == 0 &&
+                write_varint(f, (uint64_t)time(NULL)) == 0 &&
+                fputc(MV_OPCODES.end, f) != EOF) {
+                fflush(f);
+                if (platform_fsync(fileno(f)) == 0) {
+                    ret = 0;
+                }
+            }
             fclose(f);
         }
     }
-    
-    int ret = rh_remove(rh_tbl, key, strlen(key));
+    if (rh_remove(rh_tbl, key, strlen(key)) == 0) ret = 0;
     thread_mutex_unlock(&db_mutex);
     return ret;
 }

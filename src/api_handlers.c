@@ -2141,6 +2141,60 @@ void handle_api_thumbdb_thumbs_for_dir(int c, char* qs, bool keep_alive) {
 	free(buf); SAFE_FREE(dir);
 }
 
+void handle_api_thumbnail_generate(int c, char* qs, bool keep_alive) {
+	if (!qs) { send_text(c, 400, "Bad Request", "Missing query", keep_alive); return; }
+	char* path_param = query_get(qs, "path");
+	char* size_param = query_get(qs, "size");
+	if (!path_param) { send_text(c, 400, "Bad Request", "Missing path", keep_alive); return; }
+	char dircopy[PATH_MAX]; strncpy(dircopy, path_param, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; url_decode(dircopy);
+	char target_real[PATH_MAX]; char base_real[PATH_MAX];
+	if (!resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
+		SAFE_FREE(path_param); SAFE_FREE(size_param);
+		send_text(c, 403, "Forbidden", "Invalid path", keep_alive);
+		return;
+	}
+	if (!is_file(target_real)) {
+		SAFE_FREE(path_param); SAFE_FREE(size_param);
+		send_text(c, 404, "Not Found", "File not found", keep_alive);
+		return;
+	}
+	int scale = 200;
+	if (size_param) { if (strcmp(size_param, "large") == 0) scale = 800; else if (strcmp(size_param, "small") == 0) scale = 200; }
+	char small_rel[PATH_MAX], large_rel[PATH_MAX];
+	const char* fname = strrchr(target_real, DIR_SEP);
+	if (!fname) fname = target_real; else fname++;
+	get_thumb_rel_names(target_real, fname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+	char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+	char thumb_output[PATH_MAX];
+	if (scale == 800) snprintf(thumb_output, sizeof(thumb_output), "%s%s%s", thumbs_root, DIR_SEP_STR, large_rel);
+	else snprintf(thumb_output, sizeof(thumb_output), "%s%s%s", thumbs_root, DIR_SEP_STR, small_rel);
+	normalize_path(thumb_output);
+	if (!is_file(thumb_output)) {
+		char thumb_dir[PATH_MAX]; strncpy(thumb_dir, thumb_output, sizeof(thumb_dir) - 1); thumb_dir[sizeof(thumb_dir) - 1] = '\0';
+		char* last = strrchr(thumb_dir, DIR_SEP); if (last) *last = '\0';
+		mk_dir(thumb_dir);
+		progress_t prog = {.total_files = 1, .processed_files = 0};
+		schedule_or_generate_thumb(target_real, thumb_output, &prog, scale, 85);
+		if (is_file(thumb_output)) {
+			char* url_path = small_rel;
+			if (scale == 800) url_path = large_rel;
+			char json_resp[512];
+			snprintf(json_resp, sizeof(json_resp), "{\"status\":\"generated\",\"url\":\"/images/thumbs/%s\"}", url_path);
+			websocket_broadcast_topic(path_param, json_resp);
+			send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(json_resp), NULL, 0, keep_alive);
+			send(c, json_resp, (int)strlen(json_resp), 0);
+		} else {
+			send_text(c, 500, "Internal Server Error", "{\"error\":\"thumbnail generation failed\"}", keep_alive);
+		}
+	} else {
+		char json_resp[512];
+		snprintf(json_resp, sizeof(json_resp), "{\"status\":\"exists\",\"url\":\"/images/thumbs/%s\"}", scale == 800 ? large_rel : small_rel);
+		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(json_resp), NULL, 0, keep_alive);
+		send(c, json_resp, (int)strlen(json_resp), 0);
+	}
+	SAFE_FREE(path_param); SAFE_FREE(size_param);
+}
+
 void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
 	const char* f_start = strstr(body, "\"fromPath\"");
@@ -2160,10 +2214,28 @@ void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 	char rel_copy[PATH_MAX]; strncpy(rel_copy, rel, sizeof(rel_copy) - 1); rel_copy[sizeof(rel_copy) - 1] = '\0';
 	while (*rel_copy == '/' || *rel_copy == '\\') memmove(rel_copy, rel_copy + 1, strlen(rel_copy));
 	char src[PATH_MAX]; snprintf(src, sizeof(src), "%s%s%s", BASE_DIR, DIR_SEP_STR, rel_copy); normalize_path(src);
+	char real_base[PATH_MAX], real_src[PATH_MAX];
+	platform_real_path(BASE_DIR, real_base);
+	platform_real_path(src, real_src);
+	if (!platform_safe_under(real_base, real_src)) {
+		LOG_ERROR("Path traversal attempt blocked: %s", src);
+		send_text(c, 403, "Forbidden", "Path traversal not allowed", keep_alive);
+		return;
+	}
 	char* fname = strrchr(src, DIR_SEP);
 	if (!fname || *(fname + 1) == '\0') { send_text(c, 400, "Bad Request", "invalid fromPath", keep_alive); return; }
 	fname++;
-	char trash_root[PATH_MAX]; snprintf(trash_root, sizeof(trash_root), "%s" DIR_SEP_STR "trash", BASE_DIR); normalize_path(trash_root); mk_dir(trash_root);
+	if (!is_file(src)) {
+		LOG_WARN("File not found: %s", src);
+		send_text(c, 404, "Not Found", "File not found", keep_alive);
+		return;
+	}
+	char trash_root[PATH_MAX]; snprintf(trash_root, sizeof(trash_root), "%s" DIR_SEP_STR "trash", BASE_DIR); normalize_path(trash_root);
+	if (mk_dir(trash_root) != 0) {
+		LOG_ERROR("Failed to create trash root: %s", trash_root);
+		send_text(c, 500, "Internal Server Error", "{\"error\":\"trash directory creation failed\"}", keep_alive);
+		return;
+	}
 	char destFolder[PATH_MAX]; strncpy(destFolder, trash_root, sizeof(destFolder) - 1); destFolder[sizeof(destFolder) - 1] = '\0';
 	char rel_dir[PATH_MAX]; strncpy(rel_dir, rel_copy, sizeof(rel_dir) - 1); rel_dir[sizeof(rel_dir) - 1] = '\0';
 	char* l = strrchr(rel_dir, '/');
@@ -2171,29 +2243,58 @@ void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 		*l = '\0';
 		char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "%s" DIR_SEP_STR "%s", trash_root, rel_dir); normalize_path(tmp); strncpy(destFolder, tmp, sizeof(destFolder) - 1); destFolder[sizeof(destFolder) - 1] = '\0';
 	}
-	normalize_path(destFolder); mk_dir(destFolder);
+	normalize_path(destFolder);
+	char tmp_path[PATH_MAX]; strncpy(tmp_path, destFolder, sizeof(tmp_path) - 1); tmp_path[sizeof(tmp_path) - 1] = '\0';
+	for (char* p = tmp_path + 1; *p; p++) {
+		if (*p == '/' || *p == '\\') {
+			char sep = *p; *p = '\0';
+			mk_dir(tmp_path);
+			*p = sep;
+		}
+	}
+	mk_dir(tmp_path);
+	if (!is_dir(destFolder)) {
+		LOG_ERROR("Failed to create destination folder: %s", destFolder);
+		send_text(c, 500, "Internal Server Error", "{\"error\":\"destination folder creation failed\"}", keep_alive);
+		return;
+	}
 	char dest[PATH_MAX]; path_join(dest, destFolder, fname);
+	LOG_DEBUG("Attempting delete: src=%s dest=%s", src, dest);
+	platform_close_streams_for_path(src);
+	int delete_success = 0;
 	if (platform_move_file(src, dest) == 0) {
+		LOG_INFO("File moved to trash: %s -> %s", src, dest);
+		delete_success = 1;
+	} else {
+		LOG_WARN("Move failed, attempting copy: %s -> %s", src, dest);
+		if (platform_copy_file(src, dest) == 0) {
+			if (platform_file_delete(src) == 0) {
+				LOG_INFO("File copied and original deleted: %s", src);
+				delete_success = 1;
+			} else {
+				LOG_ERROR("Copy succeeded but delete failed: %s", src);
+			}
+		} else {
+			LOG_ERROR("Both move and copy failed for file: src=%s dest=%s", src, dest);
+		}
+	}
+	if (delete_success) {
+		char db_key[PATH_MAX];
+		uint64_t filename_numeric = 0;
+		if (sscanf(fname, "%llu", &filename_numeric) == 1 || strtoull(fname, NULL, 10) != 0) {
+			snprintf(db_key, sizeof(db_key), "%s", fname);
+			if (thumbdb_delete(db_key) != 0) {
+				LOG_WARN("Failed to delete thumbdb entry for key: %s (may have broken entry, continuing anyway)", db_key);
+			}
+		}
 		const char* ok = "{\"status\":\"ok\"}";
 		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
 		send(c, ok, (int)strlen(ok), 0);
-		return;
+	} else {
+		char emsg[256]; snprintf(emsg, sizeof(emsg), "{\"error\":\"delete failed\"}") ;
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(emsg), NULL, 0, keep_alive);
+		send(c, emsg, (int)strlen(emsg), 0);
 	}
-	if (platform_copy_file(src, dest) == 0) {
-		if (platform_file_delete(src) == 0) {
-			const char* ok = "{\"status\":\"ok\"}";
-			send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
-			send(c, ok, (int)strlen(ok), 0);
-			return;
-		}
-		const char* msg = "{\"error\":\"copied but delete failed\"}";
-		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
-		send(c, msg, (int)strlen(msg), 0);
-		return;
-	}
-	char emsg[128]; snprintf(emsg, sizeof(emsg), "{\"error\":\"delete failed\"}");
-	send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(emsg), NULL, 0, keep_alive);
-	send(c, emsg, (int)strlen(emsg), 0);
 }
 typedef enum {
 	GET_SIMPLE, GET_QS, POST_BODY
@@ -2282,6 +2383,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		{ "/api/media", GET_QS, handle_api_media },
 		{ "/api/folders/add", POST_BODY, handle_api_add_folder },
 		{ "/api/regenerate-thumbs", GET_QS, handle_api_regenerate_thumbs },
+		{ "/api/thumbnail/generate", GET_QS, handle_api_thumbnail_generate },
 	};
 	static const static_route_t static_routes[] = {
 		{ "/images/", BASE_DIR, true },
