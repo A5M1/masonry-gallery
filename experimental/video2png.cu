@@ -15,7 +15,7 @@ extern "C" {
 #define PNG_FILTER_SUB 1
 
 typedef struct {
-    const char *name;
+    const char* name;
     int width;
     int height;
 } ResolutionPreset;
@@ -27,7 +27,7 @@ static const ResolutionPreset size_map[] = {
     {"360p", 640, 360}
 };
 
-static void get_resolution(const char *preset, int *w, int *h) {
+static void get_resolution(const char* preset, int* w, int* h) {
     *w = 0;
     *h = 0;
     if (!preset) return;
@@ -42,7 +42,7 @@ static void get_resolution(const char *preset, int *w, int *h) {
 }
 
 __global__ void png_filter_row_kernel(unsigned char* output, const unsigned char* input,
-                                      int width, int filter_type) {
+    int width, int filter_type) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     if (x >= width) return;
     int bpp = 4;
@@ -58,7 +58,7 @@ __global__ void png_filter_row_kernel(unsigned char* output, const unsigned char
 }
 
 __global__ void deflate_compress_kernel(const unsigned char* input, size_t input_size,
-                                        unsigned char* output, size_t* output_size) {
+    unsigned char* output, size_t* output_size) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         output[0] = 0x78;
         output[1] = 0x01;
@@ -93,10 +93,10 @@ __global__ void deflate_compress_kernel(const unsigned char* input, size_t input
 
 uint32_t bswap_32(uint32_t x) {
     return ((x >> 24) & 0xff) | ((x << 8) & 0xff0000) | ((x >> 8) & 0xff00) |
-           ((x << 24) & 0xff000000);
+        ((x << 24) & 0xff000000);
 }
 
-void write_png_chunk(FILE *f, const char* type, const unsigned char* data, uint32_t len) {
+void write_png_chunk(FILE* f, const char* type, const unsigned char* data, uint32_t len) {
     uint32_t len_be = bswap_32(len);
     fwrite(&len_be, 1, 4, f);
     fwrite(type, 1, 4, f);
@@ -117,30 +117,30 @@ void write_png_chunk(FILE *f, const char* type, const unsigned char* data, uint3
     fwrite(&crc_be, 1, 4, f);
 }
 
-static int encode_frame_to_png(AVFrame *frame, const char *output_filename, int target_w, int target_h) {
+static int encode_frame_to_png(AVFrame* frame, const char* output_filename, int target_w, int target_h) {
     int image_width = (target_w > 0) ? target_w : frame->width;
     int image_height = (target_h > 0) ? target_h : frame->height;
     int bpp = 4;
     size_t image_size = image_width * image_height * bpp;
     size_t filtered_size = image_height * (image_width * bpp + 1);
 
-    AVFrame *rgb_frame = av_frame_alloc();
+    AVFrame* rgb_frame = av_frame_alloc();
     rgb_frame->format = AV_PIX_FMT_RGBA;
     rgb_frame->width = image_width;
     rgb_frame->height = image_height;
     av_frame_get_buffer(rgb_frame, 32);
 
-    struct SwsContext *sws_ctx = sws_getContext(
+    struct SwsContext* sws_ctx = sws_getContext(
         frame->width, frame->height, (AVPixelFormat)frame->format,
         image_width, image_height, AV_PIX_FMT_RGBA,
         SWS_BILINEAR, NULL, NULL, NULL
     );
 
     sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
-              rgb_frame->data, rgb_frame->linesize);
+        rgb_frame->data, rgb_frame->linesize);
 
-    unsigned char *d_raw_pixels, *d_filtered_data, *d_compressed_data;
-    size_t *d_compressed_size;
+    unsigned char* d_raw_pixels, * d_filtered_data, * d_compressed_data;
+    size_t* d_compressed_size;
     cudaError_t err;
     err = cudaMalloc(&d_raw_pixels, image_size);
     if (err != cudaSuccess) return -6;
@@ -154,8 +154,8 @@ static int encode_frame_to_png(AVFrame *frame, const char *output_filename, int 
     unsigned char* host_raw = (unsigned char*)malloc(image_size);
     for (int i = 0; i < image_height; i++) {
         memcpy(host_raw + (i * image_width * bpp),
-               rgb_frame->data[0] + (i * rgb_frame->linesize[0]),
-               image_width * bpp);
+            rgb_frame->data[0] + (i * rgb_frame->linesize[0]),
+            image_width * bpp);
     }
 
     sws_freeContext(sws_ctx);
@@ -171,30 +171,30 @@ static int encode_frame_to_png(AVFrame *frame, const char *output_filename, int 
         unsigned char* d_out_row = d_filtered_data + y * (image_width * bpp + 1);
         unsigned char filter_type = PNG_FILTER_SUB;
         cudaMemcpy(d_out_row, &filter_type, 1, cudaMemcpyHostToDevice);
-        png_filter_row_kernel<<<num_blocks, threads_per_block>>>(
+        png_filter_row_kernel << <num_blocks, threads_per_block >> > (
             d_out_row + 1, d_in_row, image_width * bpp, PNG_FILTER_SUB);
     }
 
-    deflate_compress_kernel<<<1, 1>>>(d_filtered_data, filtered_size,
-                                      d_compressed_data, d_compressed_size);
+    deflate_compress_kernel << <1, 1 >> > (d_filtered_data, filtered_size,
+        d_compressed_data, d_compressed_size);
     cudaDeviceSynchronize();
 
     size_t h_compressed_size = 0;
     cudaMemcpy(&h_compressed_size, d_compressed_size, sizeof(size_t),
-               cudaMemcpyDeviceToHost);
-    unsigned char *h_compressed_data = (unsigned char*)malloc(h_compressed_size);
+        cudaMemcpyDeviceToHost);
+    unsigned char* h_compressed_data = (unsigned char*)malloc(h_compressed_size);
     cudaMemcpy(h_compressed_data, d_compressed_data, h_compressed_size,
-               cudaMemcpyDeviceToHost);
+        cudaMemcpyDeviceToHost);
 
-    FILE *f = fopen(output_filename, "wb");
+    FILE* f = fopen(output_filename, "wb");
     if (!f) return -5;
-    unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    unsigned char sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
     fwrite(sig, 1, 8, f);
     unsigned char ihdr[13];
     uint32_t w_be = bswap_32(image_width);
     uint32_t h_be = bswap_32(image_height);
     memcpy(ihdr, &w_be, 4);
-    memcpy(ihdr+4, &h_be, 4);
+    memcpy(ihdr + 4, &h_be, 4);
     ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
     write_png_chunk(f, "IHDR", ihdr, 13);
     write_png_chunk(f, "IDAT", h_compressed_data, h_compressed_size);
@@ -222,8 +222,8 @@ void v2p_cleanup(void) {
     cudaDeviceReset();
 }
 
-int v2p_extract_frame_to_png(const char *video_path, const char *output_png_path,
-                             double seek_time_seconds, const char *size_preset) {
+int v2p_extract_frame_to_png(const char* video_path, const char* output_png_path,
+    double seek_time_seconds, const char* size_preset) {
     if (seek_time_seconds < 0) return -3;
 
     int target_w = 0;
@@ -232,7 +232,7 @@ int v2p_extract_frame_to_png(const char *video_path, const char *output_png_path
 
     av_log_set_level(AV_LOG_DEBUG);
 
-    AVFormatContext *fmt_ctx = NULL;
+    AVFormatContext* fmt_ctx = NULL;
     if (avformat_open_input(&fmt_ctx, video_path, NULL, NULL) < 0)
         return -1;
     if (avformat_find_stream_info(fmt_ctx, NULL) < 0) {
@@ -252,18 +252,18 @@ int v2p_extract_frame_to_png(const char *video_path, const char *output_png_path
         return -3;
     }
 
-    AVCodecContext *dec_ctx = avcodec_alloc_context3(NULL);
+    AVCodecContext* dec_ctx = avcodec_alloc_context3(NULL);
     avcodec_parameters_to_context(dec_ctx, fmt_ctx->streams[stream_idx]->codecpar);
-    const AVCodec *codec = avcodec_find_decoder(dec_ctx->codec_id);
+    const AVCodec* codec = avcodec_find_decoder(dec_ctx->codec_id);
     if (!codec || avcodec_open2(dec_ctx, codec, NULL) < 0) {
         avcodec_free_context(&dec_ctx);
         avformat_close_input(&fmt_ctx);
         return -4;
     }
 
-    AVPacket *pkt = av_packet_alloc();
-    AVFrame *frame = av_frame_alloc();
-    int ret = -4;   
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+    int ret = -4;
     while (av_read_frame(fmt_ctx, pkt) >= 0) {
         if (pkt->stream_index == stream_idx) {
             if (avcodec_send_packet(dec_ctx, pkt) == 0) {

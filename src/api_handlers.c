@@ -2141,7 +2141,7 @@ void handle_api_thumbdb_thumbs_for_dir(int c, char* qs, bool keep_alive) {
 	free(buf); SAFE_FREE(dir);
 }
 
-void handle_api_thumbnail_generate(int c, char* qs, bool keep_alive) {
+void handle_api_thumbnail_generate(int c, char* qs, bool keep_alive) {	
 	if (!qs) { send_text(c, 400, "Bad Request", "Missing query", keep_alive); return; }
 	char* path_param = query_get(qs, "path");
 	char* size_param = query_get(qs, "size");
