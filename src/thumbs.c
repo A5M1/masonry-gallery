@@ -1060,11 +1060,7 @@ static void thumb_watcher_cb(const char* dir) {
         snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
         if (!is_dir(per_thumbs_root)) platform_make_dir(per_thumbs_root);
 
-        char per_db[PATH_MAX];
-        snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
-        LOG_DEBUG("thumb_watcher_cb: opening DB %s for dir=%s", per_db, dir);
-        thumbdb_open_for_dir(per_db);
-
+        LOG_DEBUG("thumb_watcher_cb: checking for missing thumbnails in %s", dir);
         count_media_in_dir(dir, &quick_prog);
 
         diriter tit;
@@ -1076,17 +1072,19 @@ static void thumb_watcher_cb(const char* dir) {
                 char base_key[PATH_MAX];
                 thumbname_to_base_local(tname, base_key, sizeof(base_key));
                 if (!base_key[0]) continue;
-                char media_val[PATH_MAX];
-                if (thumbdb_get(base_key, media_val, sizeof(media_val)) != 0) continue;
-                if (!is_file(media_val)) {
-                    char thumb_full[PATH_MAX];
-                    path_join(thumb_full, per_thumbs_root, tname);
+                char thumb_full[PATH_MAX];
+                path_join(thumb_full, per_thumbs_root, tname);
+                char media_file[PATH_MAX];
+                if (base_key[0] == DIR_SEP) {
+                    strncpy(media_file, base_key, sizeof(media_file) - 1);
+                } else {
+                    path_join(media_file, dir, base_key);
+                }
+                media_file[sizeof(media_file) - 1] = '\0';
+                if (!is_file(media_file)) {
                     if (is_file(thumb_full)) {
                         platform_file_delete(thumb_full);
-                        LOG_INFO("thumb_watcher_cb: deleted orphan thumb %s (media missing: %s)", thumb_full, media_val);
-                    }
-                    if (wal_write_entry(per_thumbs_root, base_key, "__DELETE__") == 0) {
-                        LOG_INFO("thumb_watcher_cb: queued WAL delete for %s", base_key);
+                        LOG_INFO("thumb_watcher_cb: deleted orphan thumb %s (media missing: %s)", thumb_full, media_file);
                     }
                 }
             }
@@ -1550,11 +1548,23 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
 
     return false;
 }
-void start_background_thumb_generation(const char* dir_path) {
-    LOG_DEBUG("start_background_thumb_generation: checking for missing thumbs (shallow) in %s", dir_path);
+static thread_mutex_t bg_generation_mutex;
+static int bg_generation_mutex_inited = 0;
 
+void start_background_thumb_generation(const char* dir_path) {
+    if (!dir_path) return;
+    if (!bg_generation_mutex_inited) {
+        if (thread_mutex_init(&bg_generation_mutex) == 0) bg_generation_mutex_inited = 1;
+    }
+    if (bg_generation_mutex_inited) {
+        thread_mutex_lock(&bg_generation_mutex);
+    }
+    LOG_DEBUG("start_background_thumb_generation: checking for missing thumbs (shallow) in %s", dir_path);
     if (!dir_has_missing_thumbs_shallow(dir_path, 0)) {
         LOG_DEBUG("No missing thumbnails (shallow) for: %s", dir_path);
+        if (bg_generation_mutex_inited) {
+            thread_mutex_unlock(&bg_generation_mutex);
+        }
         start_auto_thumb_watcher(dir_path);
         return;
     }
@@ -1597,6 +1607,9 @@ void start_background_thumb_generation(const char* dir_path) {
                 }
                 else {
                     warn_maybe_log_already_running(dir_path);
+                    if (bg_generation_mutex_inited) {
+                        thread_mutex_unlock(&bg_generation_mutex);
+                    }
                     start_auto_thumb_watcher(dir_path);
                     return;
                 }
@@ -1611,6 +1624,9 @@ void start_background_thumb_generation(const char* dir_path) {
 
     if (lock_ret != 0) {
         LOG_WARN("Failed to create lock file %s", lock_path);
+        if (bg_generation_mutex_inited) {
+            thread_mutex_unlock(&bg_generation_mutex);
+        }
         return;
     }
 
@@ -1619,6 +1635,9 @@ void start_background_thumb_generation(const char* dir_path) {
     thread_args_t* args = malloc(sizeof(thread_args_t));
     if (!args) {
         LOG_ERROR("Failed to allocate memory for thread arguments for directory %s", dir_path);
+        if (bg_generation_mutex_inited) {
+            thread_mutex_unlock(&bg_generation_mutex);
+        }
         return;
     }
 
@@ -1631,6 +1650,9 @@ void start_background_thumb_generation(const char* dir_path) {
         while (cur) {
             if (strcmp(cur->dir, dir_path) == 0) {
                 thread_mutex_unlock(&running_mutex);
+                if (bg_generation_mutex_inited) {
+                    thread_mutex_unlock(&bg_generation_mutex);
+                }
                 start_auto_thumb_watcher(dir_path);
                 free(args);
                 return;
@@ -1657,6 +1679,9 @@ void start_background_thumb_generation(const char* dir_path) {
         free(args);
     }
 
+    if (bg_generation_mutex_inited) {
+        thread_mutex_unlock(&bg_generation_mutex);
+    }
     start_auto_thumb_watcher(dir_path);
 }
 void add_skip(progress_t * prog, const char* reason, const char* path) {
@@ -1731,6 +1756,9 @@ void count_media_in_dir(const char* dir, progress_t * prog) {
     }
     dir_close(&it);
 }
+static thread_mutex_t ensure_thumbs_mutex;
+static int ensure_thumbs_mutex_inited = 0;
+
 void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     if (!dir || !*dir) {
         LOG_ERROR("ensure_thumbs_in_dir: invalid dir");
@@ -1738,6 +1766,12 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     }
 
     LOG_DEBUG("ensure_thumbs_in_dir: enter for %s", dir);
+    if (!ensure_thumbs_mutex_inited) {
+        if (thread_mutex_init(&ensure_thumbs_mutex) == 0) ensure_thumbs_mutex_inited = 1;
+    }
+    if (ensure_thumbs_mutex_inited) {
+        thread_mutex_lock(&ensure_thumbs_mutex);
+    }
 
     if (!prog) {
         int quick = dir_has_missing_thumbs_shallow(dir, 0);
@@ -1745,6 +1779,9 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
             start_background_thumb_generation(dir);
         else
             start_auto_thumb_watcher(dir);
+        if (ensure_thumbs_mutex_inited) {
+            thread_mutex_unlock(&ensure_thumbs_mutex);
+        }
         return;
     }
 
@@ -1753,6 +1790,9 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     diriter it;
     if (!dir_open(&it, dir)) {
         LOG_WARN("ensure_thumbs_in_dir: failed to open dir %s", dir);
+        if (ensure_thumbs_mutex_inited) {
+            thread_mutex_unlock(&ensure_thumbs_mutex);
+        }
         return;
     }
     LOG_DEBUG("ensure_thumbs_in_dir: scanning directory %s", dir);
@@ -1839,17 +1879,59 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     }
     dir_close(&it);
     LOG_DEBUG("ensure_thumbs_in_dir: completed scanning %s", dir);
+    
+    if (ensure_thumbs_mutex_inited) {
+        thread_mutex_unlock(&ensure_thumbs_mutex);
+    }
 }
+
+static thread_mutex_t thumb_job_mutex;
+static int thumb_job_mutex_inited = 0;
 
 void schedule_or_generate_thumb(const char* input, const char* output, progress_t* prog, int scale, int q) {
     if (!input || !output || !prog) return;
-    
+    if (!thumb_job_mutex_inited) {
+        if (thread_mutex_init(&thumb_job_mutex) == 0) thumb_job_mutex_inited = 1;
+    }
+    if (thumb_job_mutex_inited) {
+        thread_mutex_lock(&thumb_job_mutex);
+    }
     prog->processed_files++;
+    char small_rel[PATH_MAX];
+    char large_rel[PATH_MAX];
+    get_thumb_rel_names(input, strrchr(input, '/') ? strrchr(input, '/') + 1 : input,
+                       small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+    
+    char thumbs_root[PATH_MAX];
+    get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+    
+    char safe_dir_name[PATH_MAX];
+    make_safe_dir_name_from(strrchr(input, '/') ? strrchr(input, '/') : input,
+                           safe_dir_name, sizeof(safe_dir_name));
+    
+    char per_thumbs_root[PATH_MAX];
+    snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+    
+    char small_fs[PATH_MAX];
+    snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
+    
+    char large_fs[PATH_MAX];
+    snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
+    
+    if (is_file(small_fs) && is_file(large_fs)) {
+        if (thumb_job_mutex_inited) {
+            thread_mutex_unlock(&thumb_job_mutex);
+        }
+        return;
+    }
     
     thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
     if (!job) {
         LOG_ERROR("Failed to allocate thumb job structure for %s", input);
         generate_thumb_inline_and_record(input, output, scale, q, (int)prog->processed_files, (int)prog->total_files);
+        if (thumb_job_mutex_inited) {
+            thread_mutex_unlock(&thumb_job_mutex);
+        }
         return;
     }
     
@@ -1862,14 +1944,29 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
     job->index = (int)prog->processed_files;
     job->total = (int)prog->total_files;
     
-    while (atomic_load(&thumb_workers_active) >= MAX_THUMB_WORKERS) sleep_ms(50);
-    atomic_fetch_add(&thumb_workers_active, 1);
-    
-    if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
-        LOG_ERROR("Failed to spawn thumb worker thread, generating inline");
-        atomic_fetch_sub(&thumb_workers_active, 1);
-        generate_thumb_inline_and_record(input, output, scale, q, job->index, job->total);
+    int workers_active = atomic_load(&thumb_workers_active);
+    if (workers_active >= MAX_THUMB_WORKERS) {
+        if (thumb_job_mutex_inited) {
+            thread_mutex_unlock(&thumb_job_mutex);
+        }
         free(job);
+        return;
+    }
+    
+    int expected = workers_active;
+    if (atomic_compare_exchange_weak(&thumb_workers_active, &expected, workers_active + 1)) {
+        if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
+            LOG_ERROR("Failed to spawn thumb worker thread, generating inline");
+            atomic_fetch_sub(&thumb_workers_active, 1);
+            generate_thumb_inline_and_record(input, output, scale, q, job->index, job->total);
+            free(job);
+        }
+    } else {
+        free(job);
+    }
+    
+    if (thumb_job_mutex_inited) {
+        thread_mutex_unlock(&thumb_job_mutex);
     }
 }
 

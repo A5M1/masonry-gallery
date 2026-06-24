@@ -13,18 +13,80 @@
 #include "platform.h"
 #include "websocket.h"
 
+static thread_mutex_t api_wrapper_mutex;
+static int api_wrapper_mutex_inited = 0;
+
 static void* start_background_wrapper(void* arg) {
+	if (!arg) return NULL;
+	if (!api_wrapper_mutex_inited) {
+		if (thread_mutex_init(&api_wrapper_mutex) == 0) api_wrapper_mutex_inited = 1;
+	}
+	if (api_wrapper_mutex_inited) {
+		thread_mutex_lock(&api_wrapper_mutex);
+	}
 	char* dir = (char*)arg;
 	if (dir) {
 		start_background_thumb_generation(dir);
 		free(dir);
 	}
+	if (api_wrapper_mutex_inited) {
+		thread_mutex_unlock(&api_wrapper_mutex);
+	}
 	return NULL;
 }
 
-typedef struct { 
-	char* key; 
-	char* val; 
+typedef struct {
+	char dir[PATH_MAX];
+	int count;
+	char** filenames;
+} page_thumb_gen_args_t;
+
+static void* generate_page_thumbs_thread(void* arg) {
+	page_thumb_gen_args_t* args = (page_thumb_gen_args_t*)arg;
+	if (!args) return NULL;
+	progress_t prog;
+	memset(&prog, 0, sizeof(prog));
+	for (int i = 0; i < args->count; i++) {
+		char full[PATH_MAX];
+		path_join(full, args->dir, args->filenames[i]);
+		if (!is_file(full)) continue;
+		if (!has_ext(args->filenames[i], IMAGE_EXTS) && !has_ext(args->filenames[i], VIDEO_EXTS)) continue;
+		char small_rel[PATH_MAX], large_rel[PATH_MAX];
+		get_thumb_rel_names(full, args->filenames[i], small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+		char thumbs_root[PATH_MAX];
+		get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+		char safe_dir[PATH_MAX];
+		make_safe_dir_name_from(args->dir, safe_dir, sizeof(safe_dir));
+		char per_root[PATH_MAX];
+		snprintf(per_root, sizeof(per_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
+		if (!is_dir(per_root)) platform_make_dir(per_root);
+		char small_path[PATH_MAX], large_path[PATH_MAX];
+		snprintf(small_path, sizeof(small_path), "%s" DIR_SEP_STR "%s", per_root, small_rel);
+		snprintf(large_path, sizeof(large_path), "%s" DIR_SEP_STR "%s", per_root, large_rel);
+		struct stat st_media, st_small, st_large;
+		int need_small = 0, need_large = 0;
+		if (platform_stat(full, &st_media) == 0) {
+			if (!is_file(small_path) || platform_stat(small_path, &st_small) != 0 || st_small.st_mtime < st_media.st_mtime)
+				need_small = 1;
+			if (!is_file(large_path) || platform_stat(large_path, &st_large) != 0 || st_large.st_mtime < st_media.st_mtime)
+				need_large = 1;
+		}
+		else {
+			need_small = !is_file(small_path);
+			need_large = !is_file(large_path);
+		}
+		if (need_small) schedule_or_generate_thumb(full, small_path, &prog, THUMB_SMALL_SCALE, THUMB_SMALL_QUALITY);
+		if (need_large) schedule_or_generate_thumb(full, large_path, &prog, THUMB_LARGE_SCALE, THUMB_LARGE_QUALITY);
+	}
+	for (int i = 0; i < args->count; i++) free(args->filenames[i]);
+	free(args->filenames);
+	free(args);
+	return NULL;
+}
+
+typedef struct {
+	char* key;
+	char* val;
 } api_kv_t;
 typedef struct { 
 	api_kv_t* arr; 
@@ -552,10 +614,12 @@ static char* json_objAddRaw(char* ptr, const char* name, const char* raw_json, s
 	while (*raw_json && *remLen > 0) { *ptr++ = *raw_json++; (*remLen)--; }
 	return ptr;
 }
-static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, const char* dir, const char* root) {
+#define MAX_TREE_DEPTH 5
+
+static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, const char* dir, const char* root, int depth) {
 	ensure_json_buf(pbuf, cap, *used, 4096);
 	char* ptr = *pbuf + *used;
-	if (!is_dir(dir) || has_nogallery(dir) || !has_media_rec(dir)) {
+	if (!is_dir(dir) || has_nogallery(dir)) {
 		ptr = json_null(ptr, NULL, cap);
 		*used = ptr - *pbuf;
 		return ptr;
@@ -590,9 +654,9 @@ static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, cons
 			if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "thumbs")) continue;
 			if (strlen(name) == 0) continue;
 			char full[PATH_MAX] = { 0 };
-			path_join(full, dir, name);
-			full[PATH_MAX - 1] = '\0';
-			if (is_dir(full) && !has_nogallery(full) && has_media_rec(full)) {
+				path_join(full, dir, name);
+				full[PATH_MAX - 1] = '\0';
+				if (is_dir(full) && !has_nogallery(full)) {
 				if (n == alloc) {
 					alloc = alloc ? alloc * 2 : 16;
 					names = realloc(names, alloc * sizeof(char*));
@@ -617,7 +681,7 @@ static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, cons
 		}
 		char child_full[PATH_MAX]; path_join(child_full, dir, names[i]);
 		ptr = *pbuf + *used;
-		ptr = build_folder_tree_json(pbuf, cap, used, child_full, root);
+		ptr = build_folder_tree_json(pbuf, cap, used, child_full, root, depth - 1);
 		*used = ptr - *pbuf;
 	}
 	for (size_t i = 0;i < n;i++) free(names[i]);
@@ -627,14 +691,32 @@ static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, cons
 	*used = ptr - *pbuf;
 	return ptr;
 }
+static char* tree_cache = NULL;
+static size_t tree_cache_len = 0;
+static time_t tree_cache_time = 0;
+static thread_mutex_t tree_cache_mutex;
+static int tree_cache_mutex_inited = 0;
+
 void handle_api_tree(int c, bool keep_alive) {
+	if (!tree_cache_mutex_inited) {
+		if (thread_mutex_init(&tree_cache_mutex) == 0) tree_cache_mutex_inited = 1;
+	}
+	time_t now = time(NULL);
+	thread_mutex_lock(&tree_cache_mutex);
+	if (tree_cache && (now - tree_cache_time) < 5) {
+		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)tree_cache_len, NULL, 0, keep_alive);
+		send(c, tree_cache, (int)tree_cache_len, 0);
+		thread_mutex_unlock(&tree_cache_mutex);
+		return;
+	}
+	thread_mutex_unlock(&tree_cache_mutex);
 	size_t count;
 	char** folders = get_gallery_folders(&count);
 	size_t cap = 8192;
 	char* buf = malloc(cap);
 	size_t used = 0;
 	if (count == 1) {
-		build_folder_tree_json(&buf, &cap, &used, folders[0], folders[0]);
+		build_folder_tree_json(&buf, &cap, &used, folders[0], folders[0], MAX_TREE_DEPTH);
 	}
 	else {
 		char* ptr = buf;
@@ -645,11 +727,20 @@ void handle_api_tree(int c, bool keep_alive) {
 		size_t i;
 		for (i = 0; i < count; i++) {
 			if (i > 0) { ptr = json_comma_safe(ptr, &cap); used = ptr - buf; }
-			build_folder_tree_json(&buf, &cap, &used, folders[i], folders[i]);
+			build_folder_tree_json(&buf, &cap, &used, folders[i], folders[i], MAX_TREE_DEPTH);
 		}
 		ptr = json_arrClose(ptr, &cap); used = ptr - buf;
 		ptr = json_objClose(ptr, &cap); used = ptr - buf;
 	}
+	thread_mutex_lock(&tree_cache_mutex);
+	if (tree_cache) free(tree_cache);
+	tree_cache = malloc(used);
+	if (tree_cache) {
+		memcpy(tree_cache, buf, used);
+		tree_cache_len = used;
+		tree_cache_time = time(NULL);
+	}
+	thread_mutex_unlock(&tree_cache_mutex);
 	send_header(c, 200, "OK", "application/json; charset=utf-8", (long)used, NULL, 0, keep_alive);
 	send(c, buf, (int)used, 0);
 	free(buf);
@@ -761,12 +852,6 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 		return;
 	}
 	if (!real_path(BASE_DIR, base_real)) base_real[0] = '\0';
-	{
-		if (page <= 1) {
-			char* trg = strdup(target_real);
-			if (trg) thread_create_detached(start_background_wrapper, trg);
-		}
-	}
 	char** files = NULL;
 	size_t n = 0, alloc = 0;
 	diriter it;
@@ -794,6 +879,23 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 	int end = start + ITEMS_PER_PAGE;
 	if (end > total) end = total;
 	if (render_html) {
+		if (start < end) {
+			page_thumb_gen_args_t* pta = malloc(sizeof(page_thumb_gen_args_t));
+			if (pta) {
+				strncpy(pta->dir, target_real, sizeof(pta->dir) - 1);
+				pta->dir[sizeof(pta->dir) - 1] = '\0';
+				pta->count = end - start;
+				pta->filenames = malloc(pta->count * sizeof(char*));
+				if (pta->filenames) {
+					for (int fi = 0; fi < pta->count; fi++)
+						pta->filenames[fi] = strdup(files[start + fi]);
+					thread_create_detached(generate_page_thumbs_thread, pta);
+				}
+				else {
+					free(pta);
+				}
+			}
+		}
 		char cache_dir[PATH_MAX];
 		snprintf(cache_dir, sizeof(cache_dir), "%s" DIR_SEP_STR "cache" DIR_SEP_STR "media", BASE_DIR);
 		if (!is_dir(cache_dir)) mk_dir(cache_dir);
@@ -2141,6 +2243,60 @@ void handle_api_thumbdb_thumbs_for_dir(int c, char* qs, bool keep_alive) {
 	free(buf); SAFE_FREE(dir);
 }
 
+void handle_api_thumbnail_generate(int c, char* qs, bool keep_alive) {	
+	if (!qs) { send_text(c, 400, "Bad Request", "Missing query", keep_alive); return; }
+	char* path_param = query_get(qs, "path");
+	char* size_param = query_get(qs, "size");
+	if (!path_param) { send_text(c, 400, "Bad Request", "Missing path", keep_alive); return; }
+	char dircopy[PATH_MAX]; strncpy(dircopy, path_param, sizeof(dircopy) - 1); dircopy[sizeof(dircopy) - 1] = '\0'; url_decode(dircopy);
+	char target_real[PATH_MAX]; char base_real[PATH_MAX];
+	if (!resolve_and_validate_target(BASE_DIR, dircopy, target_real, sizeof(target_real), base_real, sizeof(base_real))) {
+		SAFE_FREE(path_param); SAFE_FREE(size_param);
+		send_text(c, 403, "Forbidden", "Invalid path", keep_alive);
+		return;
+	}
+	if (!is_file(target_real)) {
+		SAFE_FREE(path_param); SAFE_FREE(size_param);
+		send_text(c, 404, "Not Found", "File not found", keep_alive);
+		return;
+	}
+	int scale = 200;
+	if (size_param) { if (strcmp(size_param, "large") == 0) scale = 800; else if (strcmp(size_param, "small") == 0) scale = 200; }
+	char small_rel[PATH_MAX], large_rel[PATH_MAX];
+	const char* fname = strrchr(target_real, DIR_SEP);
+	if (!fname) fname = target_real; else fname++;
+	get_thumb_rel_names(target_real, fname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+	char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+	char thumb_output[PATH_MAX];
+	if (scale == 800) snprintf(thumb_output, sizeof(thumb_output), "%s%s%s", thumbs_root, DIR_SEP_STR, large_rel);
+	else snprintf(thumb_output, sizeof(thumb_output), "%s%s%s", thumbs_root, DIR_SEP_STR, small_rel);
+	normalize_path(thumb_output);
+	if (!is_file(thumb_output)) {
+		char thumb_dir[PATH_MAX]; strncpy(thumb_dir, thumb_output, sizeof(thumb_dir) - 1); thumb_dir[sizeof(thumb_dir) - 1] = '\0';
+		char* last = strrchr(thumb_dir, DIR_SEP); if (last) *last = '\0';
+		mk_dir(thumb_dir);
+		progress_t prog = {.total_files = 1, .processed_files = 0};
+		schedule_or_generate_thumb(target_real, thumb_output, &prog, scale, 85);
+		if (is_file(thumb_output)) {
+			char* url_path = small_rel;
+			if (scale == 800) url_path = large_rel;
+			char json_resp[512];
+			snprintf(json_resp, sizeof(json_resp), "{\"status\":\"generated\",\"url\":\"/images/thumbs/%s\"}", url_path);
+			websocket_broadcast_topic(path_param, json_resp);
+			send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(json_resp), NULL, 0, keep_alive);
+			send(c, json_resp, (int)strlen(json_resp), 0);
+		} else {
+			send_text(c, 500, "Internal Server Error", "{\"error\":\"thumbnail generation failed\"}", keep_alive);
+		}
+	} else {
+		char json_resp[512];
+		snprintf(json_resp, sizeof(json_resp), "{\"status\":\"exists\",\"url\":\"/images/thumbs/%s\"}", scale == 800 ? large_rel : small_rel);
+		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(json_resp), NULL, 0, keep_alive);
+		send(c, json_resp, (int)strlen(json_resp), 0);
+	}
+	SAFE_FREE(path_param); SAFE_FREE(size_param);
+}
+
 void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
 	const char* f_start = strstr(body, "\"fromPath\"");
@@ -2160,10 +2316,28 @@ void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 	char rel_copy[PATH_MAX]; strncpy(rel_copy, rel, sizeof(rel_copy) - 1); rel_copy[sizeof(rel_copy) - 1] = '\0';
 	while (*rel_copy == '/' || *rel_copy == '\\') memmove(rel_copy, rel_copy + 1, strlen(rel_copy));
 	char src[PATH_MAX]; snprintf(src, sizeof(src), "%s%s%s", BASE_DIR, DIR_SEP_STR, rel_copy); normalize_path(src);
+	char real_base[PATH_MAX], real_src[PATH_MAX];
+	platform_real_path(BASE_DIR, real_base);
+	platform_real_path(src, real_src);
+	if (!platform_safe_under(real_base, real_src)) {
+		LOG_ERROR("Path traversal attempt blocked: %s", src);
+		send_text(c, 403, "Forbidden", "Path traversal not allowed", keep_alive);
+		return;
+	}
 	char* fname = strrchr(src, DIR_SEP);
 	if (!fname || *(fname + 1) == '\0') { send_text(c, 400, "Bad Request", "invalid fromPath", keep_alive); return; }
 	fname++;
-	char trash_root[PATH_MAX]; snprintf(trash_root, sizeof(trash_root), "%s" DIR_SEP_STR "trash", BASE_DIR); normalize_path(trash_root); mk_dir(trash_root);
+	if (!is_file(src)) {
+		LOG_WARN("File not found: %s", src);
+		send_text(c, 404, "Not Found", "File not found", keep_alive);
+		return;
+	}
+	char trash_root[PATH_MAX]; snprintf(trash_root, sizeof(trash_root), "%s" DIR_SEP_STR "trash", BASE_DIR); normalize_path(trash_root);
+	if (mk_dir(trash_root) != 0) {
+		LOG_ERROR("Failed to create trash root: %s", trash_root);
+		send_text(c, 500, "Internal Server Error", "{\"error\":\"trash directory creation failed\"}", keep_alive);
+		return;
+	}
 	char destFolder[PATH_MAX]; strncpy(destFolder, trash_root, sizeof(destFolder) - 1); destFolder[sizeof(destFolder) - 1] = '\0';
 	char rel_dir[PATH_MAX]; strncpy(rel_dir, rel_copy, sizeof(rel_dir) - 1); rel_dir[sizeof(rel_dir) - 1] = '\0';
 	char* l = strrchr(rel_dir, '/');
@@ -2171,29 +2345,50 @@ void handle_api_delete_file(int c, const char* body, bool keep_alive) {
 		*l = '\0';
 		char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "%s" DIR_SEP_STR "%s", trash_root, rel_dir); normalize_path(tmp); strncpy(destFolder, tmp, sizeof(destFolder) - 1); destFolder[sizeof(destFolder) - 1] = '\0';
 	}
-	normalize_path(destFolder); mk_dir(destFolder);
+	normalize_path(destFolder);
+	char tmp_path[PATH_MAX]; strncpy(tmp_path, destFolder, sizeof(tmp_path) - 1); tmp_path[sizeof(tmp_path) - 1] = '\0';
+	for (char* p = tmp_path + 1; *p; p++) {
+		if (*p == '/' || *p == '\\') {
+			char sep = *p; *p = '\0';
+			mk_dir(tmp_path);
+			*p = sep;
+		}
+	}
+	mk_dir(tmp_path);
+	if (!is_dir(destFolder)) {
+		LOG_ERROR("Failed to create destination folder: %s", destFolder);
+		send_text(c, 500, "Internal Server Error", "{\"error\":\"destination folder creation failed\"}", keep_alive);
+		return;
+	}
 	char dest[PATH_MAX]; path_join(dest, destFolder, fname);
+	LOG_DEBUG("Attempting delete: src=%s dest=%s", src, dest);
+	platform_close_streams_for_path(src);
+	int delete_success = 0;
 	if (platform_move_file(src, dest) == 0) {
+		LOG_INFO("File moved to trash: %s -> %s", src, dest);
+		delete_success = 1;
+	} else {
+		LOG_WARN("Move failed, attempting copy: %s -> %s", src, dest);
+		if (platform_copy_file(src, dest) == 0) {
+			if (platform_file_delete(src) == 0) {
+				LOG_INFO("File copied and original deleted: %s", src);
+				delete_success = 1;
+			} else {
+				LOG_ERROR("Copy succeeded but delete failed: %s", src);
+			}
+		} else {
+			LOG_ERROR("Both move and copy failed for file: src=%s dest=%s", src, dest);
+		}
+	}
+	if (delete_success) {
 		const char* ok = "{\"status\":\"ok\"}";
 		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
 		send(c, ok, (int)strlen(ok), 0);
-		return;
+	} else {
+		char emsg[256]; snprintf(emsg, sizeof(emsg), "{\"error\":\"delete failed\"}") ;
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(emsg), NULL, 0, keep_alive);
+		send(c, emsg, (int)strlen(emsg), 0);
 	}
-	if (platform_copy_file(src, dest) == 0) {
-		if (platform_file_delete(src) == 0) {
-			const char* ok = "{\"status\":\"ok\"}";
-			send_header(c, 200, "OK", "application/json; charset=utf-8", (long)strlen(ok), NULL, 0, keep_alive);
-			send(c, ok, (int)strlen(ok), 0);
-			return;
-		}
-		const char* msg = "{\"error\":\"copied but delete failed\"}";
-		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
-		send(c, msg, (int)strlen(msg), 0);
-		return;
-	}
-	char emsg[128]; snprintf(emsg, sizeof(emsg), "{\"error\":\"delete failed\"}");
-	send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(emsg), NULL, 0, keep_alive);
-	send(c, emsg, (int)strlen(emsg), 0);
 }
 typedef enum {
 	GET_SIMPLE, GET_QS, POST_BODY
@@ -2282,6 +2477,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		{ "/api/media", GET_QS, handle_api_media },
 		{ "/api/folders/add", POST_BODY, handle_api_add_folder },
 		{ "/api/regenerate-thumbs", GET_QS, handle_api_regenerate_thumbs },
+		{ "/api/thumbnail/generate", GET_QS, handle_api_thumbnail_generate },
 	};
 	static const static_route_t static_routes[] = {
 		{ "/images/", BASE_DIR, true },

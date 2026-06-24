@@ -15,9 +15,7 @@
 	function setCookie(name, value, days) {
 		const expiry = new Date();
 		expiry.setTime(expiry.getTime() + days * 24 * 60 * 60 * 1000);
-		document.cookie = `${name}=${encodeURIComponent(
-			value
-		)};expires=${expiry.toUTCString()};path=/`;
+		document.cookie = `${name}=${encodeURIComponent(value)};expires=${expiry.toUTCString()};path=/`;
 	}
 
 	function getCookie(name) {
@@ -135,9 +133,7 @@
 		isLoading = true;
 		loadingIndicator.text("Loading...").show();
 		$.get(
-			`/api/media?dir=${encodeURIComponent(
-				currentDir
-			)}&page=${currentPage}&render=html`,
+			`/api/media?dir=${encodeURIComponent(currentDir)}&page=${currentPage}&render=html`,
 			html => {
 				try {
 					const temp = document.createElement("div");
@@ -203,15 +199,6 @@
 								el.addEventListener("load", onLoad, {
 									once: true
 								});
-								if (
-									el.complete &&
-									el.naturalWidth &&
-									el.naturalWidth > 0
-								) {
-									try {
-										onLoad();
-									} catch (e) {}
-								}
 								return true;
 							},
 							"800px"
@@ -337,26 +324,12 @@
 							child.children && child.children.length > 0;
 						const isOpen =
 							isActive || dir.startsWith(child.path + "/");
-						return `<li class="folder-item ${
-							hasChildren ? "has-children" : ""
-						} ${isOpen ? "open" : ""}" data-path="${child.path}">
-                        ${
-							hasChildren
-								? '<span class="folder-toggle"></span>'
-								: '<span class="folder-spacer"></span>'
-						}
-                        <a href="/?dir=${child.path}" class="folder-link ${
-							isActive ? "active" : ""
-						}">
+						return `<li class="folder-item ${hasChildren ? "has-children" : ""} ${isOpen ? "open" : ""}" data-path="${child.path}">
+                        ${hasChildren ? '<span class="folder-toggle"></span>' : '<span class="folder-spacer"></span>'}
+                        <a href="/?dir=${child.path}" class="folder-link ${isActive ? "active" : ""}">
                             📁<span class="folder-name">${child.name}</span>
                         </a>
-                        ${
-							hasChildren
-								? `<div class="folder-children" style="display:${
-										isOpen ? "block" : "none"
-								  };">${renderNode(child)}</div>`
-								: ""
-						}
+                        ${hasChildren ? `<div class="folder-children" style="display:${isOpen ? "block" : "none"};">${renderNode(child)}</div>` : ""}
                     </li>`;
 					})
 					.join("") +
@@ -385,9 +358,9 @@
 							const toggleFn = () => {
 								item.classList.toggle("open");
 								children.style.display =
-									item.classList.contains("open")
-										? "block"
-										: "none";
+									item.classList.contains("open") ?
+										"block"
+									:	"none";
 								scheduleLayout();
 							};
 							toggle.addEventListener("click", e => {
@@ -412,9 +385,10 @@
 							const sub =
 								parent.querySelector(".folder-children");
 							if (sub) sub.style.display = "block";
-							parent = parent.parentElement
-								? parent.parentElement.closest(".folder-item")
-								: null;
+							parent =
+								parent.parentElement ?
+									parent.parentElement.closest(".folder-item")
+								:	null;
 						}
 						setTimeout(
 							() =>
@@ -435,92 +409,14 @@
 
 	loadFolderTree();
 
-	function setupThumbSocket() {
-		try {
-			var proto = location.protocol === "https:" ? "wss://" : "ws://";
-			var wsUrl = proto + location.host + "/ws";
-			var ws = new WebSocket(wsUrl);
-			ws.addEventListener("open", function () {
-				console.log("Thumbnail WebSocket connected");
-			});
-			ws.addEventListener("message", function (evt) {
-				try {
-					var o = JSON.parse(evt.data);
-					if (!o) return;
-					if (o.type === "thumb_ready" && o.media && o.thumb) {
-						var thumbBasename = o.thumb;
-						var largeName = thumbBasename.replace(
-							"-small.",
-							"-large."
-						);
-						var hash = o.hash || "";
-						var els = [];
-						if (hash) {
-							var hashSel = '.masonry-item[data-hash="' + hash + '"] img.thumb-img';
-							els = Array.from(document.querySelectorAll(hashSel));
-						}
-						if (els.length === 0) {
-							var sel1 = 'a[href="' + o.media + '"] img.thumb-img';
-							var sel2 = '[data-src="' + o.media + '"] img.thumb-img';
-							els = Array.from(
-								document.querySelectorAll(sel1)
-							).concat(Array.from(document.querySelectorAll(sel2)));
-						}
-						els.forEach(function (el) {
-							try {
-								var currentSrc = el.getAttribute("src") || "";
-								if (
-									!currentSrc ||
-									currentSrc.includes("placeholder") ||
-									currentSrc.includes("base64")
-								) {
-									var largeUrl =
-										"/images/thumbs/" +
-										encodeURIComponent(largeName);
-									var img = new Image();
-									img.onload = function () {
-										el.src = largeUrl;
-										el.setAttribute(
-											"data-thumb-large",
-											largeUrl
-										);
-										scheduleLayout();
-									};
-									img.onerror = function () {
-										var smallUrl =
-											"/images/thumbs/" +
-											encodeURIComponent(thumbBasename);
-										el.src = smallUrl;
-									};
-									img.src = largeUrl;
-								}
-							} catch (e) {}
-						});
-					}
-				} catch (e) {}
-			});
-			ws.addEventListener("close", function () {
-				console.log(
-					"Thumbnail WebSocket disconnected, reconnecting..."
-				);
-				setTimeout(setupThumbSocket, 3000);
-			});
-			ws.addEventListener("error", function (err) {
-				console.error("Thumbnail WebSocket error:", err);
-			});
-		} catch (e) {
-			console.error("Failed to setup thumbnail WebSocket:", e);
-		}
-	}
-
 	function setupSidebarLogic() {
 		const topBtn = document.querySelector(".scroll-to-top-btn");
-		const {pushState} = history;
+		const pushState = history.pushState;
 		history.pushState = function (...args) {
 			pushState.apply(this, args);
 			updateScrollButton();
 		};
-		const {replaceState} = history;
+		const replaceState = history.replaceState;
 		history.replaceState = function (...args) {
 			replaceState.apply(this, args);
 			updateScrollButton();
@@ -577,6 +473,103 @@
 			true
 		);
 	}
+function setupThumbSocket() {
+	try {
+		var proto = location.protocol === "https:" ? "wss://" : "ws://";
+		var wsUrl = proto + location.host + "/ws";
+		var ws = new WebSocket(wsUrl);
+		ws.addEventListener("open", function () {
+			console.log("Thumbnail WebSocket connected");
+			if (currentDir) {
+				ws.send(
+					JSON.stringify({
+						type: "subscribe",
+						path: currentDir
+					})
+				);
+			}
+		});
+		ws.addEventListener("message", function (evt) {
+			try {
+				var o = JSON.parse(evt.data);
+				if (!o) return;
+				if (o.type === "thumb_ready" && o.media && o.thumb) {
+					var thumbBasename = o.thumb;
+					var largeName = thumbBasename.replace("-small.", "-large.");
+					var hash = o.hash || "";
+					var els = [];
+					if (hash) {
+						var hashSel =
+							'.masonry-item[data-hash="' +
+							hash +
+							'"] img.thumb-img';
+						els = Array.from(document.querySelectorAll(hashSel));
+					}
+					if (els.length === 0) {
+						var sel1 = 'a[href="' + o.media + '"] img.thumb-img';
+						var sel2 = '[data-src="' + o.media + '"] img.thumb-img';
+						els = Array.from(
+							document.querySelectorAll(sel1)
+						).concat(Array.from(document.querySelectorAll(sel2)));
+					}
+					els.forEach(function (el) {
+						try {
+							var currentSrc = el.getAttribute("src") || "";
+							if (
+								!currentSrc ||
+								currentSrc.includes("placeholder") ||
+								currentSrc.includes("base64")
+							) {
+								var largeUrl =
+									"/images/thumbs/" +
+									encodeURIComponent(largeName);
+								var img = new Image();
+								img.onload = function () {
+									el.src = largeUrl;
+									el.setAttribute(
+										"data-thumb-large",
+										largeUrl
+									);
+									scheduleLayout();
+								};
+								img.onerror = function () {
+									var smallUrl =
+										"/images/thumbs/" +
+										encodeURIComponent(thumbBasename);
+									el.src = smallUrl;
+								};
+								img.src = largeUrl;
+							}
+						} catch (e) {}
+					});
+				}
+				if (o.status === "generated" && o.url) {
+					var imgSel =
+						'img.thumb-img[data-generating-for="' +
+						(o.media || o.path || "") +
+						'"]';
+					var els = Array.from(document.querySelectorAll(imgSel));
+					els.forEach(function (el) {
+						try {
+							el.src = o.url;
+							el.removeAttribute("data-generating-for");
+							scheduleLayout();
+						} catch (e) {}
+					});
+				}
+			} catch (e) {}
+		});
+		ws.addEventListener("close", function () {
+			console.log("Thumbnail WebSocket disconnected, reconnecting...");
+			setTimeout(setupThumbSocket, 3000);
+		});
+		ws.addEventListener("error", function (err) {
+			console.error("Thumbnail WebSocket error:", err);
+		});
+	} catch (e) {
+		console.error("Failed to setup thumbnail WebSocket:", e);
+	}
+}
 
 	setupSidebarLogic();
 	setupThumbSocket();
