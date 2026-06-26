@@ -717,7 +717,7 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     
     uint64_t filename_delta;
     if (read_varint(f, &filename_delta) != 0) {
-        free(rec->dir_indexes);
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     
@@ -725,15 +725,15 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     last_filename_delta = filename_val;
     rec->filename = malloc(32);
     if (!rec->filename) {
-        free(rec->dir_indexes);
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     snprintf(rec->filename, 32, "%llu", (unsigned long long)filename_val);
     
     uint8_t meta;
     if (fread(&meta, 1, 1, f) != 1) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     rec->meta = decode_meta_byte(meta);
@@ -741,8 +741,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     if (rec->meta.hash_override) {
         uint8_t hash_mode_byte;
         if (fread(&hash_mode_byte, 1, 1, f) != 1) {
-            free(rec->filename);
-            free(rec->dir_indexes);
+            free(rec->filename); rec->filename = NULL;
+            free(rec->dir_indexes); rec->dir_indexes = NULL;
             return -1;
         }
         rec->meta.hash_mode = (hash_mode_t)(hash_mode_byte & 3);
@@ -753,16 +753,16 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     if (rec->meta.has_extensions) {
         uint64_t ext_len;
         if (read_varint(f, &ext_len) != 0) {
-            free(rec->filename);
-            free(rec->dir_indexes);
+            free(rec->filename); rec->filename = NULL;
+            free(rec->dir_indexes); rec->dir_indexes = NULL;
             return -1;
         }
         size_t ext_bytes_read = 0;
         while (ext_bytes_read < ext_len) {
             uint8_t tag;
             if (fread(&tag, 1, 1, f) != 1) {
-                free(rec->filename);
-                free(rec->dir_indexes);
+                free(rec->filename); rec->filename = NULL;
+                free(rec->dir_indexes); rec->dir_indexes = NULL;
                 return -1;
             }
             ext_bytes_read++;
@@ -770,8 +770,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
             uint64_t value_len;
             size_t varint_size;
             if (read_varint_with_size(f, &value_len, &varint_size) != 0) {
-                free(rec->filename);
-                free(rec->dir_indexes);
+                free(rec->filename); rec->filename = NULL;
+                free(rec->dir_indexes); rec->dir_indexes = NULL;
                 return -1;
             }
             ext_bytes_read += varint_size;
@@ -780,8 +780,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
                 uint64_t w, h;
                 size_t w_size, h_size;
                 if (read_varint_with_size(f, &w, &w_size) != 0 || read_varint_with_size(f, &h, &h_size) != 0) {
-                    free(rec->filename);
-                    free(rec->dir_indexes);
+                    free(rec->filename); rec->filename = NULL;
+                    free(rec->dir_indexes); rec->dir_indexes = NULL;
                     return -1;
                 }
                 rec->width = (uint32_t)w;
@@ -790,8 +790,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
             }
             else if (tag == MV_EXT_TAGS.orientation && value_len == 1) {
                 if (fread(&rec->orientation, 1, 1, f) != 1) {
-                    free(rec->filename);
-                    free(rec->dir_indexes);
+                    free(rec->filename); rec->filename = NULL;
+                    free(rec->dir_indexes); rec->dir_indexes = NULL;
                     return -1;
                 }
                 ext_bytes_read++;
@@ -802,8 +802,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
                     if (fread(rec->codec_info, 1, value_len, f) != value_len) {
                         free(rec->codec_info);
                         rec->codec_info = NULL;
-                        free(rec->filename);
-                        free(rec->dir_indexes);
+                        free(rec->filename); rec->filename = NULL;
+                        free(rec->dir_indexes); rec->dir_indexes = NULL;
                         return -1;
                     }
                     rec->codec_info[value_len] = '\0';
@@ -813,8 +813,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
             else if (tag == MV_EXT_TAGS.gps_coords && value_len == 8) {
                 float lat_f, lon_f;
                 if (read_float_le(f, &lat_f) != 0 || read_float_le(f, &lon_f) != 0) {
-                    free(rec->filename);
-                    free(rec->dir_indexes);
+                    free(rec->filename); rec->filename = NULL;
+                    free(rec->dir_indexes); rec->dir_indexes = NULL;
                     return -1;
                 }
                 rec->gps_lat = (double)lat_f;
@@ -825,8 +825,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
                 for (uint64_t i = 0; i < value_len; i++) {
                     uint8_t dummy;
                     if (fread(&dummy, 1, 1, f) != 1) {
-                        free(rec->filename);
-                        free(rec->dir_indexes);
+                        free(rec->filename); rec->filename = NULL;
+                        free(rec->dir_indexes); rec->dir_indexes = NULL;
                         return -1;
                     }
                     ext_bytes_read++;
@@ -837,8 +837,8 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     
     uint64_t timestamp_delta;
     if (read_varint(f, &timestamp_delta) != 0) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     rec->timestamp = is_first ? timestamp_delta : (last_timestamp_delta + timestamp_delta);
@@ -849,28 +849,28 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     rec->hash_len = get_hash_length(rec->meta.hash_mode);
     if (rec->hash_len > 0) {
         if (fread(rec->hash, 1, rec->hash_len, f) != rec->hash_len) {
-            free(rec->filename);
-            free(rec->dir_indexes);
+            free(rec->filename); rec->filename = NULL;
+            free(rec->dir_indexes); rec->dir_indexes = NULL;
             return -1;
         }
     }
     
     uint32_t stored_crc;
     if (read_uint32_le(f, &stored_crc) != 0) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     
     uint8_t end;
     if (fread(&end, 1, 1, f) != 1) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     if (end != MV_OPCODES.end) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     
@@ -878,13 +878,13 @@ static int read_record(FILE* f, record_t* rec, int is_first) {
     fseek(f, start_pos, SEEK_SET);
     size_t record_size = (size_t)(end_pos - start_pos - 5);
     if (record_size > sizeof(record_buf)) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     if (fread(record_buf, 1, record_size, f) != record_size) {
-        free(rec->filename);
-        free(rec->dir_indexes);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
         return -1;
     }
     fseek(f, end_pos, SEEK_SET);
@@ -2313,11 +2313,17 @@ int thumbdb_validate(void) {
             LOG_ERROR("thumbdb_validate: invalid timestamp_delta at offset %ld", ftell(f));
             break;
         }
-        int hash_override = (meta_byte >> 3) & 1;
-        hash_mode_t hash_mode = (hash_mode_t)((meta_byte >> 4) & 3);
+        int hash_override = (meta_byte >> 1) & 1;
+        hash_mode_t hash_mode;
         if (hash_override) {
-            hash_mode_t file_hash_mode = (hash_mode_t)((flags >> 4) & 3);
-            hash_mode = file_hash_mode;
+            uint8_t hash_mode_byte;
+            if (fread(&hash_mode_byte, 1, 1, f) != 1) {
+                LOG_ERROR("thumbdb_validate: cannot read hash_mode_byte at offset %ld", ftell(f));
+                break;
+            }
+            hash_mode = (hash_mode_t)(hash_mode_byte & 3);
+        } else {
+            hash_mode = (hash_mode_t)((flags >> 4) & 3);
         }
         size_t hash_len = 0;
         switch (hash_mode) {
@@ -2329,21 +2335,30 @@ int thumbdb_validate(void) {
         if (hash_len > 0) {
             fseek(f, (long)hash_len, SEEK_CUR);
         }
-        int has_extensions = (meta_byte >> 6) & 1;
+        int has_extensions = meta_byte & 1;
         if (has_extensions) {
-            uint64_t ext_count;
-            if (read_varint(f, &ext_count) != 0) {
-                LOG_ERROR("thumbdb_validate: invalid extension_count at offset %ld", ftell(f));
+            uint64_t ext_len;
+            if (read_varint(f, &ext_len) != 0) {
+                LOG_ERROR("thumbdb_validate: invalid extension_len at offset %ld", ftell(f));
                 break;
             }
-            for (uint64_t i = 0; i < ext_count; i++) {
+            size_t ext_bytes_read = 0;
+            while (ext_bytes_read < ext_len) {
                 uint8_t tag;
-                uint64_t len;
-                if (fread(&tag, 1, 1, f) != 1 || read_varint(f, &len) != 0) {
-                    LOG_ERROR("thumbdb_validate: invalid extension at offset %ld", ftell(f));
+                if (fread(&tag, 1, 1, f) != 1) {
+                    LOG_ERROR("thumbdb_validate: invalid extension tag at offset %ld", ftell(f));
                     break;
                 }
-                fseek(f, (long)len, SEEK_CUR);
+                ext_bytes_read++;
+                uint64_t value_len;
+                size_t varint_size;
+                if (read_varint_with_size(f, &value_len, &varint_size) != 0) {
+                    LOG_ERROR("thumbdb_validate: invalid extension value_len at offset %ld", ftell(f));
+                    break;
+                }
+                ext_bytes_read += varint_size;
+                fseek(f, (long)value_len, SEEK_CUR);
+                ext_bytes_read += (size_t)value_len;
             }
         }
         long crc_end = ftell(f);

@@ -101,6 +101,9 @@ static void process_wal_chunks(const char* per_thumbs_root) {
     wal_dir[0] = '\0';
     build_wal_dir_path(per_thumbs_root, wal_dir, sizeof(wal_dir));
     if (!is_dir(wal_dir)) return;
+    char per_db[PATH_MAX];
+    snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+    thumbdb_open_for_dir(per_db);
     diriter it;
     if (!dir_open(&it, wal_dir)) return;
     const char* entry;

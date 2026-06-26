@@ -1,134 +1,110 @@
-# =====================================================
-# Editor / IDE
-# =====================================================
-.idea/
-.features/
-.vs/
-.vscode/
-*.hintrc
-*.sln.docstates
-*.suo
-*.user
-*.userosscache
-.zed/
-# =====================================================
-# Operating system files
-# =====================================================
+# ================================
+#  OS / Editor / System files
+# ================================
 .DS_Store
 Thumbs.db
-
-# =====================================================
-# Build / Output
-# =====================================================
-/build/
-/dist/
-/dbDir/
-/features/
-/libraries/
-/symbols/
-/todo/
-*.cmd
-*.conf
-*.exe
-
-# =====================================================
-# Binaries, objects and libraries
-# =====================================================
-*.a
-*.dll
-*.dylib
-*.lib
-*.o
-*.obj
-*.so
-
-# =====================================================
-# Debug files
-# =====================================================
-*.i64
-*.pdb
-*.rdi
-
-# =====================================================
-# Logs and reports
-# =====================================================
-/logs/
-folder-index.json
-PVS-STUDIO-log.*
-
-# =====================================================
-# Node / JavaScript
-# =====================================================
-node_modules/
-*.bundle.js
-npm-debug.log*
-package-lock.json
-yarn-debug.log*
-yarn-error.log*
-
-# =====================================================
-# Python
-# =====================================================
-__pycache__/
-*.py[cod]
-*.pyd
-*.pyo
-
-# =====================================================
-# Rust / Cargo and other targets
-# =====================================================
-/rust/target/
-/target/
-
-# =====================================================
-# Coverage, tests and miscellaneous
-# =====================================================
-coverage/
-*.gcda
-*.gcno
-*.lcov
-*.lock
-*.map
-*.todo.txt
-*.tmp
-*.backup
-*.db
-
-# =====================================================
-# Tools and scripts to ignore
-# =====================================================
-tools/parse_thumbdb.py
-
-# =====================================================
-# Project documents / sensitive files
-# =====================================================
-SECURITY_ASSESSMENT_REPORT.md
-
-# =====================================================
-# Git / Repository metadata
-# =====================================================
-/.github/
-
-# =====================================================
-# Temporary / swap / backup files
-# =====================================================
 *~
 *.bak
 *.orig
 *.rej
 *.swp
 *.swo
-*.tmp
 
-# =====================================================
-# AI
-# =====================================================
+# ================================
+#  IDE / Project‑specific settings
+# ================================
+.idea/
 .roo/
 .roomodes
-SPEC.md
-public/css/GLYPHICON.css
+.vs/
+.vscode/
+.zed/
+*.sln.docstates
+*.suo
+*.user
+*.userosscache
+
+# ================================
+#  Build & output directories
+# ================================
+/build/
+/dbDir/
+/dist/
+/features/
+/libraries/
+/logs/
+/symbols/
+/target/
+/todo/
+coverage/
+experimental/me/target/*
+plans/
+/rust/target/
+
+# ================================
+#  Dependency directories
+# ================================
+.features/
+node_modules/
 /public/fonts
-public/js/fancybox.umd.js
-public/css/v6-fancybox.css
+
+# ================================
+#  Compiled binaries & libraries
+# ================================
+*.cmd
+*.conf
+*.exe
 *.exp
+*.jar
+
+# ================================
+#  Python cache / compiled
+# ================================
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# ================================
+#  Node / JavaScript / Yarn
+# ================================
+*.bundle.js
+npm-debug.log*
+package-lock.json
+yarn-debug.log*
+yarn-error.log*
+
+# ================================
+#  C / C++ / coverage / profiler
+# ================================
+*.gcda
+*.gcno
+*.lcov
+
+# ================================
+#  Temporary & backup files
+# ================================
+*.backup
+*.db
+*.lock
+*.map
+*.tmp
+*.todo.txt
+folder-index.json
+PVS-STUDIO-log.*
+
+# ================================
+#  Miscellaneous project files
+# ================================
+/.github/
+*.hintrc
 experimental/source.cu
+fancybox.umd.js
+GLYPHICON.css
+SECURITY_ASSESSMENT_REPORT.md
+SPEC.md
+tools/parse_thumbdb.py
+v6-fancybox.css
+*.lib
+*.o
+*.obj
