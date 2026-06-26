@@ -338,7 +338,12 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 					if (!tname) continue;
 					if (!strstr(tname, "-small.") && !strstr(tname, "-large.")) continue;
 					char media_val[PATH_MAX]; media_val[0] = '\0';
-					if (thumbdb_get(tname, media_val, sizeof(media_val)) != 0) continue;
+					{
+						char tdb_path[PATH_MAX]; snprintf(tdb_path, sizeof(tdb_path), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+						thumbdb_instance_t* tdb = thumbdb_find_instance(tdb_path);
+						if (!tdb) continue;
+						if (thumbdb_get(tdb, tname, media_val, sizeof(media_val)) != 0) continue;
+					}
 					if (thumb_map_count + 1 >= cap) {
 						size_t nc = cap * 2;
 						thumb_map = realloc(thumb_map, nc * sizeof(*thumb_map));
@@ -1730,7 +1735,19 @@ static void get_thumbdb_detail(const char* key, char* json_out, size_t outlen) {
 	if (!json_out || outlen == 0) return;
 	json_out[0] = '\0';
 	if (!key) return;
-	char* detail = thumbdb_get_record_detail(key);
+	char* detail = NULL;
+	{
+		thumbdb_instance_t* tdb = NULL;
+		registry_check:;
+		size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
+		for (size_t gi = 0; gi < gf_count && !tdb; ++gi) {
+			char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+			char safe_dir_name[PATH_MAX]; make_safe_dir_name_from(gfolders[gi], safe_dir_name, sizeof(safe_dir_name));
+			char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "%s" DIR_SEP_STR "thumbs.tdb", thumbs_root, safe_dir_name);
+			tdb = thumbdb_find_instance(per_db);
+		}
+		if (tdb) detail = thumbdb_get_record_detail(tdb, key);
+	}
 	if (detail) {
 		strncpy(json_out, detail, outlen - 1);
 		json_out[outlen - 1] = '\0';
@@ -1813,7 +1830,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 				strncpy(requested_dir_param, dir, sizeof(requested_dir_param) - 1);
 				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 				LOG_DEBUG("handle_api_thumbdb_list: requested dir param=%s per_db=%s", requested_dir_param, per_db);
-				thumbdb_open_for_dir(per_db);
+				thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dir);
 		}
@@ -1830,7 +1847,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 		mk_dir(per_thumbs_root);
 		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		LOG_DEBUG("handle_api_thumbdb_delete: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
-		thumbdb_open_for_dir(per_db);
+		thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 	}
 	if (requested_dir_param[0]) {
 		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
@@ -1840,7 +1857,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 		mk_dir(per_thumbs_root);
 		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		LOG_DEBUG("handle_api_thumbdb_set: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
-		thumbdb_open_for_dir(per_db);
+		thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 	}
 	if (requested_dir_param[0]) {
 		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
@@ -1850,7 +1867,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 		mk_dir(per_thumbs_root);
 		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		LOG_DEBUG("handle_api_thumbdb_get: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
-		thumbdb_open_for_dir(per_db);
+		thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 	}
 	ptr = json_objOpen(ptr, NULL, &rem);
 	ptr = json_str(ptr, "requested_dir", requested_dir_param, &rem);
@@ -1868,7 +1885,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 		char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0'; mk_dir(per_thumbs_root);
 		snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		LOG_DEBUG("handle_api_thumbdb_list: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
-		thumbdb_open_for_dir(per_db);
+		thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 	}
 	char* plain_flag = NULL;
 	if (qs) plain_flag = query_get(qs, "plain");
@@ -1876,7 +1893,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 		SAFE_FREE(plain_flag);
 		{
 			api_collect_ctx_t cctx = { NULL, 0, 0, 0 };
-			thumbdb_iterate(api_thumbdb_collect_cb, &cctx);
+			if (tdb) thumbdb_iterate(tdb, api_thumbdb_collect_cb, &cctx);
 			if (cctx.err) {
 				for (size_t i = 0; i < cctx.count; ++i) { free(cctx.arr[i].key); free(cctx.arr[i].val); }
 				free(cctx.arr);
@@ -1945,7 +1962,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 	}
 	{
 		api_collect_ctx_t cctx = { NULL, 0, 0, 0 };
-		thumbdb_iterate(api_thumbdb_collect_cb, &cctx);
+		if (tdb) thumbdb_iterate(tdb, api_thumbdb_collect_cb, &cctx);
 		if (cctx.err) {
 			for (size_t i = 0; i < cctx.count; ++i) { free(cctx.arr[i].key); free(cctx.arr[i].val); }
 			free(cctx.arr);
@@ -2075,7 +2092,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
 				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 				LOG_DEBUG("handle_api_thumbdb_get: opening db=%s for requested_dir=%s", per_db, requested_dir_param[0] ? requested_dir_param : BASE_DIR);
-				thumbdb_open_for_dir(per_db);
+				thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
 		}
@@ -2086,7 +2103,12 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 	}
 
 	char val[65536]; val[0] = '\0';
-	int r = thumbdb_get(k, val, sizeof(val));
+	int r = -1;
+	{
+		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+		if (tdb) r = thumbdb_get(tdb, k, val, sizeof(val));
+	}
 	if (r != 0) {
 		SAFE_FREE(k);
 		send_text(c, 404, "Not Found", "Key not found", keep_alive);
@@ -2149,7 +2171,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
 				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 				LOG_DEBUG("handle_api_thumbdb_set: opening db=%s for requested_dir=%s", per_db, requested_dir_param[0] ? requested_dir_param : BASE_DIR);
-				thumbdb_open_for_dir(per_db);
+				thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
 		}
@@ -2170,9 +2192,15 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 	memcpy(key, kstart, klen); key[klen] = '\0'; memcpy(val, vstart, vlen); val[vlen] = '\0';
 	url_decode(key); url_decode(val);
 	normalize_path(val);
-	int r = thumbdb_set(key, val);
-	if (r == 0)
-		thumbdb_request_compaction();
+	int r = -1;
+	{
+		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+		if (tdb) {
+			r = thumbdb_set(tdb, key, val);
+			if (r == 0) thumbdb_request_compaction(tdb);
+		}
+	}
 	free(key); free(val);
 	if (r == 0) send_text(c, 200, "OK", "{\"status\":\"ok\"}", keep_alive); else send_text(c, 500, "Internal Server Error", "set failed", keep_alive);
 }
@@ -2198,7 +2226,7 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
 				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 				LOG_DEBUG("handle_api_thumbdb_delete: opening db=%s for requested_dir=%s", per_db, requested_dir_param[0] ? requested_dir_param : BASE_DIR);
-				thumbdb_open_for_dir(per_db);
+				thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dirq);
 		}
@@ -2214,7 +2242,12 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 	size_t klen = (size_t)(kend - kstart);
 	char* key = malloc(klen + 1); if (!key) { send_text(c, 500, "Internal Server Error", "Out of memory", keep_alive); return; }
 	memcpy(key, kstart, klen); key[klen] = '\0'; url_decode(key);
-	int r = thumbdb_delete(key);
+	int r = -1;
+	{
+		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+		thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+		if (tdb) r = thumbdb_delete(tdb, key);
+	}
 	free(key);
 	if (r == 0) send_text(c, 200, "OK", "{\"status\":\"ok\"}", keep_alive); else send_text(c, 500, "Internal Server Error", "delete failed", keep_alive);
 }

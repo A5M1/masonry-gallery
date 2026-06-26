@@ -530,7 +530,11 @@ void websocket_broadcast_topic(const char* topic, const char* msg) {
     for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
         int sock = ws_clients[i].sock;
         if (sock == -1) continue;
-        if (topic && ws_clients[i].topic[0] && !strstr(ws_clients[i].topic, topic) && !strstr(topic, ws_clients[i].topic)) continue;
+        if (topic && topic[0] && ws_clients[i].topic[0]) {
+            size_t topic_len = strlen(topic);
+            size_t client_len = strlen(ws_clients[i].topic);
+            if (topic_len != client_len || strncmp(ws_clients[i].topic, topic, topic_len) != 0) continue;
+        }
 
 
         if (ws_clients[i].last_sent_id >= id) continue;

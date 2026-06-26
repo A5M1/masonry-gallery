@@ -103,7 +103,8 @@ static void process_wal_chunks(const char* per_thumbs_root) {
     if (!is_dir(wal_dir)) return;
     char per_db[PATH_MAX];
     snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
-    thumbdb_open_for_dir(per_db);
+    thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
+    if (!tdb) return;
     diriter it;
     if (!dir_open(&it, wal_dir)) return;
     const char* entry;
@@ -158,28 +159,28 @@ static void process_wal_chunks(const char* per_thumbs_root) {
         int committed = 0;
         int is_delete = (strcmp(value, "__DELETE__") == 0);
         for (int attempt = 0; attempt < 20; ++attempt) {
-            if (thumbdb_tx_begin() != 0) { sleep_ms(5); continue; }
+            if (thumbdb_tx_begin(tdb) != 0) { sleep_ms(5); continue; }
             if (is_delete) {
-                if (thumbdb_delete(key) == 0) {
-                    if (thumbdb_tx_commit() == 0) {
+                if (thumbdb_delete(tdb, key) == 0) {
+                    if (thumbdb_tx_commit(tdb) == 0) {
                         platform_file_delete(chosen_chunk);
                         LOG_INFO("process_wal_chunks: committed WAL delete chunk %s for key=%s", chosen_chunk, key);
                         committed = 1;
-                    } else { thumbdb_tx_abort(); }
+                    } else { thumbdb_tx_abort(tdb); }
                     break;
                 }
             } else {
-                if (thumbdb_set(key, value) == 0) {
-                    if (thumbdb_tx_commit() == 0) {
+                if (thumbdb_set(tdb, key, value) == 0) {
+                    if (thumbdb_tx_commit(tdb) == 0) {
                         platform_file_delete(chosen_chunk);
                         LOG_INFO("process_wal_chunks: committed WAL chunk %s for key=%s", chosen_chunk, key);
-                        thumbdb_request_compaction();
+                        thumbdb_request_compaction(tdb);
                         committed = 1;
-                    } else { thumbdb_tx_abort(); }
+                    } else { thumbdb_tx_abort(tdb); }
                     break;
                 }
             }
-            thumbdb_tx_abort();
+            thumbdb_tx_abort(tdb);
             sleep_ms(5);
         }
         if (!committed) LOG_WARN("process_wal_chunks: failed to commit WAL chunk %s", chosen_chunk);
@@ -439,8 +440,12 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     } else {
         LOG_WARN("record_thumb_job_completion: failed to write WAL entry for %s", job->input);
     }
-    if (wrote_wal)
-        thumbdb_request_compaction();
+    if (wrote_wal) {
+        char per_db[PATH_MAX];
+        snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+        thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+        if (tdb) thumbdb_request_compaction(tdb);
+    }
     char parent[PATH_MAX];
     parent[0] = '\0';
     get_parent_dir(job->input, parent, sizeof(parent));
@@ -472,6 +477,18 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
         media_url[sizeof(media_url) - 1] = '\0';
     }
 
+    char thumb_url[PATH_MAX];
+    thumb_url[0] = '\0';
+    {
+        char safe_dir_name[PATH_MAX];
+        make_safe_dir_name_from(parent[0] ? parent : ".", safe_dir_name, sizeof(safe_dir_name));
+        snprintf(thumb_url, sizeof(thumb_url), "/images/thumbs/%s/%s", safe_dir_name, bn);
+    }
+
+    char safe_topic[PATH_MAX];
+    safe_topic[0] = '\0';
+    make_safe_dir_name_from(parent[0] ? parent : ".", safe_topic, sizeof(safe_topic));
+
     uint8_t digest[MD5_DIGEST_LENGTH];
     char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
     md5hex[0] = '\0';
@@ -481,8 +498,8 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     }
 
     char msg[1024];
-    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\",\"hash\":\"%s\"}", media_url, bn, md5hex);
-    if (r > 0) websocket_broadcast_topic(parent[0] ? parent : NULL, msg);
+    int r = snprintf(msg, sizeof(msg), "{\"type\":\"thumb_ready\",\"media\":\"%s\",\"thumb\":\"%s\",\"thumbUrl\":\"%s\",\"gallery\":\"%s\",\"hash\":\"%s\"}", media_url, bn, thumb_url, safe_topic, md5hex);
+    if (r > 0) websocket_broadcast_topic(safe_topic[0] ? safe_topic : NULL, msg);
 }
 static void run_thumb_job(thumb_job_t* job) {
     if (!job) return;
@@ -1264,8 +1281,21 @@ static void* thumb_maintenance_thread(void* args) {
             dir_close(&it);
         }
 
-        if (!thumbdb_perform_requested_compaction())
-            thumbdb_compact();
+        {
+            size_t gf_count2 = 0;
+            char** gfolders2 = get_gallery_folders(&gf_count2);
+            for (size_t gi2 = 0; gi2 < gf_count2; ++gi2) {
+                char thumbs_root2[PATH_MAX]; get_thumbs_root(thumbs_root2, sizeof(thumbs_root2));
+                char safe_dir_name2[PATH_MAX]; make_safe_dir_name_from(gfolders2[gi2], safe_dir_name2, sizeof(safe_dir_name2));
+                char per_thumbs_root2[PATH_MAX]; snprintf(per_thumbs_root2, sizeof(per_thumbs_root2), "%s" DIR_SEP_STR "%s", thumbs_root2, safe_dir_name2);
+                char per_db2[PATH_MAX]; snprintf(per_db2, sizeof(per_db2), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root2);
+                thumbdb_instance_t* tdb2 = thumbdb_find_instance(per_db2);
+                if (tdb2) {
+                    if (!thumbdb_perform_requested_compaction(tdb2))
+                        thumbdb_compact(tdb2);
+                }
+            }
+        }
     }
     return NULL;
 }
@@ -1299,7 +1329,11 @@ static void* wal_processor_thread(void* args) {
             char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
             if (!is_dir(per_thumbs_root)) continue;
             process_wal_chunks(per_thumbs_root);
-            thumbdb_perform_requested_compaction();
+            {
+                char per_db2[PATH_MAX]; snprintf(per_db2, sizeof(per_db2), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+                thumbdb_instance_t* tdb2 = thumbdb_find_instance(per_db2);
+                if (tdb2) thumbdb_perform_requested_compaction(tdb2);
+            }
         }
     }
     return NULL;
@@ -1439,9 +1473,9 @@ void run_thumb_generation(const char* dir) {
 
     char per_db[PATH_MAX];
     snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
-    int tbr = thumbdb_open_for_dir(per_db);
-    if (tbr != 0) {
-        LOG_WARN("run_thumb_generation: thumbdb_open_for_dir failed for %s (rc=%d) for dir=%s", per_db, tbr, dir);
+    thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
+    if (!tdb) {
+        LOG_WARN("run_thumb_generation: thumbdb_open_for_dir failed for %s for dir=%s", per_db, dir);
     }
     else {
         LOG_DEBUG("run_thumb_generation: opened DB %s for dir=%s", per_db, dir);
@@ -1468,9 +1502,9 @@ void run_thumb_generation(const char* dir) {
     LOG_DEBUG("run_thumb_generation: print_skips completed");
 
     LOG_DEBUG("run_thumb_generation: starting final database processing");
-    thumbdb_sweep_orphans();
-    if (!thumbdb_perform_requested_compaction())
-        thumbdb_compact();
+    thumbdb_sweep_orphans(tdb);
+    if (!thumbdb_perform_requested_compaction(tdb))
+        thumbdb_compact(tdb);
     LOG_DEBUG("run_thumb_generation: final database processing completed");
 
     platform_file_delete(lock_path);
@@ -1509,12 +1543,6 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
     }
 
     char found_key[PATH_MAX]; found_key[0] = '\0';
-    if (thumbdb_find_for_media(media_path, found_key, sizeof(found_key)) == 0) {
-        if (thumb_path_len > 0) {
-            snprintf(thumb_path, thumb_path_len, "%s", found_key);
-        }
-        return true;
-    }
 
     get_thumb_rel_names(media_path, filename, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
 
@@ -1527,6 +1555,17 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
 
     char per_thumbs_root[PATH_MAX];
     snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
+
+    {
+        char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+        thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+        if (tdb && thumbdb_find_for_media(tdb, media_path, found_key, sizeof(found_key)) == 0) {
+            if (thumb_path_len > 0) {
+                snprintf(thumb_path, thumb_path_len, "%s", found_key);
+            }
+            return true;
+        }
+    }
 
     char small_fs[PATH_MAX];
     char large_fs[PATH_MAX];
@@ -2025,7 +2064,13 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
     char per_db[PATH_MAX];
     snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", thumbs_path);
     LOG_DEBUG("clean_orphan_thumbs: opening DB %s for dir=%s", per_db, dir);
-    thumbdb_open_for_dir(per_db);
+    thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
+    if (!tdb) {
+        dir_close(&tit);
+        for (size_t i = 0; i < expect_count; ++i) free(expects[i]);
+        free(expects);
+        return;
+    }
     const char* tname;
     char tname_copy[PATH_MAX];
     while ((tname = dir_next(&tit))) {
@@ -2053,7 +2098,7 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
             path_join(thumb_full, thumbs_path, tname_copy);
             char* bn_del = tname_copy;
             char mapped_media[PATH_MAX];
-            int r = thumbdb_get(bn_del, mapped_media, sizeof(mapped_media));
+            int r = thumbdb_get(tdb, bn_del, mapped_media, sizeof(mapped_media));
             if (r != 0) {
                 if (platform_file_delete(thumb_full) != 0) LOG_WARN("Failed to delete orphan thumb: %s", thumb_full);
                 else LOG_INFO("Removed orphan thumb (no DB entry): %s", thumb_full);
@@ -2064,7 +2109,7 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
                 if (strncmp(mapped_media, dir, dlen) == 0 &&
                     (mapped_media[dlen] == '\0' || mapped_media[dlen] == '/' || mapped_media[dlen] == '\\')) {
                     if (!is_file(mapped_media)) {
-                        thumbdb_delete(bn_del);
+                        thumbdb_delete(tdb, bn_del);
                         if (platform_file_delete(thumb_full) != 0) LOG_WARN("Failed to delete orphan thumb: %s", thumb_full);
                         else LOG_INFO("Removed orphan thumb (media missing): %s", thumb_full);
                         add_skip(prog, "ORPHAN_REMOVED", thumb_full);
