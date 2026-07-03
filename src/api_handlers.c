@@ -267,13 +267,6 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		if (out_len) *out_len = 0;
 			return NULL; 
 	}
-	{
-		if (page <= 1) {
-			char* trg = strdup(target_real);
-			if (trg) thread_create_detached(start_background_wrapper, trg);
-		}
-	}
-
 	char** files = NULL; size_t n = 0, alloc = 0;
 	diriter it; if (dir_open(&it, target_real)) {
 		const char* name; while ((name = dir_next(&it))) {
@@ -306,6 +299,23 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	if (page > totalPages) page = totalPages;
 	int start = (page - 1) * ITEMS_PER_PAGE; int end = start + ITEMS_PER_PAGE; if (end > total) end = total;
 
+	if (start < end) {
+		page_thumb_gen_args_t* pta = malloc(sizeof(page_thumb_gen_args_t));
+		if (pta) {
+			strncpy(pta->dir, target_real, sizeof(pta->dir) - 1);
+			pta->dir[sizeof(pta->dir) - 1] = '\0';
+			pta->count = end - start;
+			pta->filenames = malloc(pta->count * sizeof(char*));
+			if (pta->filenames) {
+				for (int fi = 0; fi < pta->count; fi++)
+					pta->filenames[fi] = strdup(files[start + fi]);
+				thread_create_detached(generate_page_thumbs_thread, pta);
+			} else {
+				free(pta);
+			}
+		}
+	}
+
 	size_t hcap = 8192;
 	char* hbuf = malloc(hcap);
 	if (!hbuf) {
@@ -319,10 +329,8 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 
 	thumb_map_t* thumb_map = NULL; size_t thumb_map_count = 0;
 	{
-		char parent[PATH_MAX]; parent[0] = '\0';
-		get_parent_dir_local(target_real, parent, sizeof(parent));
 		char safe_dir[PATH_MAX]; safe_dir[0] = '\0';
-		make_safe_dir_name_from(parent, safe_dir, sizeof(safe_dir));
+		make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
 		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
 		char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
 		if (is_dir(per_thumbs_root)) {
@@ -339,10 +347,13 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 					if (!strstr(tname, "-small.") && !strstr(tname, "-large.")) continue;
 					char media_val[PATH_MAX]; media_val[0] = '\0';
 					{
+						char base_key[PATH_MAX];
+						thumbname_to_base_local(tname, base_key, sizeof(base_key));
+						if (!base_key[0]) continue;
 						char tdb_path[PATH_MAX]; snprintf(tdb_path, sizeof(tdb_path), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 						thumbdb_instance_t* tdb = thumbdb_find_instance(tdb_path);
 						if (!tdb) continue;
-						if (thumbdb_get(tdb, tname, media_val, sizeof(media_val)) != 0) continue;
+						if (thumbdb_get(tdb, base_key, media_val, sizeof(media_val)) != 0) continue;
 					}
 					if (thumb_map_count + 1 >= cap) {
 						size_t nc = cap * 2;
@@ -392,7 +403,7 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 			}
 		}
 		for (size_t k = 0; r[k] && j < PATH_MAX - 1; k++) relurl[j++] = (r[k] == '\\') ? '/' : r[k]; relurl[j] = '\0';
-		char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
+		char small_rel[PATH_MAX] = {0}; char large_rel[PATH_MAX] = {0};
 		char found_thumb[PATH_MAX]; found_thumb[0] = '\0';
 		int small_exists = 0; int large_exists = 0;
 		if (check_thumb_exists(full_path, found_thumb, sizeof(found_thumb))) {
@@ -414,57 +425,11 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		}
 		char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-		if (dirparam[0]) {
+		{
 			char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
 			char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
 			snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
 			snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-		}
-		else {
-			char dirpart[PATH_MAX] = "";
-			const char* first_slash = strchr(relurl, '/');
-			if (first_slash && first_slash != relurl) {
-				size_t dlen = (size_t)(first_slash - relurl);
-				if (dlen >= sizeof(dirpart)) dlen = sizeof(dirpart) - 1;
-				memcpy(dirpart, relurl, dlen);
-				dirpart[dlen] = '\0';
-			}
-			if (!dirpart[0]) {
-				size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-				char folder_real[PATH_MAX]; char base_real_local[PATH_MAX];
-				if (real_path(BASE_DIR, base_real_local)) {
-					size_t base_len = strlen(base_real_local);
-					for (size_t gi = 0; gi < gf_count; ++gi) {
-						if (!real_path(gfolders[gi], folder_real)) continue;
-						if (!safe_under(folder_real, full_path)) continue;
-						const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
-						make_safe_dir_name_from(r, dirpart, sizeof(dirpart));
-						break;
-					}
-				}
-				if (!dirpart[0]) {
-					char parent[PATH_MAX];
-					strncpy(parent, full_path, sizeof(parent) - 1);
-					parent[sizeof(parent) - 1] = '\0';
-					char* s1 = strrchr(parent, '/');
-					char* s2 = strrchr(parent, '\\');
-					char* last = NULL;
-					if (s1 && s2) last = (s1 > s2) ? s1 : s2;
-					else if (s1) last = s1;
-					else if (s2) last = s2;
-					if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
-					make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
-				}
-			}
-			char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, dirpart[0] ? dirpart : "");
-			if (dirpart[0]) {
-				snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
-				snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-			}
-			else {
-				snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", thumbs_root, small_rel);
-				snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", thumbs_root, large_rel);
-			}
 		}
 		if (!small_exists) small_exists = is_file(small_fs);
 		if (!large_exists) large_exists = is_file(large_fs);
@@ -472,62 +437,9 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		char href_esc[PATH_MAX]; html_escape(href, href_esc, sizeof(href_esc));
 		char small_url[PATH_MAX] = ""; char large_url[PATH_MAX] = "";
 		if (small_exists || large_exists) {
-			if (dirparam && dirparam[0]) {
-				char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
-				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-			}
-			else {
-				char dirpart[PATH_MAX] = "";
-				const char* first_slash = strchr(relurl, '/');
-				if (first_slash && first_slash != relurl) {
-					size_t dlen = (size_t)(first_slash - relurl);
-					if (dlen >= sizeof(dirpart)) dlen = sizeof(dirpart) - 1;
-					memcpy(dirpart, relurl, dlen);
-					dirpart[dlen] = '\0';
-				}
-				if (!dirpart[0]) {
-					size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-					char folder_real[PATH_MAX];
-					for (size_t gi = 0; gi < gf_count; ++gi) {
-						if (!real_path(gfolders[gi], folder_real)) continue;
-						if (!safe_under(folder_real, full_path)) continue;
-						size_t si = 0;
-						for (size_t ii = 0; folder_real[ii] && si < sizeof(dirpart) - 1; ++ii) {
-							char tmp_safe[PATH_MAX]; make_safe_dir_name_from(folder_real, tmp_safe, sizeof(tmp_safe));
-							size_t tlen = strlen(tmp_safe);
-							if (tlen >= sizeof(dirpart)) tlen = sizeof(dirpart) - 1;
-							memcpy(dirpart, tmp_safe, tlen);
-							dirpart[tlen] = '\0';
-							si = tlen;
-							break;
-						}
-						dirpart[si] = '\0';
-						break;
-					}
-					if (!dirpart[0]) {
-						char parent[PATH_MAX];
-						strncpy(parent, full_path, sizeof(parent) - 1);
-						parent[sizeof(parent) - 1] = '\0';
-						char* s1 = strrchr(parent, '/');
-						char* s2 = strrchr(parent, '\\');
-						char* last = NULL;
-						if (s1 && s2) last = (s1 > s2) ? s1 : s2;
-						else if (s1) last = s1;
-						else if (s2) last = s2;
-						if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
-						make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
-					}
-				}
-				if (dirpart[0]) {
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", dirpart, small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", dirpart, large_rel);
-				}
-				else {
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s", small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s", large_rel);
-				}
-			}
+			char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+			snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+			snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
 		}
 		char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 
@@ -549,9 +461,9 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 			appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"image\" data-hash=\"%s\"><a data-fancybox=\"gallery\" href=\"%s\" data-thumb-status=\"%d\">", md5hex, href_esc, thumb_status);
 		}
 		if (small_exists)
-			appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\"%s class=\"thumb-img\">", small_esc, small_esc, large_esc, dim_attr);
+			appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-media=\"%s\" data-thumb-small=\"%s\" data-thumb-large=\"%s\"%s class=\"thumb-img\">", small_esc, href_esc, small_esc, large_esc, dim_attr);
 		else
-			appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" class=\"thumb-img\"%s>", dim_attr);
+			appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" data-media=\"%s\" class=\"thumb-img\"%s>", href_esc, dim_attr);
 		appendf(&hbuf, &hcap, &hused, "</a></div>");
 	}
 	appendf(&hbuf, &hcap, &hused, "</div>");
@@ -985,7 +897,7 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			}
 			for (size_t k = 0; r[k] && j < PATH_MAX - 1; k++) relurl[j++] = (r[k] == '\\') ? '/' : r[k];
 			relurl[j] = '\0';
-			char small_rel[PATH_MAX]; char large_rel[PATH_MAX];
+			char small_rel[PATH_MAX] = {0}; char large_rel[PATH_MAX] = {0};
 			char found_thumb[PATH_MAX]; found_thumb[0] = '\0';
 			int small_exists = 0; int large_exists = 0;
 			if (check_thumb_exists(full_path, found_thumb, sizeof(found_thumb))) {
@@ -1007,57 +919,11 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			}
 			char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 			char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-			if (dirparam[0]) {
+			{
 				char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
 				char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
 				snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
 				snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-			}
-			else {
-				char dirpart[PATH_MAX] = "";
-				const char* first_slash = strchr(relurl, '/');
-				if (first_slash && first_slash != relurl) {
-					size_t dlen = (size_t)(first_slash - relurl);
-					if (dlen >= sizeof(dirpart)) dlen = sizeof(dirpart) - 1;
-					memcpy(dirpart, relurl, dlen);
-					dirpart[dlen] = '\0';
-				}
-				if (!dirpart[0]) {
-					size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-					char folder_real[PATH_MAX]; char base_real_local[PATH_MAX];
-					if (real_path(BASE_DIR, base_real_local)) {
-						size_t base_len = strlen(base_real_local);
-						for (size_t gi = 0; gi < gf_count; ++gi) {
-							if (!real_path(gfolders[gi], folder_real)) continue;
-							if (!safe_under(folder_real, full_path)) continue;
-							const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
-							make_safe_dir_name_from(r, dirpart, sizeof(dirpart));
-							break;
-						}
-					}
-					if (!dirpart[0]) {
-						char parent[PATH_MAX];
-						strncpy(parent, full_path, sizeof(parent) - 1);
-						parent[sizeof(parent) - 1] = '\0';
-						char* s1 = strrchr(parent, '/');
-						char* s2 = strrchr(parent, '\\');
-						char* last = NULL;
-						if (s1 && s2) last = (s1 > s2) ? s1 : s2;
-						else if (s1) last = s1;
-						else if (s2) last = s2;
-						if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
-						make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
-					}
-				}
-				char per_thumbs_root[PATH_MAX]; snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, dirpart[0] ? dirpart : "");
-				if (dirpart[0]) {
-					snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
-					snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-				}
-				else {
-					snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", thumbs_root, small_rel);
-					snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", thumbs_root, large_rel);
-				}
 			}
 			if (!small_exists) small_exists = is_file(small_fs);
 			if (!large_exists) large_exists = is_file(large_fs);
@@ -1067,39 +933,9 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			char href_esc[PATH_MAX]; html_escape(href, href_esc, sizeof(href_esc));
 			char small_url[PATH_MAX] = ""; char large_url[PATH_MAX] = "";
 			if (small_exists || large_exists) {
-				if (dirparam[0]) {
-					char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-				}
-				else {
-					char dirpart[PATH_MAX] = "";
-					const char* first_slash = strchr(relurl, '/');
-					if (first_slash && first_slash != relurl) {
-						size_t dlen = (size_t)(first_slash - relurl);
-						if (dlen >= sizeof(dirpart)) dlen = sizeof(dirpart) - 1;
-						memcpy(dirpart, relurl, dlen);
-						dirpart[dlen] = '\0';
-					}
-					if (!dirpart[0]) {
-						size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-						char folder_real[PATH_MAX];
-						for (size_t gi = 0; gi < gf_count; ++gi) {
-							if (!real_path(gfolders[gi], folder_real)) continue;
-							if (!safe_under(folder_real, full_path)) continue;
-							make_safe_dir_name_from(folder_real, dirpart, sizeof(dirpart));
-							break;
-						}
-					}
-					if (dirpart[0]) {
-						snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", dirpart, small_rel);
-						snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", dirpart, large_rel);
-					}
-					else {
-						snprintf(small_url, sizeof(small_url), "/images/thumbs/%s", small_rel);
-						snprintf(large_url, sizeof(large_url), "/images/thumbs/%s", large_rel);
-					}
-				}
+				char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
 			}
 			char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 
@@ -1119,11 +955,11 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 				appendf(&hbuf, &hcap, &hused, "<div class=\"masonry-item\" data-type=\"image\" data-hash=\"%s\"><a data-fancybox=\"gallery\" href=\"%s\">", md5hex, href_esc);
 			}
 			if (small_exists)
-				appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-thumb-small=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", small_esc, small_esc, large_esc);
+				appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-media=\"%s\" data-thumb-small=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", small_esc, href_esc, small_esc, large_esc);
 			else if (large_exists)
-				appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-thumb-large=\"%s\" class=\"thumb-img\">", large_esc, large_esc);
+				appendf(&hbuf, &hcap, &hused, "<img src=\"%s\" loading=\"lazy\" data-media=\"%s\" data-thumb-large=\"%s\" class=\"thumb-img\">", large_esc, href_esc, large_esc);
 			else
-				appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" class=\"thumb-img\">");
+				appendf(&hbuf, &hcap, &hused, "<img src=\"/images/placeholder.jpg\" data-media=\"%s\" class=\"thumb-img\">", href_esc);
 			appendf(&hbuf, &hcap, &hused, "</a></div>");
 		}
 		appendf(&hbuf, &hcap, &hused, "</div>");
@@ -1212,56 +1048,9 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 
 		if (small_exists || large_exists) {
 			char small_url[PATH_MAX]; char large_url[PATH_MAX];
-			if (dirparam[0]) {
-				char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
-				snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
-				snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
-			}
-			else {
-				char dirpart[PATH_MAX] = "";
-				const char* first_slash = strchr(relurl, '/');
-				if (first_slash && first_slash != relurl) {
-					size_t dlen = (size_t)(first_slash - relurl);
-					if (dlen >= sizeof(dirpart)) dlen = sizeof(dirpart) - 1;
-					memcpy(dirpart, relurl, dlen);
-					dirpart[dlen] = '\0';
-				}
-				if (!dirpart[0]) {
-					size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
-					char folder_real[PATH_MAX]; char base_real_local[PATH_MAX];
-					if (real_path(BASE_DIR, base_real_local)) {
-						size_t base_len = strlen(base_real_local);
-						for (size_t gi = 0; gi < gf_count; ++gi) {
-							if (!real_path(gfolders[gi], folder_real)) continue;
-							if (!safe_under(folder_real, full_path)) continue;
-							const char* r = folder_real + base_len + ((folder_real[base_len] == DIR_SEP) ? 1 : 0);
-							make_safe_dir_name_from(r, dirpart, sizeof(dirpart));
-							break;
-						}
-					}
-					if (!dirpart[0]) {
-						char parent[PATH_MAX];
-						strncpy(parent, full_path, sizeof(parent) - 1);
-						parent[sizeof(parent) - 1] = '\0';
-						char* s1 = strrchr(parent, '/');
-						char* s2 = strrchr(parent, '\\');
-						char* last = NULL;
-						if (s1 && s2) last = (s1 > s2) ? s1 : s2;
-						else if (s1) last = s1;
-						else if (s2) last = s2;
-						if (last) *last = '\0'; else { parent[0] = '.'; parent[1] = '\0'; }
-						make_safe_dir_name_from(parent, dirpart, sizeof(dirpart));
-					}
-				}
-				if (dirpart[0]) {
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", dirpart, small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", dirpart, large_rel);
-				}
-				else {
-					snprintf(small_url, sizeof(small_url), "/images/thumbs/%s", small_rel);
-					snprintf(large_url, sizeof(large_url), "/images/thumbs/%s", large_rel);
-				}
-			}
+			char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+			snprintf(small_url, sizeof(small_url), "/images/thumbs/%s/%s", safe_dir, small_rel);
+			snprintf(large_url, sizeof(large_url), "/images/thumbs/%s/%s", safe_dir, large_rel);
 			ptr = json_str(ptr, "thumb", small_url, &len);
 			ptr = json_str(ptr, "thumb_small", small_url, &len);
 			ptr = json_str(ptr, "thumb_large", large_url, &len);
@@ -1797,6 +1586,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
 	tdb_list_ctx_t ctx;
 	ctx.buf = buf; ctx.cap = cap; ctx.used = used; ctx.first = 1; ctx.filter_enabled = 0; ctx.per_thumbs_root[0] = '\0'; ctx.base_real[0] = '\0';
+	thumbdb_instance_t* tdb = NULL;
 	if (qs) {
 		char* dir = query_get(qs, "dir");
 		if (dir) {
@@ -1830,7 +1620,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 				strncpy(requested_dir_param, dir, sizeof(requested_dir_param) - 1);
 				requested_dir_param[sizeof(requested_dir_param) - 1] = '\0';
 				LOG_DEBUG("handle_api_thumbdb_list: requested dir param=%s per_db=%s", requested_dir_param, per_db);
-				thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
+				tdb = thumbdb_open_for_dir(per_db);
 			}
 			SAFE_FREE(dir);
 		}
@@ -1885,7 +1675,7 @@ void handle_api_thumbdb_list(int c, char* qs, bool keep_alive) {
 		char per_db[PATH_MAX]; char per_thumbs_root[PATH_MAX]; strncpy(per_thumbs_root, ctx.per_thumbs_root, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0'; mk_dir(per_thumbs_root);
 		snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		LOG_DEBUG("handle_api_thumbdb_list: opening default DB %s for requested_dir=%s", per_db, requested_dir_param);
-		thumbdb_instance_t* tdb = thumbdb_open_for_dir(per_db);
+		tdb = thumbdb_open_for_dir(per_db);
 	}
 	char* plain_flag = NULL;
 	if (qs) plain_flag = query_get(qs, "plain");
@@ -2074,6 +1864,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 	char* k = query_get(qs, "key");
 	if (!k) { send_text(c, 400, "Bad Request", "Missing key", keep_alive); return; }
 	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
+	char per_thumbs_root[PATH_MAX]; per_thumbs_root[0] = '\0';
 	if (qs) {
 		char* dirq = query_get(qs, "dir");
 		if (dirq) {
@@ -2086,7 +1877,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 					if (gf_count > 0 && gfolders[0]) { char first_real[PATH_MAX]; if (real_path(gfolders[0], first_real)) make_safe_dir_name_from(first_real, safe_dir, sizeof(safe_dir)); }
 				}
 				char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
+				if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
 				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
@@ -2104,7 +1895,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 
 	char val[65536]; val[0] = '\0';
 	int r = -1;
-	{
+	if (per_thumbs_root[0]) {
 		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
 		if (tdb) r = thumbdb_get(tdb, k, val, sizeof(val));
@@ -2153,6 +1944,7 @@ void handle_api_thumbdb_get(int c, char* qs, bool keep_alive) {
 void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
 	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
+	char per_thumbs_root[PATH_MAX]; per_thumbs_root[0] = '\0';
 	if (g_request_qs) {
 		char* dirq = query_get(g_request_qs, "dir");
 		if (dirq) {
@@ -2165,7 +1957,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 					if (gf_count > 0 && gfolders[0]) { char first_real[PATH_MAX]; if (real_path(gfolders[0], first_real)) make_safe_dir_name_from(first_real, safe_dir, sizeof(safe_dir)); }
 				}
 				char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
+				if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
 				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
@@ -2193,7 +1985,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 	url_decode(key); url_decode(val);
 	normalize_path(val);
 	int r = -1;
-	{
+	if (per_thumbs_root[0]) {
 		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
 		if (tdb) {
@@ -2208,6 +2000,7 @@ void handle_api_thumbdb_set(int c, const char* body, bool keep_alive) {
 void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 	if (!body) { send_text(c, 400, "Bad Request", "Missing body", keep_alive); return; }
 	char requested_dir_param[PATH_MAX]; requested_dir_param[0] = '\0';
+	char per_thumbs_root[PATH_MAX]; per_thumbs_root[0] = '\0';
 	if (g_request_qs) {
 		char* dirq = query_get(g_request_qs, "dir");
 		if (dirq) {
@@ -2220,7 +2013,7 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 					if (gf_count > 0 && gfolders[0]) { char first_real[PATH_MAX]; if (real_path(gfolders[0], first_real)) make_safe_dir_name_from(first_real, safe_dir, sizeof(safe_dir)); }
 				}
 				char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-				char per_thumbs_root[PATH_MAX]; if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
+				if (safe_dir[0]) snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir); else snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s", thumbs_root);
 				mk_dir(per_thumbs_root);
 				char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 				strncpy(requested_dir_param, dirq, sizeof(requested_dir_param) - 1);
@@ -2243,7 +2036,7 @@ void handle_api_thumbdb_delete(int c, const char* body, bool keep_alive) {
 	char* key = malloc(klen + 1); if (!key) { send_text(c, 500, "Internal Server Error", "Out of memory", keep_alive); return; }
 	memcpy(key, kstart, klen); key[klen] = '\0'; url_decode(key);
 	int r = -1;
-	{
+	if (per_thumbs_root[0]) {
 		char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
 		thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
 		if (tdb) r = thumbdb_delete(tdb, key);

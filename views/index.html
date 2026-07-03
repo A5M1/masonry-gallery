@@ -32,13 +32,14 @@
     <div class="gallery-container">
         <div id="gallery" class="masonry" style="overflow: hidden">
             <div class="grid-sizer"></div>
+
         </div>
         <div id="loading" class="loading">Loading...</div>
     </div>
         <script src="/js/gallery.js"></script>
         <script>$(document).ready(function () { w(); m(); f(); v(); });</script>
 
-        <script>(function () { const debug = !1; try { var proto = (location.protocol === 'https:') ? 'wss://' : 'ws://'; var wsUrl = proto + location.host + '/ws'; var ws = new WebSocket(wsUrl); ws.addEventListener('open', function () { if (debug) { console.log('WebSocket connected to', wsUrl) } }); ws.addEventListener('message', function (evt) { try { var data = evt.data; if (debug) { console.log('WS message', data) } } catch (e) { console.error(e) } }); ws.addEventListener('close', function () { if (debug) { console.log('WebSocket disconnected') } }) } catch (e) { console.error('WebSocket init failed', e) } })()</script>
+        <script>(function () { var d=!1; try { var p=(location.protocol==='https:')?'wss://':'ws://'; var u=p+location.host+'/ws'; var s=new WebSocket(u); s.addEventListener('open',function(){ if(d)console.log('WS open',u) }); s.addEventListener('message',function(e){ try { var o=JSON.parse(e.data); if(o.type==='thumb_ready'&&o.media&&o.thumbUrl){ var i=document.querySelector('img[data-media="'+o.media+'"]'); if(i){ var c=i.getAttribute('src')||''; if(!c||c.indexOf('placeholder')!==-1||c.indexOf('base64')!==-1){ i.src=o.thumbUrl; if(o.thumbUrl.indexOf('-small.')!==-1)i.setAttribute('data-thumb-small',o.thumbUrl); if(o.thumbUrl.indexOf('-large.')!==-1)i.setAttribute('data-thumb-large',o.thumbUrl); var a=i.closest('a'); if(a)a.setAttribute('data-thumb-status','1') } } } if(d)console.log('WS',o) }catch(x){ console.error(x) } }); s.addEventListener('close',function(){ if(d)console.log('WS closed') }) }catch(x){ console.error('WS fail',x) } })()</script>
 </body>
 
 </html>

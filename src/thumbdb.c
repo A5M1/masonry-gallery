@@ -1403,12 +1403,42 @@ char* thumbdb_get_record_detail(thumbdb_instance_t* inst, const char* key) {
     return NULL;
 }
 
+typedef struct {
+    const char* media_path;
+    char* out_key;
+    size_t out_key_len;
+    int found;
+} find_media_ctx_t;
+
+static int find_media_cb(const char* key, const unsigned char* value, size_t value_len, void* user_data) {
+    find_media_ctx_t* ctx = (find_media_ctx_t*)user_data;
+    if (!ctx || ctx->found) return 0;
+    if (!value || value_len == 0) return 0;
+    char norm_val[PATH_MAX];
+    size_t copy_len = value_len < sizeof(norm_val) - 1 ? value_len : sizeof(norm_val) - 1;
+    memcpy(norm_val, value, copy_len);
+    norm_val[copy_len] = '\0';
+    normalize_path(norm_val);
+    char norm_media[PATH_MAX];
+    strncpy(norm_media, ctx->media_path, sizeof(norm_media) - 1);
+    norm_media[sizeof(norm_media) - 1] = '\0';
+    normalize_path(norm_media);
+    if (strcmp(norm_val, norm_media) == 0) {
+        strncpy(ctx->out_key, key, ctx->out_key_len - 1);
+        ctx->out_key[ctx->out_key_len - 1] = '\0';
+        ctx->found = 1;
+    }
+    return 0;
+}
+
 int thumbdb_find_for_media(thumbdb_instance_t* inst, const char* media_path, char* out_key, size_t out_key_len) {
     if (!inst || !inst->rh_tbl || !media_path || !out_key || out_key_len == 0) return -1;
     thread_mutex_lock(&inst->mutex);
     out_key[0] = '\0';
+    find_media_ctx_t ctx = { media_path, out_key, out_key_len, 0 };
+    rh_iterate(inst->rh_tbl, find_media_cb, &ctx);
     thread_mutex_unlock(&inst->mutex);
-    return -1;
+    return ctx.found ? 0 : -1;
 }
 
 typedef struct { char* key; char* value; } compact_entry_t;

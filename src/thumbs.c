@@ -155,6 +155,7 @@ static void process_wal_chunks(const char* per_thumbs_root) {
     for (size_t ik = 0; ik < map_count; ++ik) {
         if (!map_paths[ik]) continue;
         const char* chosen_chunk = map_paths[ik];
+        if (!is_file(chosen_chunk)) continue;
         if (wal_read_entry(chosen_chunk, key, sizeof(key), value, sizeof(value)) != 0) continue;
         int committed = 0;
         int is_delete = (strcmp(value, "__DELETE__") == 0);
@@ -163,7 +164,7 @@ static void process_wal_chunks(const char* per_thumbs_root) {
             if (is_delete) {
                 if (thumbdb_delete(tdb, key) == 0) {
                     if (thumbdb_tx_commit(tdb) == 0) {
-                        platform_file_delete(chosen_chunk);
+                        if (is_file(chosen_chunk)) platform_file_delete(chosen_chunk);
                         LOG_INFO("process_wal_chunks: committed WAL delete chunk %s for key=%s", chosen_chunk, key);
                         committed = 1;
                     } else { thumbdb_tx_abort(tdb); }
@@ -172,7 +173,7 @@ static void process_wal_chunks(const char* per_thumbs_root) {
             } else {
                 if (thumbdb_set(tdb, key, value) == 0) {
                     if (thumbdb_tx_commit(tdb) == 0) {
-                        platform_file_delete(chosen_chunk);
+                        if (is_file(chosen_chunk)) platform_file_delete(chosen_chunk);
                         LOG_INFO("process_wal_chunks: committed WAL chunk %s for key=%s", chosen_chunk, key);
                         thumbdb_request_compaction(tdb);
                         committed = 1;
@@ -306,7 +307,7 @@ static void strip_trailing_sep(char* p) {
         p[--len] = '\0';
     }
 }
-static void thumbname_to_base_local(const char* name, char* base, size_t base_len) {
+void thumbname_to_base_local(const char* name, char* base, size_t base_len) {
     base[0] = '\0';
     if (!name || !base || base_len == 0) return;
     const char* p = strstr(name, "-small.");
@@ -1947,9 +1948,21 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
     char thumbs_root[PATH_MAX];
     get_thumbs_root(thumbs_root, sizeof(thumbs_root));
     
+    char parent_dir[PATH_MAX];
+    strncpy(parent_dir, input, sizeof(parent_dir) - 1);
+    parent_dir[sizeof(parent_dir) - 1] = '\0';
+    {
+        char* s1 = strrchr(parent_dir, '/');
+        char* s2 = strrchr(parent_dir, '\\');
+        char* last = NULL;
+        if (s1 && s2) last = (s1 > s2) ? s1 : s2;
+        else if (s1) last = s1;
+        else if (s2) last = s2;
+        if (last) *last = '\0';
+        else { parent_dir[0] = '.'; parent_dir[1] = '\0'; }
+    }
     char safe_dir_name[PATH_MAX];
-    make_safe_dir_name_from(strrchr(input, '/') ? strrchr(input, '/') : input,
-                           safe_dir_name, sizeof(safe_dir_name));
+    make_safe_dir_name_from(parent_dir, safe_dir_name, sizeof(safe_dir_name));
     
     char per_thumbs_root[PATH_MAX];
     snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
@@ -2096,7 +2109,8 @@ void clean_orphan_thumbs(const char* dir, progress_t * prog) {
         if (!found) {
             char thumb_full[PATH_MAX];
             path_join(thumb_full, thumbs_path, tname_copy);
-            char* bn_del = tname_copy;
+            char bn_del[PATH_MAX];
+            thumbname_to_base_local(tname_copy, bn_del, sizeof(bn_del));
             char mapped_media[PATH_MAX];
             int r = thumbdb_get(tdb, bn_del, mapped_media, sizeof(mapped_media));
             if (r != 0) {
