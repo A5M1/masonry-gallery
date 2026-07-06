@@ -182,21 +182,20 @@ struct thumbdb_instance {
 
 static thumbdb_instance_t* g_instances = NULL;
 static thread_mutex_t g_registry_mutex;
-static int g_registry_mutex_inited = 0;
+static atomic_flag g_registry_mutex_once = ATOMIC_FLAG_INIT;
 
 static atomic_uint wal_chunk_seq = ATOMIC_VAR_INIT(0);
 static thread_mutex_t wal_seq_mutex;
-static int wal_seq_mutex_inited = 0;
+static atomic_flag wal_seq_mutex_once = ATOMIC_FLAG_INIT;
 
 static void registry_lock(void) {
-    if (!g_registry_mutex_inited) {
-        if (thread_mutex_init(&g_registry_mutex) == 0) g_registry_mutex_inited = 1;
-    }
-    if (g_registry_mutex_inited) thread_mutex_lock(&g_registry_mutex);
+    if (!atomic_flag_test_and_set(&g_registry_mutex_once))
+        thread_mutex_init(&g_registry_mutex);
+    thread_mutex_lock(&g_registry_mutex);
 }
 
 static void registry_unlock(void) {
-    if (g_registry_mutex_inited) thread_mutex_unlock(&g_registry_mutex);
+    thread_mutex_unlock(&g_registry_mutex);
 }
 
 thumbdb_instance_t* thumbdb_find_instance(const char* db_path) {
@@ -657,17 +656,15 @@ static int write_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is
     if (endptr == rec->filename || *endptr != '\0') is_numeric_key = 0;
 
     if (is_numeric_key) {
-        uint64_t filename_delta = is_first ? filename_val : (filename_val - inst->last_filename_delta);
+        uint64_t fv = filename_val;
         uint8_t fname_buf[10];
         size_t fname_len = 0;
-        uint64_t fd = filename_delta;
-        while (fd >= MV_BITMASKS.varint_continue_bit) {
-            fname_buf[fname_len++] = (uint8_t)((fd & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
-            fd >>= 7;
+        while (fv >= MV_BITMASKS.varint_continue_bit) {
+            fname_buf[fname_len++] = (uint8_t)((fv & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
+            fv >>= 7;
         }
-        fname_buf[fname_len++] = (uint8_t)(fd & MV_BITMASKS.varint_data_mask);
+        fname_buf[fname_len++] = (uint8_t)(fv & MV_BITMASKS.varint_data_mask);
         for (size_t i = 0; i < fname_len; i++) record_buf[buf_pos++] = fname_buf[i];
-        inst->last_filename_delta = filename_val;
     } else {
         record_buf[buf_pos++] = 0x00;
         size_t key_len = strlen(rec->filename);
@@ -683,7 +680,6 @@ static int write_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is
         for (size_t i = 0; i < len_pos; i++) record_buf[buf_pos++] = len_buf[i];
         memcpy(record_buf + buf_pos, rec->filename, key_len);
         buf_pos += key_len;
-        inst->last_filename_delta = 0;
     }
 
     uint8_t meta = encode_meta_byte(rec->meta);
@@ -739,15 +735,14 @@ static int write_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is
         record_buf[ext_start] = ext_len;
     }
 
-    uint64_t timestamp_delta = is_first ? rec->timestamp : (rec->timestamp - inst->last_timestamp_delta);
+    uint64_t ts_val = rec->timestamp;
     uint8_t ts_buf[10];
     size_t ts_len = 0;
-    uint64_t td = timestamp_delta;
-    while (td >= MV_BITMASKS.varint_continue_bit) { ts_buf[ts_len++] = (uint8_t)((td & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit); td >>= 7; }
-    ts_buf[ts_len++] = (uint8_t)(td & MV_BITMASKS.varint_data_mask);
+    while (ts_val >= MV_BITMASKS.varint_continue_bit) { ts_buf[ts_len++] = (uint8_t)((ts_val & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit); ts_val >>= 7; }
+    ts_buf[ts_len++] = (uint8_t)(ts_val & MV_BITMASKS.varint_data_mask);
     for (size_t i = 0; i < ts_len; i++) record_buf[buf_pos++] = ts_buf[i];
-    inst->last_timestamp_delta = rec->timestamp;
 
+    if (buf_pos + rec->hash_len + 6 > sizeof(record_buf)) return -1;
     for (size_t i = 0; i < rec->hash_len; i++) record_buf[buf_pos++] = rec->hash[i];
 
     uint32_t crc;
@@ -779,16 +774,16 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
 
     uint64_t dir_count;
     if (read_varint(f, &dir_count) != 0) return -1;
+    if (dir_count > 256) return -1;
     rec->dir_count = (size_t)dir_count;
 
     if (read_bit_packed_indexes(f, &rec->dir_indexes, rec->dir_count, inst->dir_table.count > 0 ? inst->dir_table.count : 1) != 0)
         return -1;
 
-    uint64_t filename_delta;
-    if (read_varint(f, &filename_delta) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    uint64_t filename_val;
+    if (read_varint(f, &filename_val) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
 
-    uint64_t filename_val = 0;
-    if (filename_delta == 0 && !is_first) {
+    if (filename_val == 0 && !is_first) {
         long before_strlen = ftell(f);
         uint64_t maybe_strlen;
         size_t varint_bytes;
@@ -799,21 +794,16 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
                 free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
             }
             rec->filename[maybe_strlen] = '\0';
-            inst->last_filename_delta = 0;
         } else {
             fseek(f, before_strlen, SEEK_SET);
-            filename_val = is_first ? filename_delta : (inst->last_filename_delta + filename_delta);
             rec->filename = malloc(32);
             if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
             snprintf(rec->filename, 32, "%llu", (unsigned long long)filename_val);
-            inst->last_filename_delta = filename_val;
         }
     } else {
-        filename_val = is_first ? filename_delta : (inst->last_filename_delta + filename_delta);
         rec->filename = malloc(32);
         if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
         snprintf(rec->filename, 32, "%llu", (unsigned long long)filename_val);
-        inst->last_filename_delta = filename_val;
     }
 
     uint8_t meta;
@@ -831,6 +821,7 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
     if (rec->meta.has_extensions) {
         uint64_t ext_len;
         if (read_varint(f, &ext_len) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        if (ext_len > 65535) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
         size_t ext_bytes_read = 0;
         while (ext_bytes_read < ext_len) {
             uint8_t tag;
@@ -867,9 +858,8 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
         }
     }
 
-    uint64_t timestamp_delta;
-    if (read_varint(f, &timestamp_delta) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-    uint64_t ts_val = is_first ? timestamp_delta : (inst->last_timestamp_delta + timestamp_delta);
+    uint64_t ts_val;
+    if (read_varint(f, &ts_val) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
     rec->timestamp = ts_val;
 
     rec->hash_len = get_hash_length(rec->meta.hash_mode);
@@ -886,12 +876,22 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
     long end_pos = ftell(f);
     fseek(f, start_pos, SEEK_SET);
     size_t record_size = (size_t)(end_pos - start_pos - 5);
-    if (record_size > sizeof(record_buf)) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-    if (fread(record_buf, 1, record_size, f) != record_size) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    uint8_t* crc_buf = record_buf;
+    int crc_on_heap = 0;
+    if (record_size > sizeof(record_buf)) {
+        crc_buf = malloc(record_size);
+        if (!crc_buf) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        crc_on_heap = 1;
+    }
+    if (fread(crc_buf, 1, record_size, f) != record_size) {
+        if (crc_on_heap) free(crc_buf);
+        free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
+    }
     fseek(f, end_pos, SEEK_SET);
 
     uint32_t calc_crc;
-    crypto_crc32(record_buf, record_size, &calc_crc);
+    crypto_crc32(crc_buf, record_size, &calc_crc);
+    if (crc_on_heap) free(crc_buf);
     if (calc_crc != stored_crc) {
         LOG_ERROR("CRC32 mismatch for record sequence %llu — rejecting corrupt record", (unsigned long long)record_seq);
         free(rec->filename); rec->filename = NULL;
@@ -899,7 +899,6 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
         return -1;
     }
 
-    inst->last_timestamp_delta = rec->timestamp;
     return 0;
 }
 
@@ -939,7 +938,8 @@ static void build_wal_dir_from_dbpath(thumbdb_instance_t* inst, char* wal_dir_ou
 }
 
 static int write_wal_entry(thumbdb_instance_t* inst, const char* key, const char* value) {
-    if (!wal_seq_mutex_inited) { if (thread_mutex_init(&wal_seq_mutex) == 0) wal_seq_mutex_inited = 1; }
+    if (!atomic_flag_test_and_set(&wal_seq_mutex_once))
+        thread_mutex_init(&wal_seq_mutex);
     char wal_dir[PATH_MAX];
     build_wal_dir_from_dbpath(inst, wal_dir, sizeof(wal_dir));
     if (!wal_dir[0]) return -1;
@@ -950,7 +950,13 @@ static int write_wal_entry(thumbdb_instance_t* inst, const char* key, const char
     snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq, platform_get_pid());
     FILE* f = platform_fopen(chunk_path, "w");
     if (!f) return -1;
-    fprintf(f, "%s\n%s\n", key, value ? value : "__DELETE__");
+    const char* val_out = value ? value : "__DELETE__";
+    fprintf(f, "%s\n%s\n", key, val_out);
+    uint32_t crc;
+    char crc_buf[512];
+    snprintf(crc_buf, sizeof(crc_buf), "%s\n%s\n", key, val_out);
+    crypto_crc32(crc_buf, strlen(crc_buf), &crc);
+    fprintf(f, "CRC32:%08X\n", crc);
     fflush(f);
     platform_fsync(fileno(f));
     fclose(f);
@@ -971,13 +977,31 @@ static int process_wal_chunks(thumbdb_instance_t* inst) {
         snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR "%s", wal_dir, entry);
         FILE* f = platform_fopen(chunk_path, "r");
         if (!f) continue;
-        char key[PATH_MAX], value[PATH_MAX];
+        char key[PATH_MAX], value[PATH_MAX], crc_line[64];
         if (fgets(key, sizeof(key), f)) {
             size_t key_len = strcspn(key, "\r\n"); key[key_len] = '\0';
             if (fgets(value, sizeof(value), f)) {
                 size_t val_len = strcspn(value, "\r\n"); value[val_len] = '\0';
-                if (strcmp(value, "__DELETE__") == 0) rh_remove(inst->rh_tbl, key, strlen(key));
-                else rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+                int crc_ok = 0;
+                if (fgets(crc_line, sizeof(crc_line), f)) {
+                    size_t crc_len = strcspn(crc_line, "\r\n"); crc_line[crc_len] = '\0';
+                    if (strncmp(crc_line, "CRC32:", 6) == 0) {
+                        char payload[PATH_MAX * 2];
+                        snprintf(payload, sizeof(payload), "%s\n%s\n", key, value);
+                        uint32_t calc_crc, stored_crc;
+                        crypto_crc32(payload, strlen(payload), &calc_crc);
+                        stored_crc = (uint32_t)strtoul(crc_line + 6, NULL, 16);
+                        crc_ok = (calc_crc == stored_crc);
+                    }
+                }
+                if (crc_ok) {
+                    thread_mutex_lock(&inst->mutex);
+                    if (strcmp(value, "__DELETE__") == 0) rh_remove(inst->rh_tbl, key, strlen(key));
+                    else rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+                    thread_mutex_unlock(&inst->mutex);
+                } else {
+                    LOG_WARN("thumbdb: WAL chunk %s failed CRC32 validation, skipping", chunk_path);
+                }
             }
         }
         fclose(f);
@@ -988,34 +1012,75 @@ static int process_wal_chunks(thumbdb_instance_t* inst) {
 }
 
 static int thumbdb_recover_from_corruption(thumbdb_instance_t* inst) {
-    LOG_WARN("thumbdb: database corrupted, attempting recovery");
+    LOG_WARN("thumbdb: database corrupted, attempting salvage recovery");
     if (!inst->db_path[0]) return -1;
     char backup_path[PATH_MAX];
     snprintf(backup_path, sizeof(backup_path), "%s.corrupt", inst->db_path);
     platform_move_file(inst->db_path, backup_path);
     LOG_INFO("thumbdb: backed up corrupted database to %s", backup_path);
+
+    FILE* f_corrupt = platform_fopen(backup_path, "rb");
+    if (!f_corrupt) {
+        LOG_ERROR("thumbdb: cannot open backup for salvage");
+        return -1;
+    }
+
     if (inst->rh_tbl) rh_destroy(inst->rh_tbl);
     inst->rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
-    if (!inst->rh_tbl) return -1;
-    inst->dir_table.count = 0; inst->dir_table.capacity = 0;
-    if (inst->dir_table.dirs) { free(inst->dir_table.dirs); inst->dir_table.dirs = NULL; }
-    FILE* f_new = platform_fopen(inst->db_path, "wb");
-    if (f_new) {
-        uint8_t magic_hi = (MV_CONSTANTS.db_magic >> 8) & 0xFF;
-        uint8_t magic_lo = MV_CONSTANTS.db_magic & 0xFF;
-        fwrite(&magic_hi, 1, 1, f_new); fwrite(&magic_lo, 1, 1, f_new);
-        uint8_t version = MV_CONSTANTS.version; fwrite(&version, 1, 1, f_new);
-        uint8_t flags = MV_BITMASKS.flags_init; fwrite(&flags, 1, 1, f_new);
-        uint64_t record_count = 0; write_varint(f_new, record_count);
-        uint64_t base_timestamp = (uint64_t)time(NULL);
-        write_uint64_le(f_new, base_timestamp);
-        inst->file_header.base_timestamp = base_timestamp;
-        uint64_t dir_table_size = 0; write_varint(f_new, dir_table_size);
-        fflush(f_new); platform_fsync(fileno(f_new)); fclose(f_new);
-        LOG_INFO("thumbdb: recovered database at %s", inst->db_path);
-        return 0;
+    if (!inst->rh_tbl) { fclose(f_corrupt); return -1; }
+
+    fseek(f_corrupt, 0, SEEK_END);
+    long file_size = ftell(f_corrupt);
+    fseek(f_corrupt, 0, SEEK_SET);
+    if (file_size <= 0) { fclose(f_corrupt); return -1; }
+
+    int records_salvaged = 0;
+    long pos = 0;
+    while (pos < file_size) {
+        fseek(f_corrupt, pos, SEEK_SET);
+        uint8_t byte;
+        if (fread(&byte, 1, 1, f_corrupt) != 1) break;
+        if (byte != MV_OPCODES.begin) { pos++; continue; }
+
+        long record_start = pos;
+        record_t rec = {0};
+        rec.record_sequence = (uint64_t)records_salvaged;
+        if (read_record(inst, f_corrupt, &rec, 0) == 0) {
+            char value[PATH_MAX];
+            if (serialize_record_to_value(inst, &rec, value, sizeof(value)) == 0) {
+                char key[64];
+                snprintf(key, sizeof(key), "%s", rec.filename);
+                rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+                records_salvaged++;
+            }
+            free_record(&rec);
+        }
+        pos = ftell(f_corrupt);
+        if (pos <= record_start) pos = record_start + 1;
     }
-    return -1;
+    fclose(f_corrupt);
+
+    LOG_INFO("thumbdb: salvage recovery found %d valid records", records_salvaged);
+    if (records_salvaged > 0) {
+        thumbdb_compact(inst);
+        LOG_INFO("thumbdb: salvage recovery complete, %d records written to %s", records_salvaged, inst->db_path);
+    } else {
+        FILE* f_new = platform_fopen(inst->db_path, "wb");
+        if (f_new) {
+            uint8_t magic_hi = (MV_CONSTANTS.db_magic >> 8) & 0xFF;
+            uint8_t magic_lo = MV_CONSTANTS.db_magic & 0xFF;
+            fwrite(&magic_hi, 1, 1, f_new); fwrite(&magic_lo, 1, 1, f_new);
+            uint8_t version = MV_CONSTANTS.version; fwrite(&version, 1, 1, f_new);
+            uint8_t flags = MV_BITMASKS.flags_init; fwrite(&flags, 1, 1, f_new);
+            uint64_t record_count = 0; write_varint(f_new, record_count);
+            uint64_t base_timestamp = (uint64_t)time(NULL);
+            write_uint64_le(f_new, base_timestamp);
+            uint64_t dir_table_size = 0; write_varint(f_new, dir_table_size);
+            fflush(f_new); platform_fsync(fileno(f_new)); fclose(f_new);
+        }
+        LOG_WARN("thumbdb: no records could be salvaged, created empty database");
+    }
+    return 0;
 }
 
 static int load_database(thumbdb_instance_t* inst) {
@@ -1038,6 +1103,7 @@ static int load_database(thumbdb_instance_t* inst) {
     if (read_uint64_le(f, &inst->file_header.base_timestamp) != 0) { fclose(f); return -1; }
     uint64_t dir_table_size;
     if (read_varint(f, &dir_table_size) != 0) { fclose(f); return -1; }
+    if (dir_table_size > 100000) { LOG_ERROR("thumbdb: dir_table_size %llu exceeds limit", (unsigned long long)dir_table_size); fclose(f); return -1; }
     for (uint64_t i = 0; i < dir_table_size; i++) {
         uint64_t prefix_len, suffix_len;
         if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); return -1; }
@@ -1054,7 +1120,7 @@ static int load_database(thumbdb_instance_t* inst) {
     }
     inst->last_filename_delta = 0; inst->last_timestamp_delta = 0; inst->current_record_seq = 0;
     int is_first = 1; long records_end_pos = 0; int in_transaction = 0;
-    while (!feof(f)) {
+    for (;;) {
         uint8_t peek; long pos = ftell(f);
         if (fread(&peek, 1, 1, f) != 1) break;
         fseek(f, pos, SEEK_SET);
@@ -1149,14 +1215,7 @@ int thumbdb_open(void) {
 thumbdb_instance_t* thumbdb_open_for_dir(const char* db_full_path) {
     if (!db_full_path || db_full_path[0] == '\0') return NULL;
 
-    thumbdb_instance_t* inst = thumbdb_find_instance(db_full_path);
-    if (inst) {
-        thread_mutex_lock(&inst->mutex);
-        if (inst->db_inited) { thread_mutex_unlock(&inst->mutex); return inst; }
-        thread_mutex_unlock(&inst->mutex);
-    }
-
-    inst = thumbdb_get_or_create_instance(db_full_path);
+    thumbdb_instance_t* inst = thumbdb_get_or_create_instance(db_full_path);
     if (!inst) return NULL;
 
     thread_mutex_lock(&inst->mutex);
@@ -1377,7 +1436,7 @@ char* thumbdb_get_record_detail(thumbdb_instance_t* inst, const char* key) {
     if (read_varint(f, &record_count) != 0 || read_uint64_le(f, &base_timestamp) != 0 || read_varint(f, &dir_table_size) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
     for (uint64_t i = 0; i < dir_table_size; i++) { uint64_t prefix_len, suffix_len; if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; } if (suffix_len > 0) fseek(f, suffix_len, SEEK_CUR); }
     int is_first = 1;
-    while (!feof(f)) {
+    for (;;) {
         uint8_t peek; long pos = ftell(f);
         if (fread(&peek, 1, 1, f) != 1) break;
         fseek(f, pos, SEEK_SET);
@@ -1613,9 +1672,9 @@ int thumbdb_validate(thumbdb_instance_t* inst) {
     uint64_t dir_table_size; if (read_varint(f, &dir_table_size) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
     for (uint64_t i = 0; i < dir_table_size; i++) { uint64_t prefix_len, suffix_len; if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; } if (suffix_len > 0) fseek(f, (long)suffix_len, SEEK_CUR); }
     uint64_t records_validated = 0, crc_errors = 0;
-    while (!feof(f)) {
+    for (;;) {
         long record_start = ftell(f);
-        uint8_t op; if (fread(&op, 1, 1, f) != 1) { if (feof(f)) break; break; }
+        uint8_t op; if (fread(&op, 1, 1, f) != 1) break;
         if (op == MV_OPCODES.delete_op) { uint64_t filename_ref; if (read_varint(f, &filename_ref) != 0) break; records_validated++; continue; }
         if (op != MV_OPCODES.begin) break;
         long crc_start = ftell(f);

@@ -70,7 +70,13 @@ static int wal_write_entry(const char* per_thumbs_root, const char* key, const c
     snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq, platform_get_pid());
     FILE* f = platform_fopen(chunk_path, "w");
     if (!f) return -1;
-    fprintf(f, "%s\n%s\n", key, value ? value : "");
+    const char* val_out = value ? value : "";
+    fprintf(f, "%s\n%s\n", key, val_out);
+    uint32_t crc;
+    char crc_buf[512];
+    snprintf(crc_buf, sizeof(crc_buf), "%s\n%s\n", key, val_out);
+    crypto_crc32(crc_buf, strlen(crc_buf), &crc);
+    fprintf(f, "CRC32:%08X\n", crc);
     fflush(f);
     platform_fsync(fileno(f));
     fclose(f);
@@ -157,6 +163,30 @@ static void process_wal_chunks(const char* per_thumbs_root) {
         const char* chosen_chunk = map_paths[ik];
         if (!is_file(chosen_chunk)) continue;
         if (wal_read_entry(chosen_chunk, key, sizeof(key), value, sizeof(value)) != 0) continue;
+        int crc_ok = 0;
+        {
+            FILE* cf = platform_fopen(chosen_chunk, "r");
+            if (cf) {
+                char cline[PATH_MAX];
+                while (fgets(cline, sizeof(cline), cf)) {
+                    if (strncmp(cline, "CRC32:", 6) == 0) {
+                        char payload[PATH_MAX * 2];
+                        snprintf(payload, sizeof(payload), "%s\n%s\n", key, value);
+                        uint32_t calc_crc, stored_crc;
+                        crypto_crc32(payload, strlen(payload), &calc_crc);
+                        stored_crc = (uint32_t)strtoul(cline + 6, NULL, 16);
+                        crc_ok = (calc_crc == stored_crc);
+                        break;
+                    }
+                }
+                fclose(cf);
+            }
+        }
+        if (!crc_ok) {
+            LOG_WARN("process_wal_chunks: WAL chunk %s failed CRC32 validation, deleting", chosen_chunk);
+            platform_file_delete(chosen_chunk);
+            continue;
+        }
         int committed = 0;
         int is_delete = (strcmp(value, "__DELETE__") == 0);
         for (int attempt = 0; attempt < 20; ++attempt) {
@@ -970,7 +1000,7 @@ typedef struct watcher_node {
 } watcher_node_t;
 static watcher_node_t* watcher_head = NULL;
 static thread_mutex_t watcher_mutex;
-static int watcher_mutex_inited = 0;
+static atomic_flag watcher_mutex_once = ATOMIC_FLAG_INIT;
 
 typedef struct running_node {
     char dir[PATH_MAX];
@@ -978,7 +1008,7 @@ typedef struct running_node {
 } running_node_t;
 static running_node_t* running_head = NULL;
 static thread_mutex_t running_mutex;
-static int running_mutex_inited = 0;
+static atomic_flag running_mutex_once = ATOMIC_FLAG_INIT;
 typedef struct warn_node {
     char dir[PATH_MAX];
     time_t last_log;
@@ -986,7 +1016,7 @@ typedef struct warn_node {
 } warn_node_t;
 static warn_node_t* warn_head = NULL;
 static thread_mutex_t warn_mutex;
-static int warn_mutex_inited = 0;
+static atomic_flag warn_mutex_once = ATOMIC_FLAG_INIT;
 
 #ifndef LOG_SUPPRESS_SECONDS
 #define LOG_SUPPRESS_SECONDS 60
@@ -994,12 +1024,10 @@ static int warn_mutex_inited = 0;
 
 static void warn_maybe_log_already_running(const char* dir) {
     if (!dir) return;
-    if (!warn_mutex_inited) {
-        if (thread_mutex_init(&warn_mutex) == 0) warn_mutex_inited = 1;
-    }
+    if (!atomic_flag_test_and_set(&warn_mutex_once))
+        thread_mutex_init(&warn_mutex);
     time_t now = time(NULL);
-    if (warn_mutex_inited) {
-        thread_mutex_lock(&warn_mutex);
+    thread_mutex_lock(&warn_mutex);
         warn_node_t* cur = warn_head;
         while (cur) {
             if (strcmp(cur->dir, dir) == 0) break;
@@ -1023,10 +1051,6 @@ static void warn_maybe_log_already_running(const char* dir) {
             }
         }
         thread_mutex_unlock(&warn_mutex);
-    } else {
-        char tmpd[PATH_MAX]; strncpy(tmpd, dir, sizeof(tmpd) - 1); tmpd[sizeof(tmpd) - 1] = '\0'; strip_trailing_sep(tmpd);
-        LOG_INFO("Thumbnail generation already running for: %s", tmpd);
-    }
 }
 static void remove_watcher_node(const char* dir) {
     thread_mutex_lock(&watcher_mutex);
@@ -1206,9 +1230,9 @@ static void* thumbnail_generation_thread(void* args) {
     strip_trailing_sep(dir_path);
     LOG_INFO("Background thumbnail generation finished for: %s", dir_path);
 
-    if (!running_mutex_inited && thread_mutex_init(&running_mutex) == 0) running_mutex_inited = 1;
-    if (running_mutex_inited) {
-        thread_mutex_lock(&running_mutex);
+    if (!atomic_flag_test_and_set(&running_mutex_once))
+        thread_mutex_init(&running_mutex);
+    thread_mutex_lock(&running_mutex);
         running_node_t* prev = NULL;
         running_node_t* cur = running_head;
         while (cur) {
@@ -1221,7 +1245,6 @@ static void* thumbnail_generation_thread(void* args) {
             cur = cur->next;
         }
         thread_mutex_unlock(&running_mutex);
-    }
     return NULL;
 }
 
@@ -1311,7 +1334,7 @@ void start_periodic_thumb_maintenance(int interval_seconds) {
 }
 
 static thread_mutex_t wal_processor_mutex;
-static int wal_processor_mutex_inited = 0;
+static atomic_flag wal_processor_mutex_once = ATOMIC_FLAG_INIT;
 static int wal_processor_started = 0;
 
 static void* wal_processor_thread(void* args) {
@@ -1341,8 +1364,8 @@ static void* wal_processor_thread(void* args) {
 }
 
 void start_wal_processing_thread(int interval_seconds) {
-    if (!wal_processor_mutex_inited) { if (thread_mutex_init(&wal_processor_mutex) == 0) wal_processor_mutex_inited = 1; }
-    if (!wal_processor_mutex_inited) return;
+    if (!atomic_flag_test_and_set(&wal_processor_mutex_once))
+        thread_mutex_init(&wal_processor_mutex);
     thread_mutex_lock(&wal_processor_mutex);
     if (wal_processor_started) { thread_mutex_unlock(&wal_processor_mutex); return; }
     wal_processor_started = 1;
@@ -1354,7 +1377,8 @@ void start_wal_processing_thread(int interval_seconds) {
 }
 void start_auto_thumb_watcher(const char* dir_path) {
     if (!dir_path) return;
-    if (!watcher_mutex_inited && thread_mutex_init(&watcher_mutex) == 0) watcher_mutex_inited = 1;
+    if (!atomic_flag_test_and_set(&watcher_mutex_once))
+        thread_mutex_init(&watcher_mutex);
     
     thread_mutex_lock(&watcher_mutex);
     watcher_node_t* cur = watcher_head;
@@ -1592,22 +1616,17 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
     return false;
 }
 static thread_mutex_t bg_generation_mutex;
-static int bg_generation_mutex_inited = 0;
+static atomic_flag bg_generation_mutex_once = ATOMIC_FLAG_INIT;
 
 void start_background_thumb_generation(const char* dir_path) {
     if (!dir_path) return;
-    if (!bg_generation_mutex_inited) {
-        if (thread_mutex_init(&bg_generation_mutex) == 0) bg_generation_mutex_inited = 1;
-    }
-    if (bg_generation_mutex_inited) {
-        thread_mutex_lock(&bg_generation_mutex);
-    }
+    if (!atomic_flag_test_and_set(&bg_generation_mutex_once))
+        thread_mutex_init(&bg_generation_mutex);
+    thread_mutex_lock(&bg_generation_mutex);
     LOG_DEBUG("start_background_thumb_generation: checking for missing thumbs (shallow) in %s", dir_path);
     if (!dir_has_missing_thumbs_shallow(dir_path, 0)) {
         LOG_DEBUG("No missing thumbnails (shallow) for: %s", dir_path);
-        if (bg_generation_mutex_inited) {
-            thread_mutex_unlock(&bg_generation_mutex);
-        }
+        thread_mutex_unlock(&bg_generation_mutex);
         start_auto_thumb_watcher(dir_path);
         return;
     }
@@ -1650,9 +1669,7 @@ void start_background_thumb_generation(const char* dir_path) {
                 }
                 else {
                     warn_maybe_log_already_running(dir_path);
-                    if (bg_generation_mutex_inited) {
-                        thread_mutex_unlock(&bg_generation_mutex);
-                    }
+                    thread_mutex_unlock(&bg_generation_mutex);
                     start_auto_thumb_watcher(dir_path);
                     return;
                 }
@@ -1667,9 +1684,7 @@ void start_background_thumb_generation(const char* dir_path) {
 
     if (lock_ret != 0) {
         LOG_WARN("Failed to create lock file %s", lock_path);
-        if (bg_generation_mutex_inited) {
-            thread_mutex_unlock(&bg_generation_mutex);
-        }
+        thread_mutex_unlock(&bg_generation_mutex);
         return;
     }
 
@@ -1678,24 +1693,18 @@ void start_background_thumb_generation(const char* dir_path) {
     thread_args_t* args = malloc(sizeof(thread_args_t));
     if (!args) {
         LOG_ERROR("Failed to allocate memory for thread arguments for directory %s", dir_path);
-        if (bg_generation_mutex_inited) {
-            thread_mutex_unlock(&bg_generation_mutex);
-        }
+        thread_mutex_unlock(&bg_generation_mutex);
         return;
     }
 
-    if (!running_mutex_inited) {
-        if (thread_mutex_init(&running_mutex) == 0) running_mutex_inited = 1;
-    }
-    if (running_mutex_inited) {
-        thread_mutex_lock(&running_mutex);
+    if (!atomic_flag_test_and_set(&running_mutex_once))
+        thread_mutex_init(&running_mutex);
+    thread_mutex_lock(&running_mutex);
         running_node_t* cur = running_head;
         while (cur) {
             if (strcmp(cur->dir, dir_path) == 0) {
                 thread_mutex_unlock(&running_mutex);
-                if (bg_generation_mutex_inited) {
-                    thread_mutex_unlock(&bg_generation_mutex);
-                }
+                thread_mutex_unlock(&bg_generation_mutex);
                 start_auto_thumb_watcher(dir_path);
                 free(args);
                 return;
@@ -1722,9 +1731,7 @@ void start_background_thumb_generation(const char* dir_path) {
         free(args);
     }
 
-    if (bg_generation_mutex_inited) {
-        thread_mutex_unlock(&bg_generation_mutex);
-    }
+    thread_mutex_unlock(&bg_generation_mutex);
     start_auto_thumb_watcher(dir_path);
 }
 void add_skip(progress_t * prog, const char* reason, const char* path) {
@@ -1800,7 +1807,7 @@ void count_media_in_dir(const char* dir, progress_t * prog) {
     dir_close(&it);
 }
 static thread_mutex_t ensure_thumbs_mutex;
-static int ensure_thumbs_mutex_inited = 0;
+static atomic_flag ensure_thumbs_mutex_once = ATOMIC_FLAG_INIT;
 
 void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     if (!dir || !*dir) {
@@ -1809,12 +1816,9 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     }
 
     LOG_DEBUG("ensure_thumbs_in_dir: enter for %s", dir);
-    if (!ensure_thumbs_mutex_inited) {
-        if (thread_mutex_init(&ensure_thumbs_mutex) == 0) ensure_thumbs_mutex_inited = 1;
-    }
-    if (ensure_thumbs_mutex_inited) {
-        thread_mutex_lock(&ensure_thumbs_mutex);
-    }
+    if (!atomic_flag_test_and_set(&ensure_thumbs_mutex_once))
+        thread_mutex_init(&ensure_thumbs_mutex);
+    thread_mutex_lock(&ensure_thumbs_mutex);
 
     if (!prog) {
         int quick = dir_has_missing_thumbs_shallow(dir, 0);
@@ -1822,9 +1826,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
             start_background_thumb_generation(dir);
         else
             start_auto_thumb_watcher(dir);
-        if (ensure_thumbs_mutex_inited) {
-            thread_mutex_unlock(&ensure_thumbs_mutex);
-        }
+        thread_mutex_unlock(&ensure_thumbs_mutex);
         return;
     }
 
@@ -1833,9 +1835,7 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     diriter it;
     if (!dir_open(&it, dir)) {
         LOG_WARN("ensure_thumbs_in_dir: failed to open dir %s", dir);
-        if (ensure_thumbs_mutex_inited) {
-            thread_mutex_unlock(&ensure_thumbs_mutex);
-        }
+        thread_mutex_unlock(&ensure_thumbs_mutex);
         return;
     }
     LOG_DEBUG("ensure_thumbs_in_dir: scanning directory %s", dir);
@@ -1922,23 +1922,18 @@ void ensure_thumbs_in_dir(const char* dir, progress_t* prog) {
     }
     dir_close(&it);
     LOG_DEBUG("ensure_thumbs_in_dir: completed scanning %s", dir);
-    
-    if (ensure_thumbs_mutex_inited) {
-        thread_mutex_unlock(&ensure_thumbs_mutex);
-    }
+
+    thread_mutex_unlock(&ensure_thumbs_mutex);
 }
 
 static thread_mutex_t thumb_job_mutex;
-static int thumb_job_mutex_inited = 0;
+static atomic_flag thumb_job_mutex_once = ATOMIC_FLAG_INIT;
 
 void schedule_or_generate_thumb(const char* input, const char* output, progress_t* prog, int scale, int q) {
     if (!input || !output || !prog) return;
-    if (!thumb_job_mutex_inited) {
-        if (thread_mutex_init(&thumb_job_mutex) == 0) thumb_job_mutex_inited = 1;
-    }
-    if (thumb_job_mutex_inited) {
-        thread_mutex_lock(&thumb_job_mutex);
-    }
+    if (!atomic_flag_test_and_set(&thumb_job_mutex_once))
+        thread_mutex_init(&thumb_job_mutex);
+    thread_mutex_lock(&thumb_job_mutex);
     prog->processed_files++;
     char small_rel[PATH_MAX];
     char large_rel[PATH_MAX];
@@ -1974,19 +1969,15 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
     snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
     
     if (is_file(small_fs) && is_file(large_fs)) {
-        if (thumb_job_mutex_inited) {
-            thread_mutex_unlock(&thumb_job_mutex);
-        }
+        thread_mutex_unlock(&thumb_job_mutex);
         return;
     }
-    
+
     thumb_job_t* job = calloc(1, sizeof(thumb_job_t));
     if (!job) {
         LOG_ERROR("Failed to allocate thumb job structure for %s", input);
         generate_thumb_inline_and_record(input, output, scale, q, (int)prog->processed_files, (int)prog->total_files);
-        if (thumb_job_mutex_inited) {
-            thread_mutex_unlock(&thumb_job_mutex);
-        }
+        thread_mutex_unlock(&thumb_job_mutex);
         return;
     }
     
@@ -1999,17 +1990,15 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
     job->index = (int)prog->processed_files;
     job->total = (int)prog->total_files;
     
-    int workers_active = atomic_load(&thumb_workers_active);
-    if (workers_active >= MAX_THUMB_WORKERS) {
-        if (thumb_job_mutex_inited) {
-            thread_mutex_unlock(&thumb_job_mutex);
+    int expected = atomic_load(&thumb_workers_active);
+    int claimed = 0;
+    while (expected < MAX_THUMB_WORKERS) {
+        if (atomic_compare_exchange_strong(&thumb_workers_active, &expected, expected + 1)) {
+            claimed = 1;
+            break;
         }
-        free(job);
-        return;
     }
-    
-    int expected = workers_active;
-    if (atomic_compare_exchange_weak(&thumb_workers_active, &expected, workers_active + 1)) {
+    if (claimed) {
         if (thread_create_detached((void* (*)(void*))thumb_job_thread, job) != 0) {
             LOG_ERROR("Failed to spawn thumb worker thread, generating inline");
             atomic_fetch_sub(&thumb_workers_active, 1);
@@ -2017,12 +2006,11 @@ void schedule_or_generate_thumb(const char* input, const char* output, progress_
             free(job);
         }
     } else {
+        generate_thumb_inline_and_record(input, output, scale, q, (int)prog->processed_files, (int)prog->total_files);
         free(job);
     }
     
-    if (thumb_job_mutex_inited) {
-        thread_mutex_unlock(&thumb_job_mutex);
-    }
+    thread_mutex_unlock(&thumb_job_mutex);
 }
 
 void clean_orphan_thumbs(const char* dir, progress_t * prog) {

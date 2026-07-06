@@ -108,3 +108,4 @@ v6-fancybox.css
 *.lib
 *.o
 *.obj
+.kilo/run-script.ps1
