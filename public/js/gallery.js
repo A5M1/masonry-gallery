@@ -493,55 +493,19 @@ function setupThumbSocket() {
 			try {
 				var o = JSON.parse(evt.data);
 				if (!o) return;
-				if (o.type === "thumb_ready" && o.media && o.thumb) {
-					var thumbBasename = o.thumb;
-					var largeName = thumbBasename.replace("-small.", "-large.");
-					var hash = o.hash || "";
-					var els = [];
-					if (hash) {
-						var hashSel =
-							'.masonry-item[data-hash="' +
-							hash +
-							'"] img.thumb-img';
-						els = Array.from(document.querySelectorAll(hashSel));
+				if (o.type === "thumb_ready" && o.media && o.thumbUrl) {
+					var img = document.querySelector('img[data-media="' + o.media + '"]');
+					if (img) {
+						var currentSrc = img.getAttribute("src") || "";
+						if (!currentSrc || currentSrc.indexOf("placeholder") !== -1 || currentSrc.indexOf("base64") !== -1) {
+							img.src = o.thumbUrl;
+							if (o.thumbUrl.indexOf("-small.") !== -1) img.setAttribute("data-thumb-small", o.thumbUrl);
+							if (o.thumbUrl.indexOf("-large.") !== -1) img.setAttribute("data-thumb-large", o.thumbUrl);
+							var a = img.closest("a");
+							if (a) a.setAttribute("data-thumb-status", "1");
+							scheduleLayout();
+						}
 					}
-					if (els.length === 0) {
-						var sel1 = 'a[href="' + o.media + '"] img.thumb-img';
-						var sel2 = '[data-src="' + o.media + '"] img.thumb-img';
-						els = Array.from(
-							document.querySelectorAll(sel1)
-						).concat(Array.from(document.querySelectorAll(sel2)));
-					}
-					els.forEach(function (el) {
-						try {
-							var currentSrc = el.getAttribute("src") || "";
-							if (
-								!currentSrc ||
-								currentSrc.includes("placeholder") ||
-								currentSrc.includes("base64")
-							) {
-								var largeUrl =
-									"/images/thumbs/" +
-									encodeURIComponent(largeName);
-								var img = new Image();
-								img.onload = function () {
-									el.src = largeUrl;
-									el.setAttribute(
-										"data-thumb-large",
-										largeUrl
-									);
-									scheduleLayout();
-								};
-								img.onerror = function () {
-									var smallUrl =
-										"/images/thumbs/" +
-										encodeURIComponent(thumbBasename);
-									el.src = smallUrl;
-								};
-								img.src = largeUrl;
-							}
-						} catch (e) {}
-					});
 				}
 				if (o.status === "generated" && o.url) {
 					var imgSel =
