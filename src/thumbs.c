@@ -1700,6 +1700,7 @@ void start_background_thumb_generation(const char* dir_path) {
     if (!atomic_flag_test_and_set(&running_mutex_once))
         thread_mutex_init(&running_mutex);
     thread_mutex_lock(&running_mutex);
+    {
         running_node_t* cur = running_head;
         while (cur) {
             if (strcmp(cur->dir, dir_path) == 0) {
