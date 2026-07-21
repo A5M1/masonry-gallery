@@ -6,6 +6,12 @@
 
 #define CONFIG_FILE "galleria.conf"
 
+static char config_file_path[PATH_MAX];
+
+static void get_config_path(char* dest, size_t size) {
+	snprintf(dest, size, "%s" DIR_SEP_STR "%s", BASE_DIR, CONFIG_FILE);
+}
+
 static char** gallery_folders = NULL;
 static size_t gallery_folder_count = 0;
 int server_port = 3000;
@@ -17,7 +23,8 @@ int exif_extraction_enabled = 0;
 char exif_tool_path[PATH_MAX] = {0};
 
 void load_config(void) {
-	FILE* f = fopen(CONFIG_FILE, "r");
+	get_config_path(config_file_path, sizeof(config_file_path));
+	FILE* f = fopen(config_file_path, "r");
 	if (!f) {
 		LOG_INFO("No config file found, using default folder");
 		add_gallery_folder(BASE_DIR);
@@ -114,9 +121,10 @@ void load_config(void) {
 }
 
 void save_config(void) {
-	FILE* f = fopen(CONFIG_FILE, "w");
+	get_config_path(config_file_path, sizeof(config_file_path));
+	FILE* f = fopen(config_file_path, "w");
 	if (!f) {
-		LOG_ERROR("Failed to save config file: %s", CONFIG_FILE);
+		LOG_ERROR("Failed to save config file: %s", config_file_path);
 		return;
 	}
 

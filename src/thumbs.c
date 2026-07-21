@@ -1567,9 +1567,7 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
         dirbuf[1] = '\0';
     }
 
-    char found_key[PATH_MAX]; found_key[0] = '\0';
-
-    get_thumb_rel_names(media_path, filename, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+    get_thumb_rel_names_quick(media_path, filename, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
 
     char thumbs_root[PATH_MAX];
     get_thumbs_root(thumbs_root, sizeof(thumbs_root));
@@ -1581,25 +1579,10 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
     char per_thumbs_root[PATH_MAX];
     snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir_name);
 
-    {
-        char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
-        thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
-        if (tdb && thumbdb_find_for_media(tdb, media_path, found_key, sizeof(found_key)) == 0) {
-            if (thumb_path_len > 0) {
-                snprintf(thumb_path, thumb_path_len, "%s", found_key);
-            }
-            return true;
-        }
-    }
-
     char small_fs[PATH_MAX];
     char large_fs[PATH_MAX];
     snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
     snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-
-    if (thumb_path_len > 0) {
-        snprintf(thumb_path, thumb_path_len, "%s", small_rel);
-    }
 
     if (is_file(small_fs)) {
         if (thumb_path_len > 0)
@@ -1611,6 +1594,22 @@ bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_p
         if (thumb_path_len > 0)
             snprintf(thumb_path, thumb_path_len, "%s", large_rel);
         return true;
+    }
+
+    char found_key[PATH_MAX]; found_key[0] = '\0';
+    {
+        char per_db[PATH_MAX]; snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+        thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+        if (tdb && thumbdb_find_for_media(tdb, media_path, found_key, sizeof(found_key)) == 0) {
+            if (thumb_path_len > 0) {
+                snprintf(thumb_path, thumb_path_len, "%s", found_key);
+            }
+            return true;
+        }
+    }
+
+    if (thumb_path_len > 0) {
+        snprintf(thumb_path, thumb_path_len, "%s", small_rel);
     }
 
     return false;

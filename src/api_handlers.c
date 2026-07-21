@@ -18,20 +18,18 @@ static int api_wrapper_mutex_inited = 0;
 
 static void* start_background_wrapper(void* arg) {
 	if (!arg) return NULL;
-	if (!api_wrapper_mutex_inited) {
-		if (thread_mutex_init(&api_wrapper_mutex) == 0) api_wrapper_mutex_inited = 1;
-	}
-	if (api_wrapper_mutex_inited) {
+	if (!api_wrapper_mutex_inited) 
+		if (thread_mutex_init(&api_wrapper_mutex) == 0) 
+			api_wrapper_mutex_inited = 1;
+	if (api_wrapper_mutex_inited) 
 		thread_mutex_lock(&api_wrapper_mutex);
-	}
 	char* dir = (char*)arg;
 	if (dir) {
 		start_background_thumb_generation(dir);
 		free(dir);
 	}
-	if (api_wrapper_mutex_inited) {
+	if (api_wrapper_mutex_inited) 
 		thread_mutex_unlock(&api_wrapper_mutex);
-	}
 	return NULL;
 }
 
@@ -263,10 +261,8 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 	snprintf(target, sizeof(target), "%s/%s", used_base, dir_to_use ? dir_to_use : "");
 	normalize_path(target);
 	char target_real[PATH_MAX]; char base_real[PATH_MAX];
-	if (!resolve_and_validate_target(used_base, dir_to_use, target_real, sizeof(target_real), base_real, sizeof(base_real))) { 
-		if (out_len) *out_len = 0;
-			return NULL; 
-	}
+	if (!resolve_and_validate_target(used_base, dir_to_use, target_real, sizeof(target_real), base_real, sizeof(base_real))) 
+		if (out_len) *out_len = 0; return NULL; 
 	char** files = NULL; size_t n = 0, alloc = 0;
 	diriter it; if (dir_open(&it, target_real)) {
 		const char* name; while ((name = dir_next(&it))) {
@@ -443,13 +439,16 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 		}
 		char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 
+		struct stat st_id;
 		uint8_t digest[MD5_DIGEST_LENGTH];
 		char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
 		md5hex[0] = '\0';
-		if (crypto_md5_file(full_path, digest) == 0) {
+		if (platform_stat(full_path, &st_id) == 0) {
+			uint64_t pseudo = ((uint64_t)(uint32_t)st_id.st_size << 32) ^ (uint64_t)(uint32_t)st_id.st_mtime ^ (uint64_t)(uintptr_t)full_path;
 			for (size_t di = 0; di < MD5_DIGEST_LENGTH; ++di)
-				snprintf(md5hex + (di * 2), 3, "%02x", digest[di]);
+				snprintf(md5hex + (di * 2), 3, "%02x", (unsigned char)((pseudo >> (di * 8)) ^ (di * 0x9E3779B97F4A7C15ULL)));
 		}
+		else { md5hex[0] = '-'; md5hex[1] = '\0'; }
 
 		char dim_attr[64]; dim_attr[0] = '\0';
 		int is_video = has_ext(files[i], VIDEO_EXTS);
@@ -496,6 +495,19 @@ static int resolve_and_validate_target(const char* base_dir, const char* dirpara
 }
 
 
+typedef struct {
+	char dir[PATH_MAX];
+} regen_args_t;
+
+static void* regen_thumbs_thread(void* arg) {
+	regen_args_t* a = (regen_args_t*)arg;
+	if (!a) return NULL;
+	if (dir_has_missing_thumbs_shallow(a->dir, 0))
+		start_background_thumb_generation(a->dir);
+	free(a);
+	return NULL;
+}
+
 void handle_api_regenerate_thumbs(int c, char* qs, bool keep_alive) {
 	char dirparam[PATH_MAX] = { 0 };
 	if (qs) { char* v = query_get(qs, "dir");if (v) { strncpy(dirparam, v, PATH_MAX - 1);SAFE_FREE(v); } }
@@ -510,7 +522,12 @@ void handle_api_regenerate_thumbs(int c, char* qs, bool keep_alive) {
 		send(c, msg, (int)strlen(msg), 0);
 		return;
 	}
-	if (dir_has_missing_thumbs_shallow(target_real, 0)) start_background_thumb_generation(target_real);
+	regen_args_t* ra = malloc(sizeof(*ra));
+	if (ra) {
+		strncpy(ra->dir, target_real, sizeof(ra->dir) - 1);
+		ra->dir[sizeof(ra->dir) - 1] = '\0';
+		thread_create_detached(regen_thumbs_thread, ra);
+	}
 	const char* msg = "{\"status\":\"accepted\",\"message\":\"Thumbnail regeneration started.\"}";
 	send_header(c, 202, "Accepted", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
 	send(c, msg, (int)strlen(msg), 0);
@@ -939,13 +956,16 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 			}
 			char small_esc[PATH_MAX]; char large_esc[PATH_MAX]; html_escape(small_url, small_esc, sizeof(small_esc)); html_escape(large_url, large_esc, sizeof(large_esc));
 
+			struct stat st_id2;
 			uint8_t digest[MD5_DIGEST_LENGTH];
 			char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
 			md5hex[0] = '\0';
-			if (crypto_md5_file(full_path, digest) == 0) {
+			if (platform_stat(full_path, &st_id2) == 0) {
+				uint64_t pseudo = ((uint64_t)(uint32_t)st_id2.st_size << 32) ^ (uint64_t)(uint32_t)st_id2.st_mtime ^ (uint64_t)(uintptr_t)full_path;
 				for (size_t di = 0; di < MD5_DIGEST_LENGTH; ++di)
-					snprintf(md5hex + (di * 2), 3, "%02x", digest[di]);
+					snprintf(md5hex + (di * 2), 3, "%02x", (unsigned char)((pseudo >> (di * 8)) ^ (di * 0x9E3779B97F4A7C15ULL)));
 			}
+			else { md5hex[0] = '-'; md5hex[1] = '\0'; }
 
 			int is_video = has_ext(files[i], VIDEO_EXTS);
 			if (is_video) {
@@ -2317,14 +2337,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "mover.html", VIEWS_DIR);
 		LOG_DEBUG("Serving mover page: %s", path);
 		if (!is_file(path)) { send_text(c, 404, "Not Found", "mover.html not found", keep_alive); SAFE_FREE(range); return 0; }
-		FILE* f = fopen(path, "rb");
-		if (!f) { LOG_ERROR("Failed to open mover.html: %s", path); send_text(c, 500, "Internal Server Error", "failed to open mover.html", keep_alive); SAFE_FREE(range); return 0; }
-		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); SAFE_FREE(range); return 0; }
-		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
-		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
-		send(c, buf, (int)fsz, 0);
-		free(buf);
+		send_file_stream(c, path, NULL, keep_alive);
 		SAFE_FREE(range);
 		return 0;
 	}
@@ -2332,14 +2345,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		char path[1024];
 		snprintf(path, sizeof(path), "%s" DIR_SEP_STR "thumbdb.html", VIEWS_DIR);
 		if (!is_file(path)) { send_text(c, 404, "Not Found", "thumbdb.html not found", keep_alive); SAFE_FREE(range); return 0; }
-		FILE* f = fopen(path, "rb");
-		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open thumbdb.html", keep_alive); SAFE_FREE(range); return 0; }
-		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); SAFE_FREE(range); return 0; }
-		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
-		send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
-		send(c, buf, (int)fsz, 0);
-		free(buf);
+		send_file_stream(c, path, NULL, keep_alive);
 		SAFE_FREE(range);
 		return 0;
 	}
@@ -2377,49 +2383,46 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		char path[1024];
 		snprintf(path, sizeof(path), "%s/index.html", VIEWS_DIR);
 		if (!is_file(path)) { send_text(c, 404, "Not Found", "index.html not found", keep_alive); SAFE_FREE(range); return 0; }
-		FILE* f = fopen(path, "rb");
-		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open index.html", keep_alive); SAFE_FREE(range); return 0; }
-		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); SAFE_FREE(range); return 0; }
-		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
 		char dirparam[PATH_MAX] = { 0 }; int page = 1;
 		if (qs) {
 			char* v = query_get(qs, "dir"); if (v) { strncpy(dirparam, v, PATH_MAX - 1); SAFE_FREE(v); }
 			char* p = query_get(qs, "page"); if (p) { int t = atoi(p); if (t > 0) page = t; SAFE_FREE(p); }
 		}
 		size_t frag_len = 0; char* frag = generate_media_fragment(BASE_DIR, dirparam, page, &frag_len);
-		if (frag) {
-			char* ph = strstr(buf, "<!-- MEDIA_FRAGMENT -->");
-			if (ph) {
-				size_t newlen = fsz + frag_len + 1024;
-				char* out = malloc(newlen);
-				if (out) {
-					size_t pre = (size_t)(ph - buf);
-					memcpy(out, buf, pre);
-					memcpy(out + pre, frag, frag_len);
-					memcpy(out + pre + frag_len, ph + 21, fsz - pre - 21);
-					send_header(c, 200, "OK", "text/html; charset=utf-8", (long)(pre + frag_len + (fsz - pre - 21)), NULL, 0, keep_alive);
-					send(c, out, (int)(pre + frag_len + (fsz - pre - 21)), 0);
-					free(out);
-				}
-				else {
-					send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
-					send(c, buf, (int)fsz, 0);
-				}
+		if (!frag) {
+			send_file_stream(c, path, NULL, keep_alive);
+			SAFE_FREE(range);
+			return 0;
+		}
+		FILE* f = fopen(path, "rb");
+		if (!f) { send_text(c, 500, "Internal Server Error", "failed to open index.html", keep_alive); SAFE_FREE(range); free(frag); return 0; }
+		fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
+		char* buf = malloc(fsz + 1); if (!buf) { fclose(f); send_text(c, 500, "Internal Server Error", "oom", keep_alive); SAFE_FREE(range); free(frag); return 0; }
+		fread(buf, 1, fsz, f); buf[fsz] = '\0'; fclose(f);
+		char* ph = strstr(buf, "<!-- MEDIA_FRAGMENT -->");
+		if (ph) {
+			size_t newlen = fsz + frag_len + 1024;
+			char* out = malloc(newlen);
+			if (out) {
+				size_t pre = (size_t)(ph - buf);
+				memcpy(out, buf, pre);
+				memcpy(out + pre, frag, frag_len);
+				memcpy(out + pre + frag_len, ph + 21, fsz - pre - 21);
+				send_header(c, 200, "OK", "text/html; charset=utf-8", (long)(pre + frag_len + (fsz - pre - 21)), NULL, 0, keep_alive);
+				send(c, out, (int)(pre + frag_len + (fsz - pre - 21)), 0);
+				free(out);
 			}
 			else {
 				send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 				send(c, buf, (int)fsz, 0);
 			}
-			free(frag);
-			SAFE_FREE(range);
-			return 0;
 		}
 		else {
 			send_header(c, 200, "OK", "text/html; charset=utf-8", (long)fsz, NULL, 0, keep_alive);
 			send(c, buf, (int)fsz, 0);
 		}
 		free(buf);
+		free(frag);
 		SAFE_FREE(range);
 		return 0;
 	}

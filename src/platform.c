@@ -618,22 +618,48 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
     long remain = len; if (remain <= 0) {
         struct stat st; if (fstat(fd, &st) == 0) remain = (long)st.st_size - start; else remain = 0;
     }
-    char buf[65536];
-    while (remain > 0) {
-        size_t toread = (remain < (long)sizeof(buf)) ? (size_t)remain : sizeof(buf);
-        if (lseek(fd, offset, SEEK_SET) == (off_t)-1) { close(fd); return -1; }
-        ssize_t rd = read(fd, buf, toread);
-        if (rd <= 0) { if (errno == EINTR) continue; close(fd); return -1; }
-        ssize_t sent_total = 0;
-        while (sent_total < rd) {
-            ssize_t snt = send(client_socket, buf + sent_total, (int)(rd - sent_total), 0);
-            if (snt <= 0) {
-                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
-                close(fd); return -1;
+    if (remain <= 0) { close(fd); unregister_stream_by_sock(client_socket); return 0; }
+    /* Try sendfile() for zero-copy kernel-mode transfer; fall back to manual loop on EAGAIN/EINTR. */
+    off_t sf_off = offset;
+    long sf_remain = remain;
+    int used_sendfile = 0;
+    while (sf_remain > 0) {
+        ssize_t snt = sendfile(client_socket, fd, &sf_off, (size_t)sf_remain);
+        if (snt > 0) { sf_remain -= snt; used_sendfile = 1; continue; }
+        if (snt == 0) break;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            struct timeval tv; tv.tv_sec = 30; tv.tv_usec = 0;
+            setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            fd_set wfds; FD_ZERO(&wfds); FD_SET(client_socket, &wfds);
+            int sr = select(client_socket + 1, NULL, &wfds, NULL, NULL);
+            if (sr > 0) continue;
+            break;
+        }
+        break;
+    }
+    if (sf_remain == 0) { close(fd); unregister_stream_by_sock(client_socket); return 0; }
+    /* Fallback: manual read/send loop (only if sendfile was not usable or failed mid-stream). */
+    if (!used_sendfile) {
+        char buf[65536];
+        off_t off = offset;
+        long rem = remain;
+        while (rem > 0) {
+            size_t toread = (rem < (long)sizeof(buf)) ? (size_t)rem : sizeof(buf);
+            if (lseek(fd, off, SEEK_SET) == (off_t)-1) { close(fd); unregister_stream_by_sock(client_socket); return -1; }
+            ssize_t rd = read(fd, buf, toread);
+            if (rd <= 0) { if (rd < 0 && errno == EINTR) continue; close(fd); unregister_stream_by_sock(client_socket); return -1; }
+            ssize_t sent_total = 0;
+            while (sent_total < rd) {
+                ssize_t snt = send(client_socket, buf + sent_total, (int)(rd - sent_total), 0);
+                if (snt <= 0) {
+                    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                    close(fd); unregister_stream_by_sock(client_socket); return -1;
+                }
+                sent_total += snt;
+                off += snt;
+                rem -= snt;
             }
-            sent_total += snt;
-            offset += snt;
-            remain -= snt;
         }
     }
     close(fd);

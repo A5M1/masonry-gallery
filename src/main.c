@@ -66,7 +66,17 @@ int main(int argc, char** argv) {
     LOG_DEBUG("startup: about to start_thread_pool");
     start_thread_pool(0);
     LOG_DEBUG("startup: after start_thread_pool");
+    {
+#ifdef _WIN32
+        u_long mode = 1;
+        ioctlsocket(s, FIONBIO, &mode);
+#else
+        int flags = fcntl(s, F_GETFL, 0);
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+    }
     int wait_ct = 0;
+    int consecutive_failures = 0;
     for (;;) {
         struct sockaddr_in ca;
         socklen_t calen = sizeof(ca);
@@ -75,10 +85,25 @@ int main(int argc, char** argv) {
         wait_ct++;
         int c = accept(s, (struct sockaddr*)&ca, &calen);
         if (c < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK)
-                LOG_ERROR("Accept failed: %s", strerror(errno));
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#endif
+                consecutive_failures = 0;
+                platform_sleep_ms(1);
+                continue;
+            }
+            LOG_ERROR("Accept failed: %s", strerror(errno));
+            consecutive_failures++;
+            if (consecutive_failures > 100) {
+                LOG_ERROR("Too many consecutive accept failures, shutting down");
+                break;
+            }
             continue;
         }
+        consecutive_failures = 0;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(ca.sin_addr), ip, INET_ADDRSTRLEN);
         LOG_DEBUG("Accepted connection from %s:%d (socket %d)", ip, ntohs(ca.sin_port), c);

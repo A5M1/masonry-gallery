@@ -93,132 +93,144 @@ static void* worker_thread(void* arg) {
     for (;;) {
         int c = dequeue_job();
         if (c < 0) break;
-        size_t total_read = 0;
-        int content_length = 0;
-        int keep_socket = 0;
-        bool headers_done = false;
-        char* headers_end = NULL;
-        int broken = 0;
-        struct timeval timeout;
-        timeout.tv_sec = 30;  
-        timeout.tv_usec = 0;
-        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
-        while (1) {
-            if (total_read >= buf_size - 1) {
-                buf_size *= 2;
-                char* new_buf = realloc(buffer, buf_size);
-                if (!new_buf) {
-                    LOG_ERROR("Failed to realloc request buffer to size %zu", buf_size);
+        int keep_alive_loop = 1;
+        while (keep_alive_loop) {
+            keep_alive_loop = 0;
+            size_t total_read = 0;
+            int content_length = 0;
+            int keep_socket = 0;
+            bool headers_done = false;
+            char* headers_end = NULL;
+            int broken = 0;
+            struct timeval timeout;
+            timeout.tv_sec = 30;
+            timeout.tv_usec = 0;
+            setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
+            while (1) {
+                if (total_read >= buf_size - 1) {
+                    buf_size *= 2;
+                    char* new_buf = realloc(buffer, buf_size);
+                    if (!new_buf) {
+                        LOG_ERROR("Failed to realloc request buffer to size %zu", buf_size);
+                        broken = 1;
+                        break;
+                    }
+                    buffer = new_buf;
+                }
+
+                int r = recv(c, buffer + total_read, buf_size - total_read - 1, 0);
+                if (r <= 0) {
+                    if (r == 0) {
+                        LOG_DEBUG("Client disconnected");
+                    } else {
+#ifdef _WIN32
+                        int err = WSAGetLastError();
+                        if (err == WSAETIMEDOUT) {
+                            LOG_DEBUG("Socket timeout on connection %d", c);
+                        } else {
+                            LOG_ERROR("recv error: %d", err);
+                        }
+#else
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            LOG_DEBUG("Socket timeout on connection %d", c);
+                        } else {
+                            LOG_ERROR("recv error: %s", strerror(errno));
+                        }
+#endif
+                    }
                     broken = 1;
                     break;
                 }
-                buffer = new_buf;
-            }
 
-            int r = recv(c, buffer + total_read, buf_size - total_read - 1, 0);
-            if (r <= 0) {
-                if (r == 0) {
-                    LOG_DEBUG("Client disconnected");
-                } else {
-#ifdef _WIN32
-                    int err = WSAGetLastError();
-                    if (err == WSAETIMEDOUT) {
-                        LOG_DEBUG("Socket timeout on connection %d", c);
-                    } else {
-                        LOG_ERROR("recv error: %d", err);
-                    }
-#else
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        LOG_DEBUG("Socket timeout on connection %d", c);
-                    } else {
-                        LOG_ERROR("recv error: %s", strerror(errno));
-                    }
-#endif
-                }
-                broken = 1;
-                break;
-            }
-
-            total_read += r;
-            buffer[total_read] = '\0';
-            if (!headers_done) {
-                headers_end = strstr(buffer, "\r\n\r\n");
-                if (headers_end) {
-                    headers_done = true;
-                    char method[16] = {0};
-                    if (sscanf(buffer, "%15s", method) == 1) { 
-                        if (strcmp(method, "POST") == 0) {
-                            char* cl = get_header_value(buffer, "Content-Length:");
-                            if (cl) {
-                                content_length = atoi(cl);
-                                if (content_length < 0 || content_length > 10*1024*1024) {
-                                    LOG_WARN("Invalid content length: %d", content_length);
+                total_read += r;
+                buffer[total_read] = '\0';
+                if (!headers_done) {
+                    headers_end = strstr(buffer, "\r\n\r\n");
+                    if (headers_end) {
+                        headers_done = true;
+                        char method[16] = {0};
+                        if (sscanf(buffer, "%15s", method) == 1) {
+                            if (strcmp(method, "POST") == 0) {
+                                char* cl = get_header_value(buffer, "Content-Length:");
+                                if (cl) {
+                                    content_length = atoi(cl);
+                                    if (content_length < 0 || content_length > 10*1024*1024) {
+                                        LOG_WARN("Invalid content length: %d", content_length);
+                                        SAFE_FREE(cl);
+                                        broken = 1;
+                                        break;
+                                    }
                                     SAFE_FREE(cl);
-                                    broken = 1;
-                                    break;
                                 }
-                                SAFE_FREE(cl);
                             }
                         }
                     }
                 }
-            }
 
-            if (headers_done) {
-                size_t body_received = total_read - (headers_end - buffer + 4);
-                if (body_received >= (size_t)content_length) break;
-            }
-        }
-
-        if (!broken && total_read > 0 && headers_done) {
-            size_t headers_len = headers_end - buffer + 4;
-            if (headers_len >= 2) buffer[headers_len - 2] = '\0';
-
-            char* headers_copy = NULL;
-            char stack_headers[4096];
-            if (headers_len < sizeof(stack_headers)) {
-                memcpy(stack_headers, buffer, headers_len);
-                stack_headers[headers_len] = '\0';
-                headers_copy = stack_headers;
-            } else {
-                headers_copy = malloc(headers_len + 1);
-                if (!headers_copy) {
-                    LOG_ERROR("Failed to allocate headers copy of size %zu", headers_len + 1);
-                    SOCKET_CLOSE(c);
-                    continue;
+                if (headers_done) {
+                    size_t body_received = total_read - (headers_end - buffer + 4);
+                    if (body_received >= (size_t)content_length) break;
                 }
-                memcpy(headers_copy, buffer, headers_len);
-                headers_copy[headers_len] = '\0';
             }
 
-            char* body = NULL;
-            char stack_body[4096];
-            if (content_length > 0) {
-                if (content_length < sizeof(stack_body)) {
-                    memcpy(stack_body, buffer + headers_len, content_length);
-                    stack_body[content_length] = '\0';
-                    body = stack_body;
+            if (!broken && total_read > 0 && headers_done) {
+                size_t headers_len = headers_end - buffer + 4;
+                if (headers_len >= 2) buffer[headers_len - 2] = '\0';
+
+                char* headers_copy = NULL;
+                char stack_headers[4096];
+                if (headers_len < sizeof(stack_headers)) {
+                    memcpy(stack_headers, buffer, headers_len);
+                    stack_headers[headers_len] = '\0';
+                    headers_copy = stack_headers;
                 } else {
-                    body = malloc(content_length + 1);
-                    if (!body) {
-                        LOG_ERROR("Failed to allocate body buffer of size %d", content_length + 1);
-                        if (headers_copy != stack_headers) free(headers_copy);
-                        SOCKET_CLOSE(c);
-                        continue;
+                    headers_copy = malloc(headers_len + 1);
+                    if (!headers_copy) {
+                        LOG_ERROR("Failed to allocate headers copy of size %zu", headers_len + 1);
+                        broken = 1;
+                    } else {
+                        memcpy(headers_copy, buffer, headers_len);
+                        headers_copy[headers_len] = '\0';
                     }
-                    memcpy(body, buffer + headers_len, content_length);
-                    body[content_length] = '\0';
                 }
+
+                char* body = NULL;
+                char stack_body[4096];
+                if (!broken && content_length > 0) {
+                    if (content_length < sizeof(stack_body)) {
+                        memcpy(stack_body, buffer + headers_len, content_length);
+                        stack_body[content_length] = '\0';
+                        body = stack_body;
+                    } else {
+                        body = malloc(content_length + 1);
+                        if (!body) {
+                            LOG_ERROR("Failed to allocate body buffer of size %d", content_length + 1);
+                            if (headers_copy != stack_headers) free(headers_copy);
+                            broken = 1;
+                        } else {
+                            memcpy(body, buffer + headers_len, content_length);
+                            body[content_length] = '\0';
+                        }
+                    }
+                }
+
+                if (!broken) {
+                    keep_socket = handle_single_request(c, headers_copy, body, headers_len, content_length, true);
+                    if (keep_socket) {
+                        keep_alive_loop = 1;
+                    }
+                }
+
+                if (headers_copy != stack_headers) free(headers_copy);
+                if (body != stack_body && body != NULL) free(body);
             }
 
-            int keep_socket = handle_single_request(c, headers_copy, body, headers_len, content_length, true);
-
-            if (headers_copy != stack_headers) free(headers_copy);
-            if (body != stack_body && body != NULL) free(body);
+            if (!keep_alive_loop) {
+                SOCKET_CLOSE(c);
+            }
         }
-
-        if (!keep_socket) SOCKET_CLOSE(c);
     }
 
     free(buffer);
@@ -317,8 +329,10 @@ void enqueue_job(int client_socket) {
         return;
     }
     if (job_count == QUEUE_CAP) {
-        LOG_WARN("Job queue is full, dropping connection %d", client_socket);
+        LOG_WARN("Job queue is full, sending 503 to connection %d", client_socket);
         thread_mutex_unlock(&job_mutex);
+        const char* busy_resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 29\r\nConnection: close\r\n\r\nServer is overloaded, retry.";
+        send(client_socket, busy_resp, (int)strlen(busy_resp), 0);
         SOCKET_CLOSE(client_socket);
         return;
     }
