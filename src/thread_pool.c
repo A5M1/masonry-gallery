@@ -127,8 +127,8 @@ static void* worker_thread(void* arg) {
                     } else {
 #ifdef _WIN32
                         int err = WSAGetLastError();
-                        if (err == WSAETIMEDOUT) {
-                            LOG_DEBUG("Socket timeout on connection %d", c);
+                        if (err == WSAETIMEDOUT || err == WSAEWOULDBLOCK || err == WSAENOTSOCK) {
+                            LOG_DEBUG("Socket non-fatal error %d on connection %d", err, c);
                         } else {
                             LOG_ERROR("recv error: %d", err);
                         }
@@ -229,6 +229,7 @@ static void* worker_thread(void* arg) {
 
             if (!keep_alive_loop) {
                 SOCKET_CLOSE(c);
+                break;
             }
         }
     }

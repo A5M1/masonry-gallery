@@ -8,6 +8,17 @@ const log = (...args) => DEBUG && console.log("[mover]", ...args);
 const warn = (...args) => console.warn("[mover]", ...args);
 const error = (...args) => console.error("[mover]", ...args);
 
+const DEFAULT_VOLUME = 0.1;
+
+function setVolumeCookie(value) {
+	document.cookie = `galleria_volume=${value}; path=/; max-age=${60 * 60 * 24 * 365}`;
+}
+
+function getVolumeCookie() {
+	const match = document.cookie.match(/galleria_volume=([^;]+)/);
+	return match ? parseFloat(match[1]) : DEFAULT_VOLUME;
+}
+
 const query = new URLSearchParams(location.search);
 const dir = query.get("dir") || "";
 const videoExts = new Set(["mp4", "webm", "mov", "avi", "mkv"]);
@@ -303,16 +314,14 @@ function openMedia(src) {
 		afterShow: function (instance, current) {
 			const video = current.$content.find("video").get(0);
 			if (video) {
-				Object.assign(video, {
-					controls: true,
-					preload: "metadata",
-					muted: true,
-					loop: true
-				});
+				const volume = getVolumeCookie();
+				video.muted = false;
+				video.volume = volume;
 				const playPromise = video.play();
 				if (playPromise && typeof playPromise.then === "function") {
 					playPromise.catch(() => {
-						video.muted = true;
+						video.muted = false;
+						video.volume = volume;
 						video.play();
 					});
 				}
@@ -427,12 +436,15 @@ function showCurrent() {
 	if (["jpg", "jpeg", "png", "gif", "webp", "bmp"].includes(ext)) {
 		preview.innerHTML = `<img data-fancybox src="${item}" style="cursor:pointer;" />`;
 	} else if (isVideoFile(item)) {
+		const volume = getVolumeCookie();
 		preview.innerHTML = `
-			<video id="previewVideo" autoplay muted loop playsinline style="cursor:pointer; max-width:100%; max-height:100%;">
+			<video id="previewVideo" autoplay  loop playsinline style="cursor:pointer; max-width:100%; max-height:100%;">
 				<source src="${item}" type="${getVideoMime(ext)}">
 			</video>`;
 		const video = document.getElementById("previewVideo");
 		if (video) {
+			video.muted = false;
+			video.volume = volume;
 			video.addEventListener("loadedmetadata", () =>
 				log("preview loadedmetadata", {item, duration: video.duration})
 			);
