@@ -3,6 +3,7 @@
 #include "logging.h"
 #include "http.h"
 #include "common.h"
+#include "exception_handler.h"
 #define QUEUE_CAP 1024
 
 static int* job_ring;
@@ -80,6 +81,9 @@ static unsigned __stdcall worker_thread(void* arg) {
 static void* worker_thread(void* arg) {
 #endif
     (void)arg;
+
+    install_thread_exception_handler();
+
     size_t buf_size = 8192;
     char* buffer = malloc(buf_size);
     if (!buffer) {
@@ -90,6 +94,7 @@ static void* worker_thread(void* arg) {
         return NULL;
 #endif
     }
+
     for (;;) {
         int c = dequeue_job();
         if (c < 0) break;

@@ -242,6 +242,39 @@ void install_exception_handlers(void) {
     SetUnhandledExceptionFilter(exception_filter);
 }
 
+static LONG WINAPI worker_exception_filter(EXCEPTION_POINTERS* ep) {
+    LOG_ERROR("=== UNHANDLED EXCEPTION IN WORKER THREAD ===");
+    
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    const char* desc = exception_code_description(code);
+    
+    LOG_ERROR("Exception Code: 0x%08x (%s)", (unsigned)code, desc);
+    LOG_ERROR("Exception Address: %p", ep->ExceptionRecord->ExceptionAddress);
+    
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        ULONG_PTR access_type = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR address = ep->ExceptionRecord->ExceptionInformation[1];
+        LOG_ERROR("Access Violation: %s at address %p",
+            access_type == 0 ? "Read" : (access_type == 1 ? "Write" : "DEP"),
+            (void*)address);
+    }
+    
+    DWORD pid = GetCurrentProcessId();
+    DWORD tid = GetCurrentThreadId();
+    LOG_ERROR("Process ID: %u, Thread ID: %u", (unsigned)pid, (unsigned)tid);
+    
+    write_register_state(ep);
+    write_backtrace();
+    write_minidump_with_filename(ep);
+    
+    LOG_ERROR("Worker thread terminating due to unhandled exception");
+    ExitProcess(1);
+}
+
+void install_thread_exception_handler(void) {
+    SetUnhandledExceptionFilter(worker_exception_filter);
+}
+
 #else // POSIX
 
 static const char* signal_name(int sig) {
@@ -303,5 +336,32 @@ void install_exception_handlers(void) {
     signal(SIGFPE, signal_handler);
     signal(SIGILL, signal_handler);
     signal(SIGBUS, signal_handler);
+}
+
+static void worker_signal_handler(int sig) {
+    LOG_ERROR("=== SIGNAL HANDLER IN WORKER THREAD ===");
+    LOG_ERROR("Received signal %d (%s)", sig, signal_name(sig));
+    
+    unsigned int pid = (unsigned int)getpid();
+    unsigned long tid = 0;
+#if defined(__linux__)
+    tid = (unsigned long)syscall(SYS_gettid);
+#else
+    tid = (unsigned long)pthread_self();
+#endif
+    LOG_ERROR("Process=%u Thread=%lu", pid, tid);
+    
+    write_backtrace();
+    
+    LOG_ERROR("Worker thread terminating due to unhandled exception");
+    _exit(1);
+}
+
+void install_thread_exception_handler(void) {
+    signal(SIGSEGV, worker_signal_handler);
+    signal(SIGABRT, worker_signal_handler);
+    signal(SIGFPE, worker_signal_handler);
+    signal(SIGILL, worker_signal_handler);
+    signal(SIGBUS, worker_signal_handler);
 }
 #endif
