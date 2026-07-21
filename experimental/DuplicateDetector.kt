@@ -386,7 +386,7 @@ fun printTextOutput(
             fileMap.toSortedMap().forEach { (filePath, locations) ->
                 val fileName = File(filePath).name
                 locations.sortedBy { it.first }.forEach { (line, context) ->
-                    println("     📍 $fileName:$line")
+                    println("     @ $fileName:$line")
                     context?.let {
                         println("     " + it.replace("\n", "\n     "))
                     }
@@ -397,9 +397,9 @@ fun printTextOutput(
     
     println()
     if (!dupFound) {
-        println("  ✅ No file-spanning naming conflicts found.")
+        println("  [OK] No file-spanning naming conflicts found.")
     } else {
-        println("  ✅ Scan complete.")
+        println("  [OK] Scan complete.")
     }
     println()
 }
