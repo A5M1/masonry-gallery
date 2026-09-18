@@ -164,8 +164,8 @@ struct thumbdb_instance {
     index_table_t index_table;
     file_header_t file_header;
     uint64_t current_record_seq;
-    uint64_t last_filename_delta;
-    uint64_t last_timestamp_delta;
+    uint64_t last_filename_value;
+    uint64_t last_timestamp_value;
     int tx_active;
     rh_table_t* tx_snapshot;
     thread_mutex_t mutex;
@@ -357,6 +357,34 @@ static int read_varint(FILE* f, uint64_t* out) {
     } while (byte & MV_BITMASKS.varint_continue_bit);
     *out = result;
     return 0;
+}
+
+static uint64_t zigzag_encode(int64_t value) {
+    return (uint64_t)((value << 1) ^ (value >> 63));
+}
+
+static int64_t zigzag_decode(uint64_t value) {
+    return (int64_t)((value >> 1) ^ -(value & 1));
+}
+
+static int write_signed_varint(FILE* f, int64_t value) {
+    return write_varint(f, zigzag_encode(value));
+}
+
+static int read_signed_varint(FILE* f, int64_t* out) {
+    uint64_t raw;
+    if (read_varint(f, &raw) != 0) return -1;
+    *out = zigzag_decode(raw);
+    return 0;
+}
+
+static size_t write_varint_to_buf(uint8_t* buf, size_t pos, uint64_t value) {
+    while (value >= 0x80) {
+        buf[pos++] = (uint8_t)((value & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    buf[pos++] = (uint8_t)(value & 0x7F);
+    return pos;
 }
 
 static int read_varint_with_size(FILE* f, uint64_t* out, size_t* bytes_read) {
@@ -1118,7 +1146,7 @@ static int load_database(thumbdb_instance_t* inst) {
         } else { strncpy(full_path, suffix, PATH_MAX - 1); full_path[PATH_MAX - 1] = '\0'; }
         add_dir_to_table(inst, full_path);
     }
-    inst->last_filename_delta = 0; inst->last_timestamp_delta = 0; inst->current_record_seq = 0;
+    inst->last_filename_value = 0; inst->last_timestamp_value = 0; inst->current_record_seq = 0;
     int is_first = 1; long records_end_pos = 0; int in_transaction = 0;
     for (;;) {
         uint8_t peek; long pos = ftell(f);
@@ -1548,7 +1576,7 @@ int thumbdb_compact(thumbdb_instance_t* inst) {
         write_varint(f, prefix_len); write_varint(f, suffix_len);
         if (suffix_len > 0) fwrite(inst->dir_table.dirs[i] + prefix_len, 1, suffix_len, f);
     }
-    inst->last_filename_delta = 0; inst->last_timestamp_delta = 0; inst->current_record_seq = 0;
+    inst->last_filename_value = 0; inst->last_timestamp_value = 0; inst->current_record_seq = 0;
     for (size_t i = 0; i < entry_count; i++) {
         long record_offset = ftell(f);
         record_t rec = {0};
@@ -1579,7 +1607,7 @@ int thumbdb_compact(thumbdb_instance_t* inst) {
         if (rename(tmp_path, inst->db_path) != 0) { LOG_ERROR("thumbdb_compact: failed to rename %s to %s", tmp_path, inst->db_path); rename(bak_path, inst->db_path); thread_mutex_unlock(&inst->mutex); return -1; }
         platform_file_delete(bak_path);
     }
-    inst->last_filename_delta = 0; inst->last_timestamp_delta = 0; inst->current_record_seq = 0;
+    inst->last_filename_value = 0; inst->last_timestamp_value = 0; inst->current_record_seq = 0;
     thread_mutex_unlock(&inst->mutex);
     return 0;
 }
