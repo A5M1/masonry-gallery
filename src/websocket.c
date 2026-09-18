@@ -8,6 +8,7 @@
 #include "utils.h"
 #include "directory.h"
 #include "platform.h"
+#include "thumbs.h"
 
 #define MAX_WS_CLIENTS 256
 
@@ -115,9 +116,12 @@ static void ws_update_topic(int c, const char* msg) {
     }
     if (l >= PATH_MAX) l = PATH_MAX - 1;
 
+    char raw_topic[PATH_MAX];
+    if (l > 0) memcpy(raw_topic, start, l);
+    raw_topic[l] = '\0';
+
     char topic[PATH_MAX];
-    if (l > 0) memcpy(topic, start, l);
-    topic[l] = '\0';
+    make_safe_dir_name_from(raw_topic, topic, sizeof(topic));
 
     ws_lock();
     for (int i = 0; i < MAX_WS_CLIENTS; ++i) {
