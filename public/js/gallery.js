@@ -497,7 +497,7 @@ function setupThumbSocket() {
 					var img = document.querySelector('img[data-media="' + o.media + '"]');
 					if (img) {
 						var currentSrc = img.getAttribute("src") || "";
-						if (!currentSrc || currentSrc.indexOf("placeholder") !== -1 || currentSrc.indexOf("base64") !== -1) {
+						if (currentSrc !== o.thumbUrl) {
 							img.src = o.thumbUrl;
 							if (o.thumbUrl.indexOf("-small.") !== -1) img.setAttribute("data-thumb-small", o.thumbUrl);
 							if (o.thumbUrl.indexOf("-large.") !== -1) img.setAttribute("data-thumb-large", o.thumbUrl);
