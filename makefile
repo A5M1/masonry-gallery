@@ -1,6 +1,10 @@
 # ======================================================
 # Compilers
+<<<<<<< Updated upstream
 CC_X64=x86_64-w64-mingw32-clang
+=======
+CC_x86=/clang64/bin/clang
+>>>>>>> Stashed changes
 CC_ARM=aarch64-w64-mingw32-clang
 CC_LINUX_X64=clang
 CC_LINUX_ARM=aarch64-linux-gnu-clang
