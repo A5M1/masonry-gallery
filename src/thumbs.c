@@ -518,7 +518,15 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
 
     char safe_topic[PATH_MAX];
     safe_topic[0] = '\0';
-    make_safe_dir_name_from(parent[0] ? parent : ".", safe_topic, sizeof(safe_topic));
+    {
+        const char* last_sep = strrchr(per_thumbs_root, DIR_SEP);
+        if (last_sep && *(last_sep + 1)) {
+            strncpy(safe_topic, last_sep + 1, sizeof(safe_topic) - 1);
+            safe_topic[sizeof(safe_topic) - 1] = '\0';
+        } else {
+            make_safe_dir_name_from(parent[0] ? parent : ".", safe_topic, sizeof(safe_topic));
+        }
+    }
 
     uint8_t digest[MD5_DIGEST_LENGTH];
     char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
