@@ -134,6 +134,8 @@ typedef struct {
     uint32_t duration;
     uint32_t crc32;
     uint8_t orientation;
+    uint8_t perceptual_hash[8];
+    int perceptual_hash_valid;
     char* codec_info;
     double gps_lat;
     double gps_lon;
@@ -684,28 +686,18 @@ static int write_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is
     if (endptr == rec->filename || *endptr != '\0') is_numeric_key = 0;
 
     if (is_numeric_key) {
-        uint64_t fv = filename_val;
-        uint8_t fname_buf[10];
-        size_t fname_len = 0;
-        while (fv >= MV_BITMASKS.varint_continue_bit) {
-            fname_buf[fname_len++] = (uint8_t)((fv & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
-            fv >>= 7;
+        if (rec->record_sequence == 0) {
+            buf_pos = write_varint_to_buf(record_buf, buf_pos, filename_val);
+        } else {
+            int64_t delta = (int64_t)filename_val - (int64_t)inst->last_filename_value;
+            buf_pos = write_varint_to_buf(record_buf, buf_pos, zigzag_encode(delta));
         }
-        fname_buf[fname_len++] = (uint8_t)(fv & MV_BITMASKS.varint_data_mask);
-        for (size_t i = 0; i < fname_len; i++) record_buf[buf_pos++] = fname_buf[i];
+        inst->last_filename_value = filename_val;
     } else {
         record_buf[buf_pos++] = 0x00;
         size_t key_len = strlen(rec->filename);
         if (key_len > 255) key_len = 255;
-        uint64_t kl = (uint64_t)key_len;
-        uint8_t len_buf[5];
-        size_t len_pos = 0;
-        while (kl >= MV_BITMASKS.varint_continue_bit) {
-            len_buf[len_pos++] = (uint8_t)((kl & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
-            kl >>= 7;
-        }
-        len_buf[len_pos++] = (uint8_t)(kl & MV_BITMASKS.varint_data_mask);
-        for (size_t i = 0; i < len_pos; i++) record_buf[buf_pos++] = len_buf[i];
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)key_len);
         memcpy(record_buf + buf_pos, rec->filename, key_len);
         buf_pos += key_len;
     }
@@ -719,56 +711,56 @@ static int write_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is
     }
 
     if (rec->meta.has_extensions) {
-        size_t ext_start = buf_pos;
-        buf_pos++;
+        uint8_t ext_buf[2048];
+        size_t ext_pos = 0;
         if (rec->width > 0 && rec->height > 0) {
-            record_buf[buf_pos++] = MV_EXT_TAGS.dimensions_delta;
-            uint64_t w = rec->width, h = rec->height;
-            uint8_t w_buf[10], h_buf[10];
-            size_t w_len = 0, h_len = 0;
-            while (w >= MV_BITMASKS.varint_continue_bit) { w_buf[w_len++] = (uint8_t)((w & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit); w >>= 7; }
-            w_buf[w_len++] = (uint8_t)(w & MV_BITMASKS.varint_data_mask);
-            while (h >= MV_BITMASKS.varint_continue_bit) { h_buf[h_len++] = (uint8_t)((h & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit); h >>= 7; }
-            h_buf[h_len++] = (uint8_t)(h & MV_BITMASKS.varint_data_mask);
-            size_t total_dim_len = w_len + h_len;
-            uint8_t len_buf[10]; size_t len_len = 0;
-            uint64_t tl = total_dim_len;
-            while (tl >= MV_BITMASKS.varint_continue_bit) { len_buf[len_len++] = (uint8_t)((tl & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit); tl >>= 7; }
-            len_buf[len_len++] = (uint8_t)(tl & MV_BITMASKS.varint_data_mask);
-            for (size_t i = 0; i < len_len; i++) record_buf[buf_pos++] = len_buf[i];
-            for (size_t i = 0; i < w_len; i++) record_buf[buf_pos++] = w_buf[i];
-            for (size_t i = 0; i < h_len; i++) record_buf[buf_pos++] = h_buf[i];
+            ext_buf[ext_pos++] = MV_EXT_TAGS.dimensions_delta;
+            ext_buf[ext_pos++] = 0;
         }
-        if (rec->orientation > 0) { record_buf[buf_pos++] = MV_EXT_TAGS.orientation; record_buf[buf_pos++] = 1; record_buf[buf_pos++] = rec->orientation; }
+        if (rec->orientation > 0) {
+            ext_buf[ext_pos++] = MV_EXT_TAGS.orientation;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, 1);
+            ext_buf[ext_pos++] = rec->orientation;
+        }
         if (rec->codec_info && rec->codec_info[0]) {
             size_t codec_len = strlen(rec->codec_info);
             if (codec_len > 255) codec_len = 255;
-            record_buf[buf_pos++] = MV_EXT_TAGS.codec_info;
-            record_buf[buf_pos++] = (uint8_t)codec_len;
-            memcpy(record_buf + buf_pos, rec->codec_info, codec_len);
-            buf_pos += codec_len;
+            ext_buf[ext_pos++] = MV_EXT_TAGS.codec_info;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, (uint64_t)codec_len);
+            memcpy(ext_buf + ext_pos, rec->codec_info, codec_len);
+            ext_pos += codec_len;
         }
         if (rec->gps_lat != 0.0 || rec->gps_lon != 0.0) {
-            record_buf[buf_pos++] = MV_EXT_TAGS.gps_coords;
-            record_buf[buf_pos++] = 8;
+            ext_buf[ext_pos++] = MV_EXT_TAGS.gps_coords;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, 8);
             float lat_f = (float)rec->gps_lat, lon_f = (float)rec->gps_lon;
             uint32_t lat_bits, lon_bits;
             memcpy(&lat_bits, &lat_f, 4); memcpy(&lon_bits, &lon_f, 4);
-            record_buf[buf_pos++] = (lat_bits >> 0) & 0xFF; record_buf[buf_pos++] = (lat_bits >> 8) & 0xFF;
-            record_buf[buf_pos++] = (lat_bits >> 16) & 0xFF; record_buf[buf_pos++] = (lat_bits >> 24) & 0xFF;
-            record_buf[buf_pos++] = (lon_bits >> 0) & 0xFF; record_buf[buf_pos++] = (lon_bits >> 8) & 0xFF;
-            record_buf[buf_pos++] = (lon_bits >> 16) & 0xFF; record_buf[buf_pos++] = (lon_bits >> 24) & 0xFF;
+            ext_buf[ext_pos++] = (lat_bits >> 0) & 0xFF; ext_buf[ext_pos++] = (lat_bits >> 8) & 0xFF;
+            ext_buf[ext_pos++] = (lat_bits >> 16) & 0xFF; ext_buf[ext_pos++] = (lat_bits >> 24) & 0xFF;
+            ext_buf[ext_pos++] = (lon_bits >> 0) & 0xFF; ext_buf[ext_pos++] = (lon_bits >> 8) & 0xFF;
+            ext_buf[ext_pos++] = (lon_bits >> 16) & 0xFF; ext_buf[ext_pos++] = (lon_bits >> 24) & 0xFF;
         }
-        uint8_t ext_len = (uint8_t)(buf_pos - ext_start - 1);
-        record_buf[ext_start] = ext_len;
+        if (rec->perceptual_hash_valid) {
+            ext_buf[ext_pos++] = MV_EXT_TAGS.perceptual_hash;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, 8);
+            memcpy(ext_buf + ext_pos, rec->perceptual_hash, 8);
+            ext_pos += 8;
+        }
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)ext_pos);
+        memcpy(record_buf + buf_pos, ext_buf, ext_pos);
+        buf_pos += ext_pos;
     }
 
-    uint64_t ts_val = rec->timestamp;
-    uint8_t ts_buf[10];
-    size_t ts_len = 0;
-    while (ts_val >= MV_BITMASKS.varint_continue_bit) { ts_buf[ts_len++] = (uint8_t)((ts_val & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit); ts_val >>= 7; }
-    ts_buf[ts_len++] = (uint8_t)(ts_val & MV_BITMASKS.varint_data_mask);
-    for (size_t i = 0; i < ts_len; i++) record_buf[buf_pos++] = ts_buf[i];
+    int64_t ts_delta = (int64_t)rec->timestamp - (int64_t)inst->last_timestamp_value;
+    buf_pos = write_varint_to_buf(record_buf, buf_pos, zigzag_encode(ts_delta));
+    inst->last_timestamp_value = rec->timestamp;
+
+    if (rec->meta.has_extensions && (rec->width > 0 && rec->height > 0)) {
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)rec->width);
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)rec->height);
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)rec->duration);
+    }
 
     if (buf_pos + rec->hash_len + 6 > sizeof(record_buf)) return -1;
     for (size_t i = 0; i < rec->hash_len; i++) record_buf[buf_pos++] = rec->hash[i];
@@ -808,10 +800,10 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
     if (read_bit_packed_indexes(f, &rec->dir_indexes, rec->dir_count, inst->dir_table.count > 0 ? inst->dir_table.count : 1) != 0)
         return -1;
 
-    uint64_t filename_val;
-    if (read_varint(f, &filename_val) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    int64_t filename_delta;
+    if (read_signed_varint(f, &filename_delta) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
 
-    if (filename_val == 0 && !is_first) {
+    if (filename_delta == 0 && !is_first) {
         long before_strlen = ftell(f);
         uint64_t maybe_strlen;
         size_t varint_bytes;
@@ -822,16 +814,25 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
                 free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
             }
             rec->filename[maybe_strlen] = '\0';
+            inst->last_filename_value = 0;
         } else {
             fseek(f, before_strlen, SEEK_SET);
+            uint64_t abs_val = (uint64_t)filename_delta;
             rec->filename = malloc(32);
             if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-            snprintf(rec->filename, 32, "%llu", (unsigned long long)filename_val);
+            snprintf(rec->filename, 32, "%llu", (unsigned long long)abs_val);
         }
     } else {
+        uint64_t abs_val;
+        if (is_first) {
+            abs_val = (uint64_t)filename_delta;
+        } else {
+            abs_val = inst->last_filename_value + (uint64_t)filename_delta;
+        }
+        inst->last_filename_value = abs_val;
         rec->filename = malloc(32);
         if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-        snprintf(rec->filename, 32, "%llu", (unsigned long long)filename_val);
+        snprintf(rec->filename, 32, "%llu", (unsigned long long)abs_val);
     }
 
     uint8_t meta;
@@ -846,6 +847,7 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
         rec->meta.hash_mode = inst->file_header.default_hash_mode;
     }
 
+    int dims_in_ext = 0;
     if (rec->meta.has_extensions) {
         uint64_t ext_len;
         if (read_varint(f, &ext_len) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
@@ -859,10 +861,7 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
             if (read_varint_with_size(f, &value_len, &varint_size) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
             ext_bytes_read += varint_size;
             if (tag == MV_EXT_TAGS.dimensions_delta) {
-                uint64_t w, h; size_t w_size, h_size;
-                if (read_varint_with_size(f, &w, &w_size) != 0 || read_varint_with_size(f, &h, &h_size) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-                rec->width = (uint32_t)w; rec->height = (uint32_t)h;
-                ext_bytes_read += w_size + h_size;
+                dims_in_ext = 1;
             } else if (tag == MV_EXT_TAGS.orientation && value_len == 1) {
                 if (fread(&rec->orientation, 1, 1, f) != 1) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
                 ext_bytes_read++;
@@ -876,6 +875,9 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
                 float lat_f, lon_f;
                 if (read_float_le(f, &lat_f) != 0 || read_float_le(f, &lon_f) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
                 rec->gps_lat = (double)lat_f; rec->gps_lon = (double)lon_f; ext_bytes_read += 8;
+            } else if (tag == MV_EXT_TAGS.perceptual_hash && value_len == 8) {
+                if (fread(rec->perceptual_hash, 1, 8, f) != 8) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+                rec->perceptual_hash_valid = 1; ext_bytes_read += 8;
             } else {
                 for (uint64_t i = 0; i < value_len; i++) {
                     uint8_t dummy;
@@ -886,9 +888,18 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
         }
     }
 
-    uint64_t ts_val;
-    if (read_varint(f, &ts_val) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-    rec->timestamp = ts_val;
+    int64_t ts_delta;
+    if (read_signed_varint(f, &ts_delta) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    rec->timestamp = (uint64_t)((int64_t)inst->last_timestamp_value + ts_delta);
+    inst->last_timestamp_value = rec->timestamp;
+
+    if (dims_in_ext) {
+        uint64_t w, h, dur;
+        if (read_varint(f, &w) != 0 || read_varint(f, &h) != 0 || read_varint(f, &dur) != 0) {
+            free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
+        }
+        rec->width = (uint32_t)w; rec->height = (uint32_t)h; rec->duration = (uint32_t)dur;
+    }
 
     rec->hash_len = get_hash_length(rec->meta.hash_mode);
     if (rec->hash_len > 0) {
@@ -1057,6 +1068,8 @@ static int thumbdb_recover_from_corruption(thumbdb_instance_t* inst) {
     inst->rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
     if (!inst->rh_tbl) { fclose(f_corrupt); return -1; }
 
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp;
+
     fseek(f_corrupt, 0, SEEK_END);
     long file_size = ftell(f_corrupt);
     fseek(f_corrupt, 0, SEEK_SET);
@@ -1146,7 +1159,7 @@ static int load_database(thumbdb_instance_t* inst) {
         } else { strncpy(full_path, suffix, PATH_MAX - 1); full_path[PATH_MAX - 1] = '\0'; }
         add_dir_to_table(inst, full_path);
     }
-    inst->last_filename_value = 0; inst->last_timestamp_value = 0; inst->current_record_seq = 0;
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp; inst->current_record_seq = 0;
     int is_first = 1; long records_end_pos = 0; int in_transaction = 0;
     for (;;) {
         uint8_t peek; long pos = ftell(f);
@@ -1576,7 +1589,7 @@ int thumbdb_compact(thumbdb_instance_t* inst) {
         write_varint(f, prefix_len); write_varint(f, suffix_len);
         if (suffix_len > 0) fwrite(inst->dir_table.dirs[i] + prefix_len, 1, suffix_len, f);
     }
-    inst->last_filename_value = 0; inst->last_timestamp_value = 0; inst->current_record_seq = 0;
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp; inst->current_record_seq = 0;
     for (size_t i = 0; i < entry_count; i++) {
         long record_offset = ftell(f);
         record_t rec = {0};
@@ -1607,7 +1620,7 @@ int thumbdb_compact(thumbdb_instance_t* inst) {
         if (rename(tmp_path, inst->db_path) != 0) { LOG_ERROR("thumbdb_compact: failed to rename %s to %s", tmp_path, inst->db_path); rename(bak_path, inst->db_path); thread_mutex_unlock(&inst->mutex); return -1; }
         platform_file_delete(bak_path);
     }
-    inst->last_filename_value = 0; inst->last_timestamp_value = 0; inst->current_record_seq = 0;
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp; inst->current_record_seq = 0;
     thread_mutex_unlock(&inst->mutex);
     return 0;
 }
@@ -1703,20 +1716,16 @@ int thumbdb_validate(thumbdb_instance_t* inst) {
     for (;;) {
         long record_start = ftell(f);
         uint8_t op; if (fread(&op, 1, 1, f) != 1) break;
-        if (op == MV_OPCODES.delete_op) { uint64_t filename_ref; if (read_varint(f, &filename_ref) != 0) break; records_validated++; continue; }
+        if (op == MV_OPCODES.delete_op) { uint64_t filename_ref; if (read_varint(f, &filename_ref) != 0) break; uint64_t ts_ref; if (read_varint(f, &ts_ref) != 0) break; uint8_t end_ref; if (fread(&end_ref, 1, 1, f) != 1 || end_ref != MV_OPCODES.end) break; records_validated++; continue; }
         if (op != MV_OPCODES.begin) break;
-        long crc_start = ftell(f);
         uint64_t seq, dir_count; if (read_varint(f, &seq) != 0 || read_varint(f, &dir_count) != 0) break;
         { uint32_t* dir_indexes = NULL; size_t table_size = inst->dir_table.count > 0 ? inst->dir_table.count : 1; if (read_bit_packed_indexes(f, &dir_indexes, (size_t)dir_count, table_size) != 0) break; free(dir_indexes); }
-        uint64_t filename_delta; if (read_varint(f, &filename_delta) != 0) break;
+        int64_t filename_delta; if (read_signed_varint(f, &filename_delta) != 0) break;
         uint8_t meta_byte; if (fread(&meta_byte, 1, 1, f) != 1) break;
-        uint64_t ts_delta; if (read_varint(f, &ts_delta) != 0) break;
         int hash_override = (meta_byte >> 1) & 1;
-        hash_mode_t hash_mode = hash_override ? HASH_FULL_MD5 : (hash_mode_t)((flags >> 4) & 3);
-        if (hash_override) { uint8_t hash_mode_byte; if (fread(&hash_mode_byte, 1, 1, f) != 1) break; hash_mode = (hash_mode_t)(hash_mode_byte & 3); }
-        size_t hash_len = 0; switch (hash_mode) { case HASH_FULL_MD5: case HASH_RIPEMD128: hash_len = 16; break; case HASH_HALF_MD5: hash_len = 8; break; default: break; }
-        if (hash_len > 0) fseek(f, (long)hash_len, SEEK_CUR);
+        if (hash_override) { uint8_t hash_mode_byte; if (fread(&hash_mode_byte, 1, 1, f) != 1) break; }
         int has_extensions = meta_byte & 1;
+        int dims_in_ext = 0;
         if (has_extensions) {
             uint64_t ext_len; if (read_varint(f, &ext_len) != 0) break;
             size_t ext_bytes_read = 0;
@@ -1725,20 +1734,31 @@ int thumbdb_validate(thumbdb_instance_t* inst) {
                 ext_bytes_read++;
                 uint64_t value_len; size_t varint_size; if (read_varint_with_size(f, &value_len, &varint_size) != 0) break;
                 ext_bytes_read += varint_size;
-                fseek(f, (long)value_len, SEEK_CUR); ext_bytes_read += (size_t)value_len;
+                if (tag == 0x01) { dims_in_ext = 1; }
+                else { fseek(f, (long)value_len, SEEK_CUR); ext_bytes_read += (size_t)value_len; }
             }
         }
+        int64_t ts_delta; if (read_signed_varint(f, &ts_delta) != 0) break;
+        if (dims_in_ext) { uint64_t w, h, dur; if (read_varint(f, &w) != 0 || read_varint(f, &h) != 0 || read_varint(f, &dur) != 0) break; }
+        hash_mode_t hash_mode = hash_override ? HASH_FULL_MD5 : (hash_mode_t)((flags >> 4) & 3);
+        if (hash_override) {
+            fseek(f, -1, SEEK_CUR);
+            uint8_t hash_mode_byte; if (fread(&hash_mode_byte, 1, 1, f) != 1) break;
+            hash_mode = (hash_mode_t)(hash_mode_byte & 3);
+        }
+        size_t hash_len = 0; switch (hash_mode) { case HASH_FULL_MD5: case HASH_RIPEMD128: hash_len = 16; break; case HASH_HALF_MD5: hash_len = 8; break; default: break; }
         long crc_end = ftell(f);
+        if (hash_len > 0) fseek(f, (long)hash_len, SEEK_CUR);
         uint32_t stored_crc; if (read_uint32_le(f, &stored_crc) != 0) break;
         uint8_t end_op; if (fread(&end_op, 1, 1, f) != 1 || end_op != MV_OPCODES.end) break;
-        fseek(f, crc_start, SEEK_SET);
-        size_t crc_data_len = (size_t)(crc_end - crc_start);
+        fseek(f, record_start, SEEK_SET);
+        size_t crc_data_len = (size_t)(crc_end - record_start);
         uint8_t* crc_data = malloc(crc_data_len);
         if (!crc_data) break;
         if (fread(crc_data, 1, crc_data_len, f) != crc_data_len) { free(crc_data); break; }
         uint32_t computed_crc; crypto_crc32(crc_data, crc_data_len, &computed_crc); free(crc_data);
         if (stored_crc != computed_crc) { LOG_ERROR("thumbdb_validate: CRC32 mismatch at offset %ld", record_start); crc_errors++; }
-        fseek(f, crc_end + 4 + 1, SEEK_SET);
+        fseek(f, crc_end + (long)hash_len + 4 + 1, SEEK_SET);
         records_validated++;
     }
     fclose(f);
@@ -1828,10 +1848,33 @@ int thumbdb_seek_to_record(thumbdb_instance_t* inst, const char* filename, char*
     uint64_t file_offset = inst->index_table.entries[found_idx].file_offset;
     FILE* f = platform_fopen(inst->db_path, "rb");
     if (!f) { thread_mutex_unlock(&inst->mutex); return -1; }
-    if (fseek(f, (long)file_offset, SEEK_SET) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint64_t saved_fname = inst->last_filename_value;
+    uint64_t saved_ts = inst->last_timestamp_value;
+    inst->last_filename_value = 0;
+    inst->last_timestamp_value = inst->file_header.base_timestamp;
+    int is_first = 1;
+    for (;;) {
+        long pos = ftell(f);
+        if ((uint64_t)pos >= file_offset) break;
+        uint8_t peek;
+        if (fread(&peek, 1, 1, f) != 1) { fseek(f, pos, SEEK_SET); break; }
+        fseek(f, pos, SEEK_SET);
+        if (peek == MV_OPCODES.tx_begin || peek == MV_OPCODES.tx_end || peek == MV_OPCODES.delete_op) {
+            fgetc(f);
+            if (peek == MV_OPCODES.delete_op) { uint64_t dv; read_varint(f, &dv); uint64_t dt; read_varint(f, &dt); fgetc(f); }
+            continue;
+        }
+        if (peek != MV_OPCODES.begin) { fgetc(f); continue; }
+        record_t tmp = {0};
+        if (read_record(inst, f, &tmp, is_first) != 0) { break; }
+        is_first = 0;
+        free_record(&tmp);
+    }
     record_t rec = {0};
-    if (read_record(inst, f, &rec, 0) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    if (read_record(inst, f, &rec, is_first) != 0) { fclose(f); inst->last_filename_value = saved_fname; inst->last_timestamp_value = saved_ts; thread_mutex_unlock(&inst->mutex); return -1; }
     fclose(f);
+    inst->last_filename_value = saved_fname;
+    inst->last_timestamp_value = saved_ts;
     if (strcmp(rec.filename, filename) != 0) { free_record(&rec); thread_mutex_unlock(&inst->mutex); return -1; }
     if (serialize_record_to_value(inst, &rec, buf, buflen) != 0) { free_record(&rec); thread_mutex_unlock(&inst->mutex); return -1; }
     free_record(&rec);
