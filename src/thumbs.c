@@ -468,11 +468,25 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     } else {
         LOG_WARN("record_thumb_job_completion: failed to write WAL entry for %s", job->input);
     }
-    if (wrote_wal) {
-        char per_db[PATH_MAX];
-        snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
-        thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
-        if (tdb) thumbdb_request_compaction(tdb);
+    if (!wrote_wal) return;
+
+    process_wal_chunks(per_thumbs_root);
+    char per_db[PATH_MAX];
+    snprintf(per_db, sizeof(per_db), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root);
+    thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
+    if (!tdb) {
+        LOG_WARN("record_thumb_job_completion: thumbdb instance unavailable for %s", per_db);
+        return;
+    }
+    char committed_key[PATH_MAX];
+    if (thumbdb_find_for_media(tdb, normalized_input, committed_key, sizeof(committed_key)) != 0) {
+        LOG_WARN("record_thumb_job_completion: WAL entry was not committed for %s", normalized_input);
+        return;
+    }
+    thumbdb_request_compaction(tdb);
+    if (thumbdb_perform_requested_compaction(tdb) < 0) {
+        LOG_WARN("record_thumb_job_completion: compaction failed for %s", per_db);
+        return;
     }
     char parent[PATH_MAX];
     parent[0] = '\0';
@@ -1820,7 +1834,7 @@ void count_media_in_dir(const char* dir, progress_t * prog) {
         path_join(full, dir, name);
 
         if (is_file(full) && (has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) {
-            prog->total_files++;
+            prog->total_files += 2;
         }
     }
     dir_close(&it);
