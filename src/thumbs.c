@@ -13,6 +13,7 @@
 atomic_int ffmpeg_active = ATOMIC_VAR_INIT(0);
 static atomic_int magick_active = ATOMIC_VAR_INIT(0);
 #define MAX_MAGICK 2
+#define THUMB_COMMAND_THREADS 1
 #define WAL_DIR_NAME "wal"
 #define WAL_CHUNK_FMT "chunk-%lld-%u-%u.wal"
 static atomic_uint wal_chunk_seq = ATOMIC_VAR_INIT(0);
@@ -284,39 +285,35 @@ static int execute_command_with_limits(const char* cmd, const char* out_log, int
     return ret;
 }
 
-static void generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total);
+static int generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total);
 
 static void build_magick_resize_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, const char* out_esc) {
     if (!dst || dstlen == 0)return;
-    int threads = platform_get_cpu_count();
-    if (threads < 1) threads = 1;
     long mem_mb = platform_get_physical_memory_mb();
     if (mem_mb <= 0) mem_mb = 512;
     long per_proc_mb = mem_mb / (MAX_MAGICK > 0 ? MAX_MAGICK : 1);
     if (per_proc_mb < 256) per_proc_mb = 256;
     snprintf(dst, dstlen, "magick -limit thread %d -limit memory %ldMB -limit map %ldMB %s -resize %dx -quality %d %s",
-        threads, per_proc_mb, per_proc_mb, in_esc, scale, q, out_esc);
+        THUMB_COMMAND_THREADS, per_proc_mb, per_proc_mb, in_esc, scale, q, out_esc);
     LOG_DEBUG("Magick CMD: %s", dst);
 }
 
 static void build_ffmpeg_extract_jpg_cmd(char* dst, size_t dstlen, const char* in_esc, const char* tmp_esc, int scale) {
     if (!dst || dstlen == 0)return;
-    int threads = platform_get_cpu_count(); if (threads < 1) threads = 1;
-    snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1\" -vframes 1 -f image2 -c:v mjpeg %s", threads, in_esc, scale, tmp_esc);
+    snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1\" -vframes 1 -f image2 -c:v mjpeg %s", THUMB_COMMAND_THREADS, in_esc, scale, tmp_esc);
     LOG_DEBUG("FFmpeg Extract CMD: %s", dst);
 }
 
 static void build_ffmpeg_thumb_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, int to_webp, int add_format_rgb, const char* out_esc) {
     if (!dst || dstlen == 0)return;
-    int threads = platform_get_cpu_count(); if (threads < 1) threads = 1;
     if (to_webp) {
         if (add_format_rgb)
-            snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp %s", threads, in_esc, scale, q, out_esc);
+            snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp %s", THUMB_COMMAND_THREADS, in_esc, scale, q, out_esc);
         else
-            snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1\" -vframes 1 -q:v %d -c:v libwebp %s", threads, in_esc, scale, q, out_esc);
+            snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1\" -vframes 1 -q:v %d -c:v libwebp %s", THUMB_COMMAND_THREADS, in_esc, scale, q, out_esc);
     }
     else
-        snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d %s", threads, in_esc, scale, q, out_esc);
+        snprintf(dst, dstlen, "ffmpeg -y -threads %d -i %s -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d %s", THUMB_COMMAND_THREADS, in_esc, scale, q, out_esc);
     LOG_DEBUG("FFmpeg Thumb CMD: %s", dst);
 }
 
@@ -488,9 +485,14 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     for (size_t gi = 0; gi < gf_count && !relurl[0]; ++gi) {
         char folder_real[PATH_MAX];
         if (!real_path(gfolders[gi], folder_real)) continue;
+        normalize_path(folder_real);
         size_t flen = strlen(folder_real);
-        if (strncmp(job->input, folder_real, flen) == 0) {
-            const char* rel = job->input + flen;
+        char folder_prefix[PATH_MAX];
+        strncpy(folder_prefix, normalized_input, flen);
+        folder_prefix[flen] = '\0';
+        if (ascii_stricmp(folder_prefix, folder_real) == 0 &&
+            (normalized_input[flen] == '\0' || normalized_input[flen] == '/' || normalized_input[flen] == '\\')) {
+            const char* rel = normalized_input + flen;
             if (*rel == '/' || *rel == '\\') rel++;
             strncpy(relurl, rel, sizeof(relurl) - 1);
             relurl[sizeof(relurl) - 1] = '\0';
@@ -528,6 +530,9 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
         }
     }
 
+    LOG_DEBUG("record_thumb_job_completion: input=%s relurl=%s topic=%s parent=%s", normalized_input,
+        relurl, safe_topic, parent);
+
     uint8_t digest[MD5_DIGEST_LENGTH];
     char md5hex[MD5_DIGEST_LENGTH * 2 + 1];
     md5hex[0] = '\0';
@@ -542,8 +547,11 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
 }
 static void run_thumb_job(thumb_job_t* job) {
     if (!job) return;
-    generate_thumb_c(job->input, job->output, job->scale, job->q, job->index, job->total);
-    record_thumb_job_completion(job);
+    if (generate_thumb_c(job->input, job->output, job->scale, job->q, job->index, job->total) == 0)
+        record_thumb_job_completion(job);
+    else
+        LOG_WARN("[%d/%d] Thumbnail generation failed; skipping WAL and thumb_ready for %s",
+            job->index, job->total, job->input);
 }
 static void generate_thumb_inline_and_record(const char* input, const char* output, int scale, int q, int index, int total) {
     thumb_job_t temp;
@@ -726,18 +734,35 @@ int is_newer(const char* src, const char* dst) {
     if (platform_stat(dst, &d) != 0) return 1;
     return s.st_mtime > d.st_mtime;
 }
-static void generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total) {
+
+static int run_thumb_command(const char* media_path, int index, int total, const char* label, const char* cmd, int timeout_seconds, int uses_ffmpeg, const char* log_path) {
+    if (!cmd) return -1;
+    int rc = execute_command_with_limits(cmd, log_path, timeout_seconds, uses_ffmpeg);
+    if (rc == 0) {
+        if (log_path) platform_file_delete(log_path);
+        LOG_INFO("[%d/%d] %s succeeded for %s", index, total, label, media_path ? media_path : "(unknown)");
+        return 0;
+    }
+    if (log_path) {
+        LOG_WARN("[%d/%d] %s failed rc=%d log=%s", index, total, label, rc, log_path);
+    }
+    else {
+        LOG_WARN("[%d/%d] %s failed rc=%d", index, total, label, rc);
+    }
+    return rc;
+}
+
+static int generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total) {
     LOG_DEBUG("generate_thumb_c: enter input=%s output=%s scale=%d q=%d index=%d total=%d", input ? input : "(null)", output ? output : "(null)", scale, q, index, total);
 
     if (!is_path_safe(input)) {
         LOG_WARN("[%d/%d] Invalid path (unsafe): %s", index, total, input);
-        return;
+        return -1;
     }
     if (!is_valid_media(input)) {
         LOG_WARN("[%d/%d] Invalid media (stat/size) or not present: %s", index, total, input);
-        return;
+        return -1;
     }
-    (void)0;
 
     LOG_DEBUG("[%d/%d] Processing: %s", index, total, input);
 
@@ -751,6 +776,7 @@ static void generate_thumb_c(const char* input, const char* output, int scale, i
     if (ext && ascii_stricmp(ext, ".webp") == 0) {
         input_is_animated_webp = is_animated_webp(in_path);
     }
+
     char in_path_with_frame[PATH_MAX];
     if (ext && ascii_stricmp(ext, ".gif") == 0) {
         snprintf(in_path_with_frame, sizeof(in_path_with_frame), "%s[0]", in_path);
@@ -759,30 +785,46 @@ static void generate_thumb_c(const char* input, const char* output, int scale, i
         strncpy(in_path_with_frame, in_path, sizeof(in_path_with_frame) - 1);
         in_path_with_frame[sizeof(in_path_with_frame) - 1] = '\0';
     }
+
     char esc_in[PATH_MAX * 2], esc_out[PATH_MAX * 2];
     esc_in[0] = '\0'; esc_out[0] = '\0';
     platform_escape_path_for_cmd(in_path, esc_in, sizeof(esc_in));
     platform_escape_path_for_cmd(out_path, esc_out, sizeof(esc_out));
+
     char esc_in_with_frame[PATH_MAX * 2];
     esc_in_with_frame[0] = '\0';
     platform_escape_path_for_cmd(in_path_with_frame, esc_in_with_frame, sizeof(esc_in_with_frame));
+
+    bool is_video = false;
+    if (ext) {
+        static const char* video_exts[] = { "mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg", "mpeg", NULL };
+        for (size_t i = 0; video_exts[i]; ++i) {
+            if (ascii_stricmp(ext + 1, video_exts[i]) == 0) {
+                is_video = true;
+                break;
+            }
+        }
+    }
+
+    if (is_video || input_is_animated_webp) {
+        snprintf(in_path_with_frame, sizeof(in_path_with_frame), "%s[0]", in_path);
+        platform_escape_path_for_cmd(in_path_with_frame, esc_in_with_frame, sizeof(esc_in_with_frame));
+    }
+
+    LOG_DEBUG("generate_thumb_c: ext=%s input_is_animated_webp=%d is_video=%d", ext ? ext : "(null)", input_is_animated_webp ? 1 : 0, is_video ? 1 : 0);
+
     if (ext && ascii_stricmp(ext, ".webp") == 0) {
         if (input_is_animated_webp) {
-            LOG_DEBUG("[%d/%d] Animated webp detected, using ffmpeg extraction: %s", index, total, in_path);
-
             char tmp_jpg[PATH_MAX];
             snprintf(tmp_jpg, sizeof(tmp_jpg), "%s.tmp.jpg", out_path);
-
             char esc_tmp[PATH_MAX * 2];
             esc_tmp[0] = '\0';
             platform_escape_path_for_cmd(tmp_jpg, esc_tmp, sizeof(esc_tmp));
-            char ffcmd[1024];
-            build_ffmpeg_extract_jpg_cmd(ffcmd, sizeof(ffcmd), esc_in, esc_tmp, scale);
 
-            LOG_DEBUG("generate_thumb_c: executing webp ffmpeg cmd: %s", ffcmd);
-            int ret_png = execute_command_with_limits(ffcmd, NULL, 30, 1);
-
-            if (ret_png == 0) {
+            char extract_cmd[1024];
+            build_ffmpeg_extract_jpg_cmd(extract_cmd, sizeof(extract_cmd), esc_in, esc_tmp, scale);
+            LOG_DEBUG("generate_thumb_c: executing animated webp extraction cmd: %s", extract_cmd);
+            if (run_thumb_command(in_path, index, total, "ffmpeg webp extraction", extract_cmd, 30, 1, NULL) == 0) {
                 char convert_cmd[PATH_MAX * 3];
                 if (output_is_webp(out_path) && input_is_animated_webp) {
                     snprintf(convert_cmd, sizeof(convert_cmd),
@@ -792,113 +834,82 @@ static void generate_thumb_c(const char* input, const char* output, int scale, i
                 else {
                     build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
                 }
-
-                LOG_DEBUG("generate_thumb_c: executing png conversion cmd: %s", convert_cmd);
-                int cret = execute_command_with_limits(convert_cmd, NULL, 20, 0);
+                LOG_DEBUG("generate_thumb_c: executing animated webp conversion cmd: %s", convert_cmd);
+                if (run_thumb_command(in_path, index, total, "animated webp conversion", convert_cmd, 20, 0, NULL) == 0) {
+                    platform_file_delete(tmp_jpg);
+                    return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
+                }
                 platform_file_delete(tmp_jpg);
-
-                if (cret == 0) return;
-                LOG_WARN("[%d/%d] conversion failed rc=%d", index, total, cret);
             }
             else {
-                LOG_WARN("[%d/%d] ffmpeg (png) failed rc=%d", index, total, ret_png);
                 platform_file_delete(tmp_jpg);
             }
         }
-        LOG_DEBUG("[%d/%d] Using CPU/image commands for webp: %s", index, total, in_path);
 
         char magick_cmd[1024];
         build_magick_resize_cmd(magick_cmd, sizeof(magick_cmd), esc_in_with_frame, scale, q, esc_out);
+        LOG_DEBUG("generate_thumb_c: executing final webp magick cmd: %s", magick_cmd);
+        if (run_thumb_command(in_path, index, total, "webp magick", magick_cmd, 20, 0, NULL) == 0)
+            return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
 
-        int mret = execute_command_with_limits(magick_cmd, NULL, 20, 0);
-        if (mret == 0) {
-            LOG_INFO("[%d/%d] magick succeeded for %s", index, total, in_path);
-            return;
-        }
         char magick_log[PATH_MAX];
         snprintf(magick_log, sizeof(magick_log), "%s.magick.log", out_path);
-        int mret2 = execute_command_with_limits(magick_cmd, magick_log, 20, 0);
-
-        if (mret2 == 0) {
-            LOG_INFO("[%d/%d] magick succeeded on retry for %s", index, total, in_path);
-            platform_file_delete(magick_log);
-            return;
-        }
-
-        LOG_WARN("[%d/%d] magick failed for %s rc=%d (retry rc=%d) log=%s",
-            index, total, in_path, mret, mret2, magick_log);
-        return;
+        LOG_DEBUG("generate_thumb_c: retrying final webp magick cmd: %s", magick_cmd);
+        if (run_thumb_command(in_path, index, total, "webp magick retry", magick_cmd, 20, 0, magick_log) == 0)
+            return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
+        return -1;
     }
-    bool is_video = false;
-    if (ext) {
-        static const char* video_exts[] = {
-            "mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg", "mpeg", NULL
-        };
-
-        for (size_t i = 0; video_exts[i]; ++i) {
-            if (ascii_stricmp(ext + 1, video_exts[i]) == 0) {
-                is_video = true;
-                break;
-            }
-        }
-    }
-
-    LOG_DEBUG("generate_thumb_c: ext=%s input_is_animated_webp=%d is_video=%d", ext ? ext : "(null)", input_is_animated_webp ? 1 : 0, is_video ? 1 : 0);
-
-    char* cmd = NULL;
 
     if (is_video) {
         char tmp_jpg[PATH_MAX];
         snprintf(tmp_jpg, sizeof(tmp_jpg), "%s.tmp.jpg", out_path);
-
         char esc_tmp[PATH_MAX * 2];
         esc_tmp[0] = '\0';
         platform_escape_path_for_cmd(tmp_jpg, esc_tmp, sizeof(esc_tmp));
 
-        {
-            char extract_cmd[1024];
-            build_ffmpeg_extract_jpg_cmd(extract_cmd, sizeof(extract_cmd), esc_in, esc_tmp, scale);
-            LOG_DEBUG("generate_thumb_c: executing video extraction cmd: %s", extract_cmd);
-            int ret_png = execute_command_with_limits(extract_cmd, NULL, 60, 1);
-
-            if (ret_png == 0) {
-                char convert_cmd[1024];
-                if (output_is_webp(out_path) && input_is_animated_webp) {
-                    build_ffmpeg_thumb_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, 1, 1, esc_out);
-                }
-        else {
-            build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
-        }
-        LOG_DEBUG("generate_thumb_c: executing video conversion cmd: %s", convert_cmd);
-                int cret = execute_command_with_limits(convert_cmd, NULL, 20, 0);
-                platform_file_delete(tmp_jpg);
-
-                if (cret == 0) return;
-                LOG_WARN("[%d/%d] conversion failed rc=%d", index, total, cret);
+        char extract_cmd[1024];
+        build_ffmpeg_extract_jpg_cmd(extract_cmd, sizeof(extract_cmd), esc_in, esc_tmp, scale);
+        LOG_DEBUG("generate_thumb_c: executing video extraction cmd: %s", extract_cmd);
+        if (run_thumb_command(in_path, index, total, "video frame extraction", extract_cmd, 60, 1, NULL) == 0) {
+            char convert_cmd[1024];
+            if (output_is_webp(out_path) && input_is_animated_webp) {
+                build_ffmpeg_thumb_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, 1, 1, esc_out);
             }
             else {
-                LOG_WARN("[%d/%d] ffmpeg jpg extraction failed rc=%d", index, total, ret_png);
-                platform_file_delete(tmp_jpg);
+                build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
             }
-        }
-    }
-    {
-        char final_cmd[2048];
-        if (input_is_animated_webp) {
-            int to_webp = output_is_webp(out_path) ? 1 : 0;
-            int add_rgb = (ext && (ascii_stricmp(ext, ".gif") == 0 || ascii_stricmp(ext, ".png") == 0)) ? 1 : 0;
-            build_ffmpeg_thumb_cmd(final_cmd, sizeof(final_cmd), esc_in, scale, q, to_webp, add_rgb, esc_out);
-            LOG_DEBUG("generate_thumb_c: executing final ffmpeg cmd: %s", final_cmd);
-            int ret = execute_command_with_limits(final_cmd, NULL, 30, 1);
-            if (ret != 0) LOG_WARN("[%d/%d] ffmpeg failed rc=%d", index, total, ret);
+            LOG_DEBUG("generate_thumb_c: executing video conversion cmd: %s", convert_cmd);
+            if (run_thumb_command(in_path, index, total, "video conversion", convert_cmd, 20, 0, NULL) == 0) {
+                platform_file_delete(tmp_jpg);
+                return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
+            }
+            platform_file_delete(tmp_jpg);
         }
         else {
-            build_magick_resize_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q, esc_out);
-            LOG_DEBUG("generate_thumb_c: executing final magick cmd: %s", final_cmd);
-            int ret = execute_command_with_limits(final_cmd, NULL, 30, 0);
-            if (ret != 0) LOG_WARN("[%d/%d] magick/ffmpeg failed rc=%d", index, total, ret);
+            platform_file_delete(tmp_jpg);
         }
     }
+
+    char final_cmd[2048];
+    if (input_is_animated_webp) {
+        int to_webp = output_is_webp(out_path) ? 1 : 0;
+        int add_rgb = (ext && (ascii_stricmp(ext, ".gif") == 0 || ascii_stricmp(ext, ".png") == 0)) ? 1 : 0;
+        build_ffmpeg_thumb_cmd(final_cmd, sizeof(final_cmd), esc_in, scale, q, to_webp, add_rgb, esc_out);
+        LOG_DEBUG("generate_thumb_c: executing final ffmpeg cmd: %s", final_cmd);
+        int ffmpeg_rc = run_thumb_command(in_path, index, total, "final ffmpeg", final_cmd, 30, 1, NULL);
+        struct stat generated_stat;
+        if (ffmpeg_rc != 0 || platform_stat(out_path, &generated_stat) != 0) {
+            build_magick_resize_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q, esc_out);
+            LOG_DEBUG("generate_thumb_c: ffmpeg failed, executing magick fallback cmd: %s", final_cmd);
+            run_thumb_command(in_path, index, total, "magick fallback", final_cmd, 30, 0, NULL);
+        }
+    }
+    else {
+        build_magick_resize_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q, esc_out);
+        LOG_DEBUG("generate_thumb_c: executing final magick cmd: %s", final_cmd);
+        run_thumb_command(in_path, index, total, "final magick", final_cmd, 30, 0, NULL);
+    }
+    return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
 }
 int dir_has_missing_thumbs_common(const char* dir, int videos_only, int shallow) {
     LOG_DEBUG("dir_has_missing_thumbs%s: scanning %s (videos_only=%d)",
@@ -1323,7 +1334,7 @@ static void* thumb_maintenance_thread(void* args) {
                 char per_db2[PATH_MAX]; snprintf(per_db2, sizeof(per_db2), "%s" DIR_SEP_STR "thumbs.tdb", per_thumbs_root2);
                 thumbdb_instance_t* tdb2 = thumbdb_find_instance(per_db2);
                 if (tdb2) {
-                    if (!thumbdb_perform_requested_compaction(tdb2))
+                    if (thumbdb_perform_requested_compaction(tdb2) == 0)
                         thumbdb_compact(tdb2);
                 }
             }
@@ -1536,7 +1547,7 @@ void run_thumb_generation(const char* dir) {
 
     LOG_DEBUG("run_thumb_generation: starting final database processing");
     thumbdb_sweep_orphans(tdb);
-    if (!thumbdb_perform_requested_compaction(tdb))
+    if (thumbdb_perform_requested_compaction(tdb) == 0)
         thumbdb_compact(tdb);
     LOG_DEBUG("run_thumb_generation: final database processing completed");
 

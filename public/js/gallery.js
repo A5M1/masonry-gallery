@@ -494,13 +494,16 @@ function setupThumbSocket() {
 				var o = JSON.parse(evt.data);
 				if (!o) return;
 				if (o.type === "thumb_ready" && o.media && o.thumbUrl) {
-					var img = document.querySelector('img[data-media="' + o.media + '"]');
+					var img = Array.from(document.querySelectorAll("img.thumb-img[data-media]"))
+						.find(function (el) { return el.getAttribute("data-media") === o.media; });
 					if (img) {
+						var thumbUrl = o.thumbUrl;
+						if (o.hash) thumbUrl += (thumbUrl.indexOf("?") === -1 ? "?" : "&") + "v=" + encodeURIComponent(o.hash);
 						var currentSrc = img.getAttribute("src") || "";
-						if (currentSrc !== o.thumbUrl) {
-							img.src = o.thumbUrl;
-							if (o.thumbUrl.indexOf("-small.") !== -1) img.setAttribute("data-thumb-small", o.thumbUrl);
-							if (o.thumbUrl.indexOf("-large.") !== -1) img.setAttribute("data-thumb-large", o.thumbUrl);
+						if (currentSrc !== thumbUrl) {
+							img.src = thumbUrl;
+							if (o.thumbUrl.indexOf("-small.") !== -1) img.setAttribute("data-thumb-small", thumbUrl);
+							if (o.thumbUrl.indexOf("-large.") !== -1) img.setAttribute("data-thumb-large", thumbUrl);
 							var a = img.closest("a");
 							if (a) a.setAttribute("data-thumb-status", "1");
 							scheduleLayout();

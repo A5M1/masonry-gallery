@@ -1289,7 +1289,6 @@ thumbdb_instance_t* thumbdb_open_for_dir(const char* db_full_path) {
             LOG_WARN("thumbdb: validation failed, attempting recovery");
             thumbdb_recover_from_corruption(inst);
         }
-        process_wal_chunks(inst);
         LOG_INFO("thumbdb: loaded and validated database %s", inst->db_path);
     }
     inst->db_inited = 1;
@@ -1387,18 +1386,24 @@ int thumbdb_tx_commit(thumbdb_instance_t* inst) {
     if (!inst) return -1;
     thread_mutex_lock(&inst->mutex);
     if (!inst->tx_active) { thread_mutex_unlock(&inst->mutex); return -1; }
+    int commit_ok = 0;
     FILE* f = platform_fopen(inst->db_path, "ab");
     if (f) {
-        fputc(MV_OPCODES.tx_begin, f);
-        write_changed_ctx_t wctx = {inst, f};
-        rh_iterate(inst->rh_tbl, write_changed_cb, &wctx);
-        fputc(MV_OPCODES.tx_end, f);
-        fflush(f); platform_fsync(fileno(f)); fclose(f);
+        if (fputc(MV_OPCODES.tx_begin, f) != EOF) {
+            write_changed_ctx_t wctx = {inst, f};
+            rh_iterate(inst->rh_tbl, write_changed_cb, &wctx);
+            if (fputc(MV_OPCODES.tx_end, f) != EOF) {
+                if (fflush(f) == 0 && platform_fsync(fileno(f)) == 0) {
+                    commit_ok = 1;
+                }
+            }
+        }
+        fclose(f);
     }
     if (inst->tx_snapshot) { rh_destroy(inst->tx_snapshot); inst->tx_snapshot = NULL; }
     inst->tx_active = 0;
     thread_mutex_unlock(&inst->mutex);
-    return 0;
+    return commit_ok ? 0 : -1;
 }
 
 int thumbdb_set(thumbdb_instance_t* inst, const char* key, const char* value) {
@@ -1673,7 +1678,7 @@ int thumbdb_perform_requested_compaction(thumbdb_instance_t* inst) {
     if (!inst->compaction_requested) { thread_mutex_unlock(&inst->compaction_mutex); return 0; }
     inst->compaction_requested = 0;
     thread_mutex_unlock(&inst->compaction_mutex);
-    return thumbdb_compact(inst);
+    return thumbdb_compact(inst) == 0 ? 1 : -1;
 }
 
 static void* repair_worker_thread(void* arg) {
