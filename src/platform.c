@@ -183,10 +183,31 @@ int platform_copy_file(const char* src,const char* dst){
 FILE* platform_fopen(const char* path, const char* mode) {
 #ifdef _WIN32
     WCHAR wpath[PATH_MAX];
-    WCHAR wmode[16];
     if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 16) == 0) return NULL;
-    return _wfopen(wpath, wmode);
+    DWORD access = 0;
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD disp = OPEN_EXISTING;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL;
+    if (mode[0] == 'w' || mode[0] == 'a') {
+        access = GENERIC_READ | GENERIC_WRITE;
+        disp = (mode[0] == 'a') ? OPEN_ALWAYS : CREATE_ALWAYS;
+    } else {
+        access = GENERIC_READ;
+    }
+    if (mode[0] == 'a') flags |= FILE_APPEND_DATA;
+    HANDLE h = CreateFileW(wpath, access, share, NULL, disp, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    int fd = _open_osfhandle((intptr_t)h, (mode[0] == 'a') ? _O_APPEND : 0);
+    if (fd < 0) { CloseHandle(h); return NULL; }
+    char fmode[8];
+    int mi = 0;
+    if (mode[0] == 'r' && mode[1] == 'b') { fmode[mi++] = 'r'; fmode[mi++] = 'b'; }
+    else if (mode[0] == 'r') { fmode[mi++] = 'r'; fmode[mi++] = 'b'; }
+    else if (mode[0] == 'w') { fmode[mi++] = 'w'; fmode[mi++] = 'b'; }
+    else if (mode[0] == 'a') { fmode[mi++] = 'a'; fmode[mi++] = 'b'; }
+    else { fmode[mi++] = mode[0]; }
+    fmode[mi] = '\0';
+    return _fdopen(fd, fmode);
 #else
     return fopen(path, mode);
 #endif
