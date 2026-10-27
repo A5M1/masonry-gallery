@@ -20,7 +20,7 @@ flowchart LR
   end
  subgraph Workers["WORKER THREADS"]
         direction TB
-        ThumbWorkers["Thumbnail Workers<br/>━━━━━━━━━━<br/>MAX_THUMB_WORKERS<br/>Parallel generation<br/>ffmpeg/magick"]
+        ThumbWorkers["Thumbnail Workers<br/>━━━━━━━━━━<br/>MAX_THUMB_WORKERS<br/>Parallel generation<br/>ffmpeg"]
         WALProcessor["WAL Processor<br/>━━━━━━━━━━<br/>10s interval<br/>Deduplicates + commits<br/>Triggers compaction"]
         MaintenanceThread["Maintenance Thread<br/>━━━━━━━━━━<br/>300s interval<br/>Orphan cleanup<br/>Migration tasks"]
   end

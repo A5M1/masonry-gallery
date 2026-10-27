@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
-use std::io::{ BufRead, BufReader };
+use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{ Child, Command, Stdio };
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
@@ -12,19 +12,26 @@ use std::time::Duration;
 use serde_json::Value;
 use tao::{
     dpi::LogicalSize,
-    event::{ Event, WindowEvent },
-    event_loop::{ ControlFlow, EventLoop },
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use wry::{ Rect, Result, WebView, WebViewBuilder };
+use wry::{Rect, Result, WebView, WebViewBuilder};
 
 fn main() -> Result<()> {
-    let backend_exe = if cfg!(target_os = "windows") { "galleria.exe" } else { "./galleria" };
+    let backend_exe = if cfg!(target_os = "windows") {
+        "galleria.exe"
+    } else {
+        "./galleria"
+    };
     eprintln!("starting backend executable: {}", backend_exe);
     if std::path::Path::new(&backend_exe).exists() {
         eprintln!("backend path exists: {}", backend_exe);
     } else {
-        eprintln!("warning: backend path not found relative to cwd: {}", backend_exe);
+        eprintln!(
+            "warning: backend path not found relative to cwd: {}",
+            backend_exe
+        );
     }
 
     let mut backend: Child = Command::new(backend_exe)
@@ -36,7 +43,7 @@ fn main() -> Result<()> {
     if let Some(stdout) = backend.stdout.take() {
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(|line| line.ok()) {
                 eprintln!("[backend stdout] {}", line);
             }
         });
@@ -44,7 +51,7 @@ fn main() -> Result<()> {
     if let Some(stderr) = backend.stderr.take() {
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(|line| line.ok()) {
                 eprintln!("[backend stderr] {}", line);
             }
         });
@@ -56,12 +63,9 @@ fn main() -> Result<()> {
             backend_ready = true;
             break;
         }
-        match backend.try_wait() {
-            Ok(Some(status)) => {
-                eprintln!("backend exited early with status: {:?}", status);
-                break;
-            }
-            _ => {}
+        if let Ok(Some(status)) = backend.try_wait() {
+            eprintln!("backend exited early with status: {:?}", status);
+            break;
         }
         thread::sleep(Duration::from_millis(200));
     }
@@ -72,8 +76,7 @@ fn main() -> Result<()> {
     }
 
     let event_loop = EventLoop::new();
-    let appdata_dir = dirs
-        ::data_local_dir()
+    let appdata_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Galleria");
     std::fs::create_dir_all(&appdata_dir).expect("Failed to create AppData folder");
@@ -168,7 +171,7 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
     fn update_toolbar(
         toolbar: &Option<WebView>,
         tabs: &HashMap<u64, WebView>,
-        active: Option<u64>
+        active: Option<u64>,
     ) {
         if let Some(tb) = toolbar {
             let mut list = vec![];
@@ -177,7 +180,7 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
                 list.push(serde_json::json!({"id": id, "url": url}));
             }
             let payload = serde_json::json!({ "tabs": list, "active": active });
-            let _ = tb.evaluate_script(&format!("window.host_update('{}')", payload.to_string()));
+            let _ = tb.evaluate_script(&format!("window.host_update('{}')", payload));
         }
     }
     let toolbar_height: f64 = 48.0;
@@ -218,7 +221,7 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
         .with_ipc_handler(toolbar_ipc)
         .build()?;
     toolbar_handle.borrow_mut().replace(toolbar_webview);
-    update_toolbar(&*toolbar_handle.borrow(), &tabs.borrow(), Some(initial_id));
+    update_toolbar(&toolbar_handle.borrow(), &tabs.borrow(), Some(initial_id));
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let mut cmds_ref = pending_cmds.borrow_mut();
@@ -248,16 +251,16 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
 
                             match wv {
                                 Ok(wv) => {
-                                    for (_id, other_wv) in tabs.borrow_mut().iter_mut() {
+                                    for other_wv in tabs.borrow_mut().values_mut() {
                                         let _ = other_wv.set_visible(false);
                                     }
                                     let _ = wv.set_visible(true);
                                     tabs.borrow_mut().insert(id, wv);
                                     *active_tab.borrow_mut() = Some(id);
                                     update_toolbar(
-                                        &*toolbar_handle.borrow(),
+                                        &toolbar_handle.borrow(),
                                         &tabs.borrow(),
-                                        Some(id)
+                                        Some(id),
                                     );
                                 }
                                 Err(e) => eprintln!("failed to create child webview: {:?}", e),
@@ -269,9 +272,9 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
                                     if let Some(wv) = tabs.borrow_mut().get_mut(&active) {
                                         let _ = wv.load_url(url);
                                         update_toolbar(
-                                            &*toolbar_handle.borrow(),
+                                            &toolbar_handle.borrow(),
                                             &tabs.borrow(),
-                                            Some(active)
+                                            Some(active),
                                         );
                                     }
                                 }
@@ -284,9 +287,9 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
                                 }
                                 *active_tab.borrow_mut() = Some(tab_id);
                                 update_toolbar(
-                                    &*toolbar_handle.borrow(),
+                                    &toolbar_handle.borrow(),
                                     &tabs.borrow(),
-                                    Some(tab_id)
+                                    Some(tab_id),
                                 );
                             }
                         }
@@ -296,7 +299,10 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
             }
         }
         match event {
-            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(new_size),
+                ..
+            } => {
                 let toolbar_height = 48;
                 let toolbar_bounds = Rect {
                     x: 0,
@@ -310,14 +316,17 @@ input { flex:1; padding:6px 10px; border:1px solid #333; background:#141414; col
                     width: new_size.width,
                     height: new_size.height.saturating_sub(toolbar_height),
                 };
-                for (_id, wv) in tabs.borrow_mut().iter_mut() {
+                for wv in tabs.borrow_mut().values_mut() {
                     let _ = wv.set_bounds(content_bounds);
                 }
-                if let Some(tb) = &*toolbar_handle.borrow() {
+                if let Some(tb) = toolbar_handle.borrow().as_ref() {
                     let _ = tb.set_bounds(toolbar_bounds);
                 }
             }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
                 let _ = backend.kill();
                 *control_flow = ControlFlow::Exit;
             }

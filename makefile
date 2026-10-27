@@ -82,12 +82,15 @@ $(BUILD_DIR)/$1
 endef
 
 SRCS=$(shell find $(SRC_DIR) -name '*.c')
+RUST_LIB_WIN=$(RUST_DIR)/target/release/galleria.dll.lib
+RUST_DLL_WIN=$(RUST_DIR)/target/release/galleria.dll
+RUST_LIB_LINUX=$(RUST_DIR)/target/release/libgalleria.so
 
-OBJS_X64=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x64)/%.o,$(SRCS))
+OBJS_X64=$(filter-out $(call obj_dir,x64)/thumbdb.o,$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x64)/%.o,$(SRCS)))
 OBJS_ARM=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,arm)/%.o,$(SRCS))
-OBJS_X64_DEBUG=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x64_debug)/%.o,$(SRCS))
+OBJS_X64_DEBUG=$(filter-out $(call obj_dir,x64_debug)/thumbdb.o,$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x64_debug)/%.o,$(SRCS)))
 OBJS_ARM_DEBUG=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,arm_debug)/%.o,$(SRCS))
-OBJS_LINUX_X64=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_x64)/%.o,$(SRCS))
+OBJS_LINUX_X64=$(filter-out $(call obj_dir,linux_x64)/thumbdb.o,$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_x64)/%.o,$(SRCS)))
 OBJS_LINUX_ARM=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_arm)/%.o,$(SRCS))
 
 # ======================================================
@@ -126,10 +129,10 @@ $(call obj_dir,linux_arm)/%.o: $(SRC_DIR)/%.c
 # ======================================================
 # Linking rules
 all: x64
-x64: buildbn $(OBJS_X64)
+x64: rust-lib buildbn $(OBJS_X64)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_X64)"
-	@$(CC_X64) -o $(EXEC_X64) $(OBJS_X64) $(LDFLAGS_WIN)
+	@$(CC_X64) -o $(EXEC_X64) $(OBJS_X64) $(RUST_LIB_WIN) $(LDFLAGS_WIN)
 	@$(MAKE) copy-assets
 
 arm: buildbn $(OBJS_ARM)
@@ -138,10 +141,10 @@ arm: buildbn $(OBJS_ARM)
 	@$(CC_ARM) -o $(EXEC_ARM) $(OBJS_ARM) $(LDFLAGS_WIN)
 	@$(MAKE) copy-assets
 
-debug: buildbn $(OBJS_X64_DEBUG)
+debug: rust-lib buildbn $(OBJS_X64_DEBUG)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_X64_DEBUG)"
-	@$(CC_X64) -o $(EXEC_X64_DEBUG) $(OBJS_X64_DEBUG) $(LDFLAGS_WIN_DEBUG)
+	@$(CC_X64) -o $(EXEC_X64_DEBUG) $(OBJS_X64_DEBUG) $(RUST_LIB_WIN) $(LDFLAGS_WIN_DEBUG)
 	@$(MAKE) copy-assets
 
 debug-arm: buildbn $(OBJS_ARM_DEBUG)
@@ -150,10 +153,10 @@ debug-arm: buildbn $(OBJS_ARM_DEBUG)
 	@$(CC_ARM) -o $(EXEC_ARM_DEBUG) $(OBJS_ARM_DEBUG) $(LDFLAGS_WIN_DEBUG)
 	@$(MAKE) copy-assets
 
-linux-x64: buildbn $(OBJS_LINUX_X64)
+linux-x64: rust-lib buildbn $(OBJS_LINUX_X64)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_LINUX_X64)"
-	@$(CC_LINUX_X64) -o $(EXEC_LINUX_X64) $(OBJS_LINUX_X64) $(LDFLAGS_LINUX)
+	@$(CC_LINUX_X64) -o $(EXEC_LINUX_X64) $(OBJS_LINUX_X64) -L$(RUST_DIR)/target/release -lgalleria -Wl,-rpath,'$$ORIGIN' $(LDFLAGS_LINUX)
 	@$(MAKE) copy-assets
 
 linux-arm: buildbn $(OBJS_LINUX_ARM)
@@ -164,6 +167,10 @@ linux-arm: buildbn $(OBJS_LINUX_ARM)
 
 # ======================================================
 # Rust targets
+rust-lib:
+	@echo "[Cargo] Building Rust library..."
+	@cd $(RUST_DIR) && cargo build --release --lib
+
 rust-release:
 	@echo "[Cargo] Building Rust release..."
 	@cd $(RUST_DIR) && cargo build --release
@@ -198,6 +205,8 @@ copy-assets:
 	@mkdir -p $(DIST_DIR)
 	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
 	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi
+	@if [ -f "$(RUST_DLL_WIN)" ]; then cp $(RUST_DLL_WIN) $(DIST_DIR)/; fi
+	@if [ -f "$(RUST_LIB_LINUX)" ]; then cp $(RUST_LIB_LINUX) $(DIST_DIR)/; fi
 
 all-platforms: x64 arm linux-x64 linux-arm rust-release
 	@echo "[DONE] Built all platforms successfully."
@@ -227,5 +236,5 @@ endif
 
 # ======================================================
 .PHONY: all clean rebuild run x64 arm debug debug-arm \
-		linux-x64 linux-arm rust-release rust-debug \
+		linux-x64 linux-arm rust-lib rust-release rust-debug \
 		copy-assets all-platforms view buildbn

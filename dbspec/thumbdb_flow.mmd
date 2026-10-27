@@ -33,7 +33,7 @@ sequenceDiagram
 
     Worker->>Worker: run_thumb_job()
     Worker->>Worker: generate_thumb_c()
-    Worker->>FS: Execute ffmpeg/magick with limits
+    Worker->>FS: Execute ffmpeg with limits
     FS-->>Worker: JPEG/WebP image created
     Worker->>Worker: record_thumb_job_completion()
 

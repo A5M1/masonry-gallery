@@ -800,10 +800,10 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
     if (read_bit_packed_indexes(f, &rec->dir_indexes, rec->dir_count, inst->dir_table.count > 0 ? inst->dir_table.count : 1) != 0)
         return -1;
 
-    int64_t filename_delta;
-    if (read_signed_varint(f, &filename_delta) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    uint64_t raw_filename;
+    if (read_varint(f, &raw_filename) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
 
-    if (filename_delta == 0 && !is_first) {
+    if (raw_filename == 0) {
         long before_strlen = ftell(f);
         uint64_t maybe_strlen;
         size_t varint_bytes;
@@ -814,21 +814,19 @@ static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_
                 free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
             }
             rec->filename[maybe_strlen] = '\0';
-            inst->last_filename_value = 0;
+            /* Writer does not update the numeric base for string filenames. */
         } else {
             fseek(f, before_strlen, SEEK_SET);
-            uint64_t abs_val = (uint64_t)filename_delta;
             rec->filename = malloc(32);
             if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
-            snprintf(rec->filename, 32, "%llu", (unsigned long long)abs_val);
+            snprintf(rec->filename, 32, "0");
+            if (is_first) inst->last_filename_value = 0;
         }
     } else {
-        uint64_t abs_val;
-        if (is_first) {
-            abs_val = (uint64_t)filename_delta;
-        } else {
-            abs_val = inst->last_filename_value + (uint64_t)filename_delta;
-        }
+        int64_t filename_delta = is_first ? (int64_t)raw_filename : zigzag_decode(raw_filename);
+        uint64_t abs_val = is_first
+            ? (uint64_t)filename_delta
+            : inst->last_filename_value + (uint64_t)filename_delta;
         inst->last_filename_value = abs_val;
         rec->filename = malloc(32);
         if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
@@ -948,9 +946,18 @@ static void free_record(record_t* rec) {
     free(rec->codec_info);
 }
 
+static int path_has_media_extension(const char* path) {
+    if (!path) return 0;
+    const char* dot = strrchr(path, '.');
+    if (!dot) return 0;
+    static const char* media_exts[] = { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", NULL };
+    for (size_t i = 0; media_exts[i]; i++) {
+        if (ascii_stricmp(dot, media_exts[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static int serialize_record_to_value(thumbdb_instance_t* inst, record_t* rec, char* out, size_t outlen) {
-    char path[PATH_MAX];
-    if (reconstruct_path_from_indexes(inst, rec->dir_indexes, rec->dir_count, path, sizeof(path)) != 0) return -1;
     const char* ext = "";
     switch (rec->meta.type) {
         case MEDIA_JPG: ext = ".jpg"; break;
@@ -959,6 +966,57 @@ static int serialize_record_to_value(thumbdb_instance_t* inst, record_t* rec, ch
         case MEDIA_WEBP: ext = ".webp"; break;
         case MEDIA_MP4: ext = ".mp4"; break;
         case MEDIA_WEBM: ext = ".webm"; break;
+    }
+
+    if (rec->dir_count > 0) {
+        int indexes_valid = 1;
+        for (size_t i = 0; i < rec->dir_count; i++) {
+            if (rec->dir_indexes[i] >= inst->dir_table.count) {
+                indexes_valid = 0;
+                break;
+            }
+        }
+        if (indexes_valid) {
+            const char* first = inst->dir_table.dirs[rec->dir_indexes[0]];
+            int suffix_chain = 1;
+            for (size_t i = 1; i < rec->dir_count; i++) {
+                const char* current = inst->dir_table.dirs[rec->dir_indexes[i]];
+                size_t first_len = strlen(first);
+                size_t current_len = strlen(current);
+                if (current_len > first_len ||
+                    strcmp(first + (first_len - current_len), current) != 0) {
+                    suffix_chain = 0;
+                    break;
+                }
+            }
+            if (suffix_chain) {
+                snprintf(out, outlen, "%s", first);
+                return 0;
+            }
+
+            int prefix_chain = 1;
+            for (size_t i = 1; i < rec->dir_count; i++) {
+                const char* previous = inst->dir_table.dirs[rec->dir_indexes[i - 1]];
+                const char* current = inst->dir_table.dirs[rec->dir_indexes[i]];
+                if (strncmp(current, previous, strlen(previous)) != 0) {
+                    prefix_chain = 0;
+                    break;
+                }
+            }
+            if (prefix_chain) {
+                const char* last = inst->dir_table.dirs[rec->dir_indexes[rec->dir_count - 1]];
+                snprintf(out, outlen, "%s%s%s%s",
+                    last, strlen(last) > 0 ? DIR_SEP_STR : "", rec->filename, ext);
+                return 0;
+            }
+        }
+    }
+
+    char path[PATH_MAX];
+    if (reconstruct_path_from_indexes(inst, rec->dir_indexes, rec->dir_count, path, sizeof(path)) != 0) return -1;
+    if (path_has_media_extension(path)) {
+        snprintf(out, outlen, "%s", path);
+        return 0;
     }
     snprintf(out, outlen, "%s%s%s%s", path, strlen(path) > 0 ? DIR_SEP_STR : "", rec->filename, ext);
     return 0;
@@ -1249,8 +1307,15 @@ static int enqueue_async_op(thumbdb_instance_t* inst, const char* key, const cha
 }
 
 int thumbdb_open(void) {
-    LOG_WARN("thumbdb_open: global DB disabled; use thumbdb_open_for_dir()");
-    return -1;
+    const char* path = getenv("GALLERIA_THUMBDB");
+    if (!path || path[0] == '\0') path = "thumbs.tdb";
+    thumbdb_instance_t* inst = thumbdb_open_for_dir(path);
+    if (!inst) {
+        LOG_ERROR("thumbdb_open: failed to open global database %s", path);
+        return -1;
+    }
+    LOG_INFO("thumbdb_open: opened global database %s", path);
+    return 0;
 }
 
 thumbdb_instance_t* thumbdb_open_for_dir(const char* db_full_path) {
@@ -1703,7 +1768,7 @@ int thumbdb_start_repair_task(thumbdb_instance_t* inst, int interval_seconds) {
 }
 
 int thumbdb_validate(thumbdb_instance_t* inst) {
-    if (!inst || !inst->rh_tbl || !inst->db_inited) return -1;
+    if (!inst || !inst->rh_tbl) return -1;
     thread_mutex_lock(&inst->mutex);
     FILE* f = platform_fopen(inst->db_path, "rb");
     if (!f) { thread_mutex_unlock(&inst->mutex); LOG_ERROR("thumbdb_validate: cannot open %s", inst->db_path); return -1; }
@@ -1717,59 +1782,82 @@ int thumbdb_validate(thumbdb_instance_t* inst) {
     uint64_t base_timestamp; if (read_uint64_le(f, &base_timestamp) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
     uint64_t dir_table_size; if (read_varint(f, &dir_table_size) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
     for (uint64_t i = 0; i < dir_table_size; i++) { uint64_t prefix_len, suffix_len; if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; } if (suffix_len > 0) fseek(f, (long)suffix_len, SEEK_CUR); }
-    uint64_t records_validated = 0, crc_errors = 0;
+    uint64_t records_validated = 0;
+    uint64_t crc_errors = 0;
+    uint64_t parse_errors = 0;
+    uint64_t saved_filename = inst->last_filename_value;
+    uint64_t saved_timestamp = inst->last_timestamp_value;
+    uint64_t saved_sequence = inst->current_record_seq;
+    inst->last_filename_value = 0;
+    inst->last_timestamp_value = base_timestamp;
+    inst->current_record_seq = 0;
+    int is_first = 1;
+    int has_index = (flags >> 7) & 1;
+
     for (;;) {
-        long record_start = ftell(f);
-        uint8_t op; if (fread(&op, 1, 1, f) != 1) break;
-        if (op == MV_OPCODES.delete_op) { uint64_t filename_ref; if (read_varint(f, &filename_ref) != 0) break; uint64_t ts_ref; if (read_varint(f, &ts_ref) != 0) break; uint8_t end_ref; if (fread(&end_ref, 1, 1, f) != 1 || end_ref != MV_OPCODES.end) break; records_validated++; continue; }
-        if (op != MV_OPCODES.begin) break;
-        uint64_t seq, dir_count; if (read_varint(f, &seq) != 0 || read_varint(f, &dir_count) != 0) break;
-        { uint32_t* dir_indexes = NULL; size_t table_size = inst->dir_table.count > 0 ? inst->dir_table.count : 1; if (read_bit_packed_indexes(f, &dir_indexes, (size_t)dir_count, table_size) != 0) break; free(dir_indexes); }
-        int64_t filename_delta; if (read_signed_varint(f, &filename_delta) != 0) break;
-        uint8_t meta_byte; if (fread(&meta_byte, 1, 1, f) != 1) break;
-        int hash_override = (meta_byte >> 1) & 1;
-        if (hash_override) { uint8_t hash_mode_byte; if (fread(&hash_mode_byte, 1, 1, f) != 1) break; }
-        int has_extensions = meta_byte & 1;
-        int dims_in_ext = 0;
-        if (has_extensions) {
-            uint64_t ext_len; if (read_varint(f, &ext_len) != 0) break;
-            size_t ext_bytes_read = 0;
-            while (ext_bytes_read < ext_len) {
-                uint8_t tag; if (fread(&tag, 1, 1, f) != 1) break;
-                ext_bytes_read++;
-                uint64_t value_len; size_t varint_size; if (read_varint_with_size(f, &value_len, &varint_size) != 0) break;
-                ext_bytes_read += varint_size;
-                if (tag == 0x01) { dims_in_ext = 1; }
-                else { fseek(f, (long)value_len, SEEK_CUR); ext_bytes_read += (size_t)value_len; }
+        long pos = ftell(f);
+        uint8_t op;
+        if (fread(&op, 1, 1, f) != 1) break;
+        fseek(f, pos, SEEK_SET);
+        if (has_index && op == ((MV_CONSTANTS.index_magic >> 8) & 0xFF)) break;
+        if (op == MV_OPCODES.tx_begin || op == MV_OPCODES.tx_end) {
+            fgetc(f);
+            continue;
+        }
+        if (op == MV_OPCODES.delete_op) {
+            fgetc(f);
+            uint64_t filename_ref;
+            uint64_t ts_ref;
+            uint8_t end_ref;
+            if (read_varint(f, &filename_ref) != 0 ||
+                read_varint(f, &ts_ref) != 0 ||
+                fread(&end_ref, 1, 1, f) != 1 ||
+                end_ref != MV_OPCODES.end) {
+                parse_errors++;
+                break;
             }
+            records_validated++;
+            continue;
         }
-        int64_t ts_delta; if (read_signed_varint(f, &ts_delta) != 0) break;
-        if (dims_in_ext) { uint64_t w, h, dur; if (read_varint(f, &w) != 0 || read_varint(f, &h) != 0 || read_varint(f, &dur) != 0) break; }
-        hash_mode_t hash_mode = hash_override ? HASH_FULL_MD5 : (hash_mode_t)((flags >> 4) & 3);
-        if (hash_override) {
-            fseek(f, -1, SEEK_CUR);
-            uint8_t hash_mode_byte; if (fread(&hash_mode_byte, 1, 1, f) != 1) break;
-            hash_mode = (hash_mode_t)(hash_mode_byte & 3);
+        if (op == 0xEE) {
+            fgetc(f);
+            uint64_t marker_count;
+            if (read_varint(f, &marker_count) != 0) {
+                parse_errors++;
+                break;
+            }
+            continue;
         }
-        size_t hash_len = 0; switch (hash_mode) { case HASH_FULL_MD5: case HASH_RIPEMD128: hash_len = 16; break; case HASH_HALF_MD5: hash_len = 8; break; default: break; }
-        long crc_end = ftell(f);
-        if (hash_len > 0) fseek(f, (long)hash_len, SEEK_CUR);
-        uint32_t stored_crc; if (read_uint32_le(f, &stored_crc) != 0) break;
-        uint8_t end_op; if (fread(&end_op, 1, 1, f) != 1 || end_op != MV_OPCODES.end) break;
-        fseek(f, record_start, SEEK_SET);
-        size_t crc_data_len = (size_t)(crc_end - record_start);
-        uint8_t* crc_data = malloc(crc_data_len);
-        if (!crc_data) break;
-        if (fread(crc_data, 1, crc_data_len, f) != crc_data_len) { free(crc_data); break; }
-        uint32_t computed_crc; crypto_crc32(crc_data, crc_data_len, &computed_crc); free(crc_data);
-        if (stored_crc != computed_crc) { LOG_ERROR("thumbdb_validate: CRC32 mismatch at offset %ld", record_start); crc_errors++; }
-        fseek(f, crc_end + (long)hash_len + 4 + 1, SEEK_SET);
+        if (op != MV_OPCODES.begin) {
+            LOG_ERROR("thumbdb_validate: unexpected opcode 0x%02X at offset %ld", op, pos);
+            parse_errors++;
+            break;
+        }
+
+        record_t rec = {0};
+        rec.record_sequence = inst->current_record_seq++;
+        if (read_record(inst, f, &rec, is_first) != 0) {
+            free_record(&rec);
+            LOG_ERROR("thumbdb_validate: record read failed at offset %ld (first=%d)", pos, is_first);
+            if (feof(f)) {
+                parse_errors++;
+            } else {
+                crc_errors++;
+            }
+            break;
+        }
+        is_first = 0;
         records_validated++;
+        free_record(&rec);
     }
+
+    inst->last_filename_value = saved_filename;
+    inst->last_timestamp_value = saved_timestamp;
+    inst->current_record_seq = saved_sequence;
     fclose(f);
     thread_mutex_unlock(&inst->mutex);
     LOG_INFO("thumbdb_validate: validated %llu records, %llu CRC errors", (unsigned long long)records_validated, (unsigned long long)crc_errors);
-    return crc_errors > 0 ? -1 : 0;
+    return (crc_errors > 0 || parse_errors > 0) ? -1 : 0;
 }
 
 typedef struct { int total_records; int missing_thumbs; int valid_records; char thumbs_root[PATH_MAX]; } verify_records_ctx_t;

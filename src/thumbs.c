@@ -11,8 +11,6 @@
 #include "common.h"
 #include "websocket.h"
 atomic_int ffmpeg_active = ATOMIC_VAR_INIT(0);
-static atomic_int magick_active = ATOMIC_VAR_INIT(0);
-#define MAX_MAGICK 2
 #define THUMB_COMMAND_THREADS 1
 #define WAL_DIR_NAME "wal"
 #define WAL_CHUNK_FMT "chunk-%lld-%u-%u.wal"
@@ -260,43 +258,15 @@ static int execute_command_with_limits(const char* cmd, const char* out_log, int
         atomic_fetch_sub(&ffmpeg_active, 1);
     }
     else {
-        int is_magick = 0;
-        if (strstr(cmd, "magick") != NULL)
-            is_magick = 1;
-
-        if (is_magick) {
-            while (atomic_load(&magick_active) >= MAX_MAGICK)
-                sleep_ms(50);
-            atomic_fetch_add(&magick_active, 1);
-            const char* final_out = out_log ? out_log : platform_devnull();
-            platform_record_command(cmd);
-            LOG_DEBUG("execute_command_with_limits: executing (magick): %s", cmd);
-            ret = platform_run_command_redirect(cmd, final_out, timeout);
-            LOG_DEBUG("execute_command_with_limits: magick rc=%d cmd=%s", ret, cmd);
-            atomic_fetch_sub(&magick_active, 1);
-        }
-        else {
-            platform_record_command(cmd);
-            ret = platform_run_command_redirect(cmd, out_log ? out_log : platform_devnull(), timeout);
-            LOG_DEBUG("execute_command_with_limits: command rc=%d cmd=%s", ret, cmd);
-        }
+        platform_record_command(cmd);
+        ret = platform_run_command_redirect(cmd, out_log ? out_log : platform_devnull(), timeout);
+        LOG_DEBUG("execute_command_with_limits: command rc=%d cmd=%s", ret, cmd);
     }
 
     return ret;
 }
 
 static int generate_thumb_c(const char* input, const char* output, int scale, int q, int index, int total);
-
-static void build_magick_resize_cmd(char* dst, size_t dstlen, const char* in_esc, int scale, int q, const char* out_esc) {
-    if (!dst || dstlen == 0)return;
-    long mem_mb = platform_get_physical_memory_mb();
-    if (mem_mb <= 0) mem_mb = 512;
-    long per_proc_mb = mem_mb / (MAX_MAGICK > 0 ? MAX_MAGICK : 1);
-    if (per_proc_mb < 256) per_proc_mb = 256;
-    snprintf(dst, dstlen, "magick -limit thread %d -limit memory %ldMB -limit map %ldMB %s -resize %dx -quality %d %s",
-        THUMB_COMMAND_THREADS, per_proc_mb, per_proc_mb, in_esc, scale, q, out_esc);
-    LOG_DEBUG("Magick CMD: %s", dst);
-}
 
 static void build_ffmpeg_extract_jpg_cmd(char* dst, size_t dstlen, const char* in_esc, const char* tmp_esc, int scale) {
     if (!dst || dstlen == 0)return;
@@ -840,16 +810,10 @@ static int generate_thumb_c(const char* input, const char* output, int scale, in
             LOG_DEBUG("generate_thumb_c: executing animated webp extraction cmd: %s", extract_cmd);
             if (run_thumb_command(in_path, index, total, "ffmpeg webp extraction", extract_cmd, 30, 1, NULL) == 0) {
                 char convert_cmd[PATH_MAX * 3];
-                if (output_is_webp(out_path) && input_is_animated_webp) {
-                    snprintf(convert_cmd, sizeof(convert_cmd),
-                        "ffmpeg -y -threads 1 -i \"%s\" -vf \"scale=%d:-1,format=rgb24\" -vframes 1 -q:v %d -c:v libwebp \"%s\"",
-                        esc_tmp, scale, q, esc_out);
-                }
-                else {
-                    build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
-                }
+                build_ffmpeg_thumb_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q,
+                    output_is_webp(out_path) ? 1 : 0, 1, esc_out);
                 LOG_DEBUG("generate_thumb_c: executing animated webp conversion cmd: %s", convert_cmd);
-                if (run_thumb_command(in_path, index, total, "animated webp conversion", convert_cmd, 20, 0, NULL) == 0) {
+                if (run_thumb_command(in_path, index, total, "animated webp conversion", convert_cmd, 20, 1, NULL) == 0) {
                     platform_file_delete(tmp_jpg);
                     return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
                 }
@@ -860,16 +824,16 @@ static int generate_thumb_c(const char* input, const char* output, int scale, in
             }
         }
 
-        char magick_cmd[1024];
-        build_magick_resize_cmd(magick_cmd, sizeof(magick_cmd), esc_in_with_frame, scale, q, esc_out);
-        LOG_DEBUG("generate_thumb_c: executing final webp magick cmd: %s", magick_cmd);
-        if (run_thumb_command(in_path, index, total, "webp magick", magick_cmd, 20, 0, NULL) == 0)
+        char ffmpeg_cmd[1024];
+        build_ffmpeg_thumb_cmd(ffmpeg_cmd, sizeof(ffmpeg_cmd), esc_in_with_frame, scale, q, 1, 1, esc_out);
+        LOG_DEBUG("generate_thumb_c: executing final webp ffmpeg cmd: %s", ffmpeg_cmd);
+        if (run_thumb_command(in_path, index, total, "webp ffmpeg", ffmpeg_cmd, 20, 1, NULL) == 0)
             return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
 
-        char magick_log[PATH_MAX];
-        snprintf(magick_log, sizeof(magick_log), "%s.magick.log", out_path);
-        LOG_DEBUG("generate_thumb_c: retrying final webp magick cmd: %s", magick_cmd);
-        if (run_thumb_command(in_path, index, total, "webp magick retry", magick_cmd, 20, 0, magick_log) == 0)
+        char ffmpeg_log[PATH_MAX];
+        snprintf(ffmpeg_log, sizeof(ffmpeg_log), "%s.ffmpeg.log", out_path);
+        LOG_DEBUG("generate_thumb_c: retrying final webp ffmpeg cmd: %s", ffmpeg_cmd);
+        if (run_thumb_command(in_path, index, total, "webp ffmpeg retry", ffmpeg_cmd, 20, 1, ffmpeg_log) == 0)
             return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
         return -1;
     }
@@ -886,14 +850,10 @@ static int generate_thumb_c(const char* input, const char* output, int scale, in
         LOG_DEBUG("generate_thumb_c: executing video extraction cmd: %s", extract_cmd);
         if (run_thumb_command(in_path, index, total, "video frame extraction", extract_cmd, 60, 1, NULL) == 0) {
             char convert_cmd[1024];
-            if (output_is_webp(out_path) && input_is_animated_webp) {
-                build_ffmpeg_thumb_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, 1, 1, esc_out);
-            }
-            else {
-                build_magick_resize_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q, esc_out);
-            }
+            build_ffmpeg_thumb_cmd(convert_cmd, sizeof(convert_cmd), esc_tmp, scale, q,
+                output_is_webp(out_path) ? 1 : 0, 1, esc_out);
             LOG_DEBUG("generate_thumb_c: executing video conversion cmd: %s", convert_cmd);
-            if (run_thumb_command(in_path, index, total, "video conversion", convert_cmd, 20, 0, NULL) == 0) {
+            if (run_thumb_command(in_path, index, total, "video conversion", convert_cmd, 20, 1, NULL) == 0) {
                 platform_file_delete(tmp_jpg);
                 return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
             }
@@ -913,15 +873,17 @@ static int generate_thumb_c(const char* input, const char* output, int scale, in
         int ffmpeg_rc = run_thumb_command(in_path, index, total, "final ffmpeg", final_cmd, 30, 1, NULL);
         struct stat generated_stat;
         if (ffmpeg_rc != 0 || platform_stat(out_path, &generated_stat) != 0) {
-            build_magick_resize_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q, esc_out);
-            LOG_DEBUG("generate_thumb_c: ffmpeg failed, executing magick fallback cmd: %s", final_cmd);
-            run_thumb_command(in_path, index, total, "magick fallback", final_cmd, 30, 0, NULL);
+            build_ffmpeg_thumb_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q,
+                output_is_webp(out_path) ? 1 : 0, 1, esc_out);
+            LOG_DEBUG("generate_thumb_c: ffmpeg failed, executing ffmpeg fallback cmd: %s", final_cmd);
+            run_thumb_command(in_path, index, total, "ffmpeg fallback", final_cmd, 30, 1, NULL);
         }
     }
     else {
-        build_magick_resize_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q, esc_out);
-        LOG_DEBUG("generate_thumb_c: executing final magick cmd: %s", final_cmd);
-        run_thumb_command(in_path, index, total, "final magick", final_cmd, 30, 0, NULL);
+        build_ffmpeg_thumb_cmd(final_cmd, sizeof(final_cmd), esc_in_with_frame, scale, q,
+            output_is_webp(out_path) ? 1 : 0, 1, esc_out);
+        LOG_DEBUG("generate_thumb_c: executing final ffmpeg cmd: %s", final_cmd);
+        run_thumb_command(in_path, index, total, "final ffmpeg", final_cmd, 30, 1, NULL);
     }
     return platform_stat(out_path, &(struct stat){0}) == 0 ? 0 : -1;
 }

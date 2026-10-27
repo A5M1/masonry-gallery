@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 
+[lib]
+name = "galleria"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"
+
 [dependencies]
 wry = "0.38"
 egui = { version = "0.32", features = ["serde"] }
@@ -19,4 +24,3 @@ winres = "0.1"
 [[bin]]
 name = "galleria-view"
 path = "src/main.rs"
-windows-subsystem = "console"
