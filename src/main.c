@@ -9,12 +9,20 @@
 #include "config.h"
 #include "thumbs.h"
 #include "exception_handler.h"
+#include "memory.h"
 #include "platform.h"
 #include "websocket.h"
 
 int main(int argc, char** argv) {
     log_init();
     install_exception_handlers();
+    exception_handler_register_thread("main", "main");
+    if (mem_init() != 0) {
+        LOG_ERROR("Failed to initialize scoped memory manager");
+        return 1;
+    }
+    mem_scope_t* main_scope = mem_scope_create("main", mem_global_scope());
+    if (main_scope) mem_scope_enter(main_scope);
     LOG_DEBUG("startup: installed exception handlers");
     LOG_DEBUG("startup: after log_init");
     platform_init_network();
@@ -60,6 +68,13 @@ int main(int argc, char** argv) {
     if (s < 0) {
         LOG_ERROR("Failed to create listening socket on port %d", port);
         platform_cleanup_network();
+        if (main_scope) {
+            mem_scope_leave();
+            mem_scope_destroy(main_scope);
+        }
+        mem_purge_quarantine();
+        mem_report_leaks("startup-failure");
+        exception_handler_unregister_thread();
         return 1;
     }
     LOG_INFO("Gallery server running on http://localhost:%d", port);
@@ -78,6 +93,7 @@ int main(int argc, char** argv) {
     int wait_ct = 0;
     int consecutive_failures = 0;
     for (;;) {
+        if (exception_handler_shutdown_requested()) break;
         struct sockaddr_in ca;
         socklen_t calen = sizeof(ca);
         if (wait_ct % 10 == 0)
@@ -110,6 +126,14 @@ int main(int argc, char** argv) {
         platform_set_socket_options(c);
         enqueue_job(c);
     }
+    stop_thread_pool();
     platform_cleanup_network();
+    if (main_scope) {
+        mem_scope_leave();
+        mem_scope_destroy(main_scope);
+    }
+    mem_purge_quarantine();
+    mem_report_leaks("shutdown");
+    exception_handler_unregister_thread();
     return 0;
 }

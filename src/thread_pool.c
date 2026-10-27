@@ -4,6 +4,7 @@
 #include "http.h"
 #include "common.h"
 #include "exception_handler.h"
+#include "memory.h"
 #define QUEUE_CAP 1024
 
 static int* job_ring;
@@ -61,18 +62,68 @@ void thread_mutex_unlock(thread_mutex_t* m) {
 #endif
 }
 
-int thread_create_detached(void *(*start_routine)(void*), void* arg) {
+typedef struct {
+    void* (*start_routine)(void*);
+    void* arg;
+    char name[64];
+} thread_boot_t;
+
 #ifdef _WIN32
-    uintptr_t th = _beginthreadex(NULL, 0, (unsigned (__stdcall *)(void *))start_routine, arg, 0, NULL);
-    if (th == 0) return -1;
+static unsigned __stdcall thread_boot_trampoline(void* raw)
+#else
+static void* thread_boot_trampoline(void* raw)
+#endif
+{
+    thread_boot_t* boot = (thread_boot_t*)raw;
+    mem_scope_t* scope = mem_scope_create(boot->name, mem_global_scope());
+    if (scope) mem_scope_enter(scope);
+    exception_handler_register_thread(boot->name, "worker");
+    void* result = boot->start_routine(boot->arg);
+    exception_handler_unregister_thread();
+    if (scope) {
+        mem_scope_leave();
+        mem_scope_destroy(scope);
+    }
+    free(boot);
+#ifdef _WIN32
+    return 0;
+#else
+    return result;
+#endif
+}
+
+int thread_create_detached_named(const char* name, void* (*start_routine)(void*), void* arg) {
+    if (!start_routine) return -1;
+    thread_boot_t* boot = calloc(1, sizeof(thread_boot_t));
+    if (!boot) return -1;
+    boot->start_routine = start_routine;
+    boot->arg = arg;
+    if (name && name[0]) {
+        strncpy(boot->name, name, sizeof(boot->name) - 1);
+    } else {
+        strncpy(boot->name, "worker", sizeof(boot->name) - 1);
+    }
+#ifdef _WIN32
+    uintptr_t th = _beginthreadex(NULL, 0, thread_boot_trampoline, boot, 0, NULL);
+    if (th == 0) {
+        free(boot);
+        return -1;
+    }
     CloseHandle((HANDLE)th);
     return 0;
 #else
     pthread_t th;
-    if (pthread_create(&th, NULL, start_routine, arg) != 0) return -1;
+    if (pthread_create(&th, NULL, thread_boot_trampoline, boot) != 0) {
+        free(boot);
+        return -1;
+    }
     pthread_detach(th);
     return 0;
 #endif
+}
+
+int thread_create_detached(void *(*start_routine)(void*), void* arg) {
+    return thread_create_detached_named("worker", start_routine, arg);
 }
 
 #ifdef _WIN32
@@ -82,17 +133,15 @@ static void* worker_thread(void* arg) {
 #endif
     (void)arg;
 
-    install_thread_exception_handler();
+    exception_handler_register_thread("http-worker", "worker");
+    mem_scope_t* worker_scope = mem_scope_create("http-worker", mem_global_scope());
+    if (worker_scope) mem_scope_enter(worker_scope);
 
     size_t buf_size = 8192;
     char* buffer = malloc(buf_size);
     if (!buffer) {
         LOG_ERROR("Failed to allocate thread buffer of size %zu", buf_size);
-#ifdef _WIN32
-        return 1;
-#else
-        return NULL;
-#endif
+        goto worker_done;
     }
 
     for (;;) {
@@ -221,11 +270,17 @@ static void* worker_thread(void* arg) {
                     }
                 }
 
+                mem_scope_t* request_scope = mem_scope_create("request", worker_scope ? worker_scope : mem_global_scope());
+                if (request_scope) mem_scope_enter(request_scope);
                 if (!broken) {
                     keep_socket = handle_single_request(c, headers_copy, body, headers_len, content_length, true);
                     if (keep_socket) {
                         keep_alive_loop = 1;
                     }
+                }
+                if (request_scope) {
+                    mem_scope_leave();
+                    mem_scope_destroy(request_scope);
                 }
 
                 if (headers_copy != stack_headers) free(headers_copy);
@@ -239,7 +294,13 @@ static void* worker_thread(void* arg) {
         }
     }
 
+worker_done:
     free(buffer);
+    exception_handler_unregister_thread();
+    if (worker_scope) {
+        mem_scope_leave();
+        mem_scope_destroy(worker_scope);
+    }
 #ifdef _WIN32
     return 0;
 #else
@@ -391,6 +452,7 @@ static int dequeue_job(void) {
 }
 
 void stop_thread_pool(void) {
+    if (!job_ring) return;
     LOG_INFO("Stopping thread pool");
     shutting_down = 1;
 #ifdef _WIN32

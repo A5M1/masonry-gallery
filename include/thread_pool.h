@@ -15,4 +15,5 @@
     void thread_mutex_lock(thread_mutex_t* m);
     void thread_mutex_unlock(thread_mutex_t* m);
     int thread_create_detached(void* (*start_routine)(void*), void* arg);
+    int thread_create_detached_named(const char* name, void* (*start_routine)(void*), void* arg);
 
