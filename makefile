@@ -168,19 +168,19 @@ linux-arm: buildbn $(OBJS_LINUX_ARM)
 # ======================================================
 # Rust targets
 rust-lib:
-	@echo "[Cargo] Building Rust library..."
-	@cd $(RUST_DIR) && cargo build --release --lib
+	@echo "[Cargo] Building Rust database library..."
+	@cd $(RUST_DIR) && cargo build --release --lib -p galleria
 
 rust-release:
-	@echo "[Cargo] Building Rust release..."
-	@cd $(RUST_DIR) && cargo build --release
+	@echo "[Cargo] Building Rust view release..."
+	@cd $(RUST_DIR) && cargo build --release -p galleria-view
 	@mkdir -p $(DIST_DIR)
 	@cp $(RUST_DIR)/target/release/galleria-view$(EXE) $(EXEC_RUST_RELEASE) 2>/dev/null || true
 	@$(MAKE) copy-assets
 
 rust-debug:
-	@echo "[Cargo] Building Rust debug..."
-	@cd $(RUST_DIR) && cargo build
+	@echo "[Cargo] Building Rust view debug..."
+	@cd $(RUST_DIR) && cargo build -p galleria-view
 	@mkdir -p $(DIST_DIR)
 	@cp $(RUST_DIR)/target/debug/galleria-view$(EXE) $(EXEC_RUST_DEBUG) 2>/dev/null || true
 	@$(MAKE) copy-assets
