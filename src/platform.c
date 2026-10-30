@@ -965,6 +965,19 @@ long platform_get_physical_memory_mb(void) {
 #endif
 }
 
+void platform_clear_socket_timeouts(int sock) {
+#ifdef _WIN32
+    DWORD zero = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zero, sizeof(zero));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&zero, sizeof(zero));
+#else
+    struct timeval zero;
+    zero.tv_sec = 0; zero.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof(zero));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &zero, sizeof(zero));
+#endif
+}
+
 void platform_set_socket_options(int sock) {
 #ifdef _WIN32
     DWORD rcv = 30000, snd = 30000;

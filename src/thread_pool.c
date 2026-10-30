@@ -154,6 +154,7 @@ static void* worker_thread(void* arg) {
             size_t total_read = 0;
             int content_length = 0;
             int keep_socket = 0;
+            int detached_socket = 0;
             bool headers_done = false;
             char* headers_end = NULL;
             int broken = 0;
@@ -274,7 +275,11 @@ static void* worker_thread(void* arg) {
                 if (request_scope) mem_scope_enter(request_scope);
                 if (!broken) {
                     keep_socket = handle_single_request(c, headers_copy, body, headers_len, content_length, true);
-                    if (keep_socket) {
+                    if (keep_socket == 2) {
+                        detached_socket = 1;
+                        keep_alive_loop = 0;
+                    }
+                    else if (keep_socket) {
                         keep_alive_loop = 1;
                     }
                 }
@@ -288,7 +293,7 @@ static void* worker_thread(void* arg) {
             }
 
             if (!keep_alive_loop) {
-                SOCKET_CLOSE(c);
+                if (!detached_socket) SOCKET_CLOSE(c);
                 break;
             }
         }

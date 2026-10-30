@@ -24,5 +24,6 @@ bool real_path(const char* in, char* out);
 bool safe_under(const char* base_real, const char* path_real);
 bool dir_open(diriter* it, const char* path);
 const char* dir_next(diriter* it);
+int dir_current_type(const diriter* it);
 void dir_close(diriter* it);
 bool has_media_rec(const char* dir);

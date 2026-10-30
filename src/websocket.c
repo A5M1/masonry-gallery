@@ -8,6 +8,7 @@
 #include "utils.h"
 #include "directory.h"
 #include "platform.h"
+#include "thumbs.h"
 
 #define MAX_WS_CLIENTS 256
 
@@ -90,7 +91,8 @@ static int send_ws_frame_opcode(int s, int opcode, const unsigned char* data, si
     return 0;
 }
 
-static void ws_update_topic(int c, const char* msg) {
+static void ws_update_topic(int c, const char* msg, char* out_topic, size_t out_len) {
+    if (out_topic && out_len) out_topic[0] = '\0';
     const char* pathp = strstr(msg, "\"path\"");
     if (!pathp) return;
 
@@ -128,6 +130,110 @@ static void ws_update_topic(int c, const char* msg) {
         }
     }
     ws_unlock();
+
+    if (out_topic && out_len) {
+        strncpy(out_topic, raw_topic, out_len - 1);
+        out_topic[out_len - 1] = '\0';
+    }
+}
+
+static void ws_send_text_direct(int c, const char* msg) {
+    if (!msg) return;
+    ws_lock();
+    send_ws_frame_opcode(c, 0x1, (const unsigned char*)msg, strlen(msg));
+    ws_unlock();
+}
+
+static void ws_send_thumb_message(int c, const char* media_url, const char* gallery, const char* safe_dir, const char* thumb_name) {
+    char thumb_url[PATH_MAX * 2];
+    snprintf(thumb_url, sizeof(thumb_url), "/images/thumbs/%s/%s", safe_dir, thumb_name);
+    char buf[PATH_MAX * 4];
+    size_t rem = sizeof(buf);
+    char* p = buf;
+    p = json_objOpen(p, NULL, &rem);
+    p = json_str(p, "type", "thumb_ready", &rem);
+    p = json_str(p, "media", media_url, &rem);
+    p = json_str(p, "thumb", thumb_name, &rem);
+    p = json_str(p, "thumbUrl", thumb_url, &rem);
+    p = json_str(p, "gallery", gallery ? gallery : "", &rem);
+    p = json_objClose(p, &rem);
+    if (p > buf) ws_send_text_direct(c, buf);
+}
+
+static void ws_send_thumb_snapshot(int c, const char* dirparam) {
+    char base_real[PATH_MAX];
+    if (!real_path(BASE_DIR, base_real)) return;
+    char target[PATH_MAX];
+    snprintf(target, sizeof(target), "%s/%s", BASE_DIR, dirparam ? dirparam : "");
+    normalize_path(target);
+    char target_real[PATH_MAX];
+    if (!real_path(target, target_real) || !is_dir(target_real) || !safe_under(base_real, target_real)) return;
+
+    char thumbs_root[PATH_MAX];
+    get_thumbs_root(thumbs_root, sizeof(thumbs_root));
+    char safe_dir[PATH_MAX];
+    make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+    char per_thumbs_root[PATH_MAX];
+    snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
+
+    diriter it;
+    if (!dir_open(&it, target_real)) return;
+    const char* name;
+    while ((name = dir_next(&it))) {
+        if (!name || !name[0] || !strcmp(name, ".") || !strcmp(name, "..")) continue;
+        if (!has_ext(name, IMAGE_EXTS) && !has_ext(name, VIDEO_EXTS)) continue;
+        char full[PATH_MAX];
+        path_join(full, target_real, name);
+        if (!is_file(full)) continue;
+
+        char found[PATH_MAX];
+        found[0] = '\0';
+        if (!check_thumb_exists(full, found, sizeof(found))) continue;
+
+        char small_name[PATH_MAX] = { 0 };
+        char large_name[PATH_MAX] = { 0 };
+        if (strstr(found, "-small.")) {
+            strncpy(small_name, found, sizeof(small_name) - 1);
+            strncpy(large_name, found, sizeof(large_name) - 1);
+            char* p = strstr(large_name, "-small.");
+            if (p) memcpy(p, "-large.", 7);
+        }
+        else if (strstr(found, "-large.")) {
+            strncpy(large_name, found, sizeof(large_name) - 1);
+            strncpy(small_name, found, sizeof(small_name) - 1);
+            char* p = strstr(small_name, "-large.");
+            if (p) memcpy(p, "-small.", 7);
+        }
+        else {
+            snprintf(small_name, sizeof(small_name), "%s-small.jpg", found);
+            snprintf(large_name, sizeof(large_name), "%s-large.jpg", found);
+        }
+
+        char rel[PATH_MAX];
+        const char* r = full;
+        size_t bl = strlen(base_real);
+        if (strlen(full) >= bl && strncmp(full, base_real, bl) == 0) {
+            r = full + bl;
+            if (*r == DIR_SEP || *r == '/' || *r == '\\') r++;
+        }
+        char rel_url[PATH_MAX];
+        size_t j = 0;
+        for (size_t i = 0; r[i] && j < sizeof(rel_url) - 1; i++)
+            rel_url[j++] = (r[i] == '\\') ? '/' : r[i];
+        rel_url[j] = '\0';
+        char media_url[PATH_MAX * 2];
+        snprintf(media_url, sizeof(media_url), "/images/%s", rel_url);
+
+        char small_fs[PATH_MAX];
+        char large_fs[PATH_MAX];
+        snprintf(small_fs, sizeof(small_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_name);
+        snprintf(large_fs, sizeof(large_fs), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_name);
+        if (small_name[0] && is_file(small_fs))
+            ws_send_thumb_message(c, media_url, dirparam, safe_dir, small_name);
+        if (large_name[0] && is_file(large_fs))
+            ws_send_thumb_message(c, media_url, dirparam, safe_dir, large_name);
+    }
+    dir_close(&it);
 }
 #define MAX_WS_FRAME_SIZE (1 * 1024 * 1024)
 #define MAX_WS_MESSAGE_SIZE (2 * 1024 * 1024)
@@ -238,7 +344,9 @@ static void* websocket_client_thread(void* arg) {
 
                 if (fin) {
                 if (strstr((char*)accum, "subscribe")) {
-                    ws_update_topic(c, (char*)accum);
+                    char sub_path[PATH_MAX];
+                    sub_path[0] = '\0';
+                    ws_update_topic(c, (char*)accum, sub_path, sizeof(sub_path));
                     const char* sstart = strstr((char*)accum, "\"session\"");
                     if (!sstart) sstart = strstr((char*)accum, "\"session_id\"");
                     if (sstart) {
@@ -269,6 +377,7 @@ static void* websocket_client_thread(void* arg) {
                             }
                         }
                     }
+                    if (strstr((char*)accum, "\"path\"")) ws_send_thumb_snapshot(c, sub_path);
                 }
 
                 if (strstr((char*)accum, "\"action\"") && strstr((char*)accum, "addFolder")) {
@@ -453,6 +562,7 @@ int websocket_register_socket(int client_socket, char* request_headers) {
         SOCKET_CLOSE(client_socket);
         return 0;
     }
+    platform_clear_socket_timeouts(client_socket);
 
     LOG_DEBUG("WebSocket handshake accepted, client_socket=%d", client_socket);
 

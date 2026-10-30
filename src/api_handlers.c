@@ -554,28 +554,57 @@ static char* json_objAddRaw(char* ptr, const char* name, const char* raw_json, s
 	while (*raw_json && *remLen > 0) { *ptr++ = *raw_json++; (*remLen)--; }
 	return ptr;
 }
-#define MAX_TREE_DEPTH 5
+#define MAX_TREE_DEPTH 32
+#define TREE_CACHE_TTL 30
 
-static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, const char* dir, const char* root, int depth) {
+static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, const char* dir, const char* root_real, int depth) {
+	char** names = NULL; size_t n = 0, alloc = 0;
+	if (depth > 0) {
+		diriter it;
+		if (dir_open(&it, dir)) {
+			const char* name;
+			while ((name = dir_next(&it))) {
+				if (!name || !name[0]) continue;
+				if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "thumbs")) continue;
+				int type = dir_current_type(&it);
+				if (type == 0) continue;
+				char full[PATH_MAX];
+				path_join(full, dir, name);
+				if (type < 0 && !is_dir(full)) continue;
+				if (has_nogallery(full)) continue;
+				if (n == alloc) {
+					alloc = alloc ? alloc * 2 : 16;
+					char** grown = realloc(names, alloc * sizeof(char*));
+					if (!grown) {
+						for (size_t i = 0; i < n; i++) free(names[i]);
+						free(names);
+						names = NULL; n = 0;
+						break;
+					}
+					names = grown;
+				}
+				names[n] = strdup(name);
+				if (!names[n]) break;
+				n++;
+			}
+			dir_close(&it);
+		}
+	}
+
 	ensure_json_buf(pbuf, cap, *used, 4096);
 	char* ptr = *pbuf + *used;
-	if (!is_dir(dir) || has_nogallery(dir)) {
-		ptr = json_null(ptr, NULL, cap);
-		*used = ptr - *pbuf;
-		return ptr;
-	}
 	ptr = json_objOpen(ptr, NULL, cap);
 	*used = ptr - *pbuf;
 	const char* base = strrchr(dir, DIR_SEP);
 	base = base ? base + 1 : dir;
 	ptr = json_str(ptr, "name", base, cap);
 	*used = ptr - *pbuf;
-	char rroot[PATH_MAX], rdir[PATH_MAX];
-	real_path(root, rroot);
-	real_path(dir, rdir);
-	const char* r = rdir;
-	size_t rl = strlen(rroot);
-	if (safe_under(rroot, rdir)) r = rdir + rl + ((rdir[rl] == DIR_SEP) ? 1 : 0);
+	const char* r = dir;
+	size_t rl = strlen(root_real);
+	if (rl > 0 && strlen(dir) >= rl) {
+		r = dir + rl;
+		if (*r == DIR_SEP || *r == '/' || *r == '\\') r++;
+	}
 	char relurl[PATH_MAX]; size_t j = 0;
 	for (size_t i = 0; r[i] && j < PATH_MAX - 1; i++) {
 		char ch = r[i]; if (ch == '\\') ch = '/'; relurl[j++] = ch;
@@ -585,35 +614,8 @@ static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, cons
 	*used = ptr - *pbuf;
 	ptr = json_arrOpen(ptr, "children", cap);
 	*used = ptr - *pbuf;
-	char** names = NULL; size_t n = 0, alloc = 0;
-	diriter it;
-	if (dir_open(&it, dir)) {
-		const char* name;
-		while ((name = dir_next(&it))) {
-			if (!name) continue;
-			if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "thumbs")) continue;
-			if (strlen(name) == 0) continue;
-			char full[PATH_MAX] = { 0 };
-				path_join(full, dir, name);
-				full[PATH_MAX - 1] = '\0';
-				if (is_dir(full) && !has_nogallery(full)) {
-				if (n == alloc) {
-					alloc = alloc ? alloc * 2 : 16;
-					names = realloc(names, alloc * sizeof(char*));
-					if (!names) {
-						size_t i;
-						for (i = 0; i < n; i++) free(names[i]);
-						alloc = 0;
-						break;
-					}
-				}
-				names[n++] = strdup(name);
-			}
-		}
-		dir_close(&it);
-	}
-	qsort(names, n, sizeof(char*), p_strcmp);
-	for (size_t i = 0;i < n;i++) {
+	if (n > 1) qsort(names, n, sizeof(char*), p_strcmp);
+	for (size_t i = 0; i < n; i++) {
 		if (i > 0) {
 			ptr = *pbuf + *used;
 			ptr = json_comma_safe(ptr, cap);
@@ -621,10 +623,10 @@ static char* build_folder_tree_json(char** pbuf, size_t* cap, size_t* used, cons
 		}
 		char child_full[PATH_MAX]; path_join(child_full, dir, names[i]);
 		ptr = *pbuf + *used;
-		ptr = build_folder_tree_json(pbuf, cap, used, child_full, root, depth - 1);
+		ptr = build_folder_tree_json(pbuf, cap, used, child_full, root_real, depth - 1);
 		*used = ptr - *pbuf;
 	}
-	for (size_t i = 0;i < n;i++) free(names[i]);
+	for (size_t i = 0; i < n; i++) free(names[i]);
 	free(names);
 	ptr = json_arrClose(ptr, cap);
 	ptr = json_objClose(ptr, cap);
@@ -637,26 +639,58 @@ static time_t tree_cache_time = 0;
 static thread_mutex_t tree_cache_mutex;
 static int tree_cache_mutex_inited = 0;
 
+static void invalidate_tree_cache(void) {
+	if (!tree_cache_mutex_inited) {
+		if (thread_mutex_init(&tree_cache_mutex) == 0) tree_cache_mutex_inited = 1;
+	}
+	if (!tree_cache_mutex_inited) return;
+	thread_mutex_lock(&tree_cache_mutex);
+	if (tree_cache) {
+		free(tree_cache);
+		tree_cache = NULL;
+	}
+	tree_cache_len = 0;
+	tree_cache_time = 0;
+	thread_mutex_unlock(&tree_cache_mutex);
+}
+
+static void build_tree_root(char** pbuf, size_t* cap, size_t* used, const char* folder) {
+	char root_real[PATH_MAX];
+	ensure_json_buf(pbuf, cap, *used, 4096);
+	char* ptr = *pbuf + *used;
+	if (!real_path(folder, root_real) || !is_dir(root_real) || has_nogallery(root_real)) {
+		ptr = json_null(ptr, NULL, cap);
+		*used = ptr - *pbuf;
+		return;
+	}
+	build_folder_tree_json(pbuf, cap, used, root_real, root_real, MAX_TREE_DEPTH);
+}
+
 void handle_api_tree(int c, bool keep_alive) {
 	if (!tree_cache_mutex_inited) {
 		if (thread_mutex_init(&tree_cache_mutex) == 0) tree_cache_mutex_inited = 1;
 	}
 	time_t now = time(NULL);
 	thread_mutex_lock(&tree_cache_mutex);
-	if (tree_cache && (now - tree_cache_time) < 5) {
+	if (tree_cache && (now - tree_cache_time) < TREE_CACHE_TTL) {
 		send_header(c, 200, "OK", "application/json; charset=utf-8", (long)tree_cache_len, NULL, 0, keep_alive);
 		send(c, tree_cache, (int)tree_cache_len, 0);
 		thread_mutex_unlock(&tree_cache_mutex);
 		return;
 	}
-	thread_mutex_unlock(&tree_cache_mutex);
+
 	size_t count;
 	char** folders = get_gallery_folders(&count);
 	size_t cap = 8192;
 	char* buf = malloc(cap);
+	if (!buf) {
+		thread_mutex_unlock(&tree_cache_mutex);
+		send_text(c, 500, "Internal Server Error", "Out of memory", keep_alive);
+		return;
+	}
 	size_t used = 0;
 	if (count == 1) {
-		build_folder_tree_json(&buf, &cap, &used, folders[0], folders[0], MAX_TREE_DEPTH);
+		build_tree_root(&buf, &cap, &used, folders[0]);
 	}
 	else {
 		char* ptr = buf;
@@ -667,12 +701,12 @@ void handle_api_tree(int c, bool keep_alive) {
 		size_t i;
 		for (i = 0; i < count; i++) {
 			if (i > 0) { ptr = json_comma_safe(ptr, &cap); used = ptr - buf; }
-			build_folder_tree_json(&buf, &cap, &used, folders[i], folders[i], MAX_TREE_DEPTH);
+			build_tree_root(&buf, &cap, &used, folders[i]);
 		}
 		ptr = json_arrClose(ptr, &cap); used = ptr - buf;
 		ptr = json_objClose(ptr, &cap); used = ptr - buf;
 	}
-	thread_mutex_lock(&tree_cache_mutex);
+
 	if (tree_cache) free(tree_cache);
 	tree_cache = malloc(used);
 	if (tree_cache) {
@@ -1085,6 +1119,7 @@ void handle_api_add_folder(int c, const char* body, bool keep_alive) {
 	if (!is_dir(path)) { send_text(c, 400, "Bad Request", "Not a directory", keep_alive); return; }
 	if (is_gallery_folder(path)) { send_text(c, 400, "Bad Request", "Folder already in gallery", keep_alive); return; }
 	add_gallery_folder(path);
+	invalidate_tree_cache();
 	size_t cap = 512; char* buf = malloc(cap);
 	if (!buf) {
 		const char* msg = "{\"error\":\"Out of memory\"}";
@@ -1446,6 +1481,7 @@ void handle_legacy_addfolder(int c, const char* body, bool keep_alive) {
 	normalize_path(dest); mk_dir(dest);
 	if (is_dir(dest)) {
 		LOG_INFO("handle_legacy_addfolder created folder: %s", dest);
+		invalidate_tree_cache();
 		char fg_path[PATH_MAX];
 		path_join(fg_path, dest, ".fg");
 		FILE* fgf = fopen(fg_path, "wb");
@@ -2267,7 +2303,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 			if (websocket_register_socket(c, headers)) {
 				SAFE_FREE(upgrade);
 				SAFE_FREE(connection_hdr);
-				return 1;
+				return 2;
 			}
 		}
 	}

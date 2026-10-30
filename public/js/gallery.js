@@ -480,14 +480,12 @@ function setupThumbSocket() {
 		var ws = new WebSocket(wsUrl);
 		ws.addEventListener("open", function () {
 			console.log("Thumbnail WebSocket connected");
-			if (currentDir) {
-				ws.send(
-					JSON.stringify({
-						type: "subscribe",
-						path: currentDir
-					})
-				);
-			}
+			ws.send(
+				JSON.stringify({
+					type: "subscribe",
+					path: currentDir
+				})
+			);
 		});
 		ws.addEventListener("message", function (evt) {
 			try {
@@ -499,15 +497,19 @@ function setupThumbSocket() {
 					if (img) {
 						var thumbUrl = o.thumbUrl;
 						if (o.hash) thumbUrl += (thumbUrl.indexOf("?") === -1 ? "?" : "&") + "v=" + encodeURIComponent(o.hash);
+						var isLarge = o.thumbUrl.indexOf("-large.") !== -1;
+						var isSmall = o.thumbUrl.indexOf("-small.") !== -1;
+						if (isSmall) img.setAttribute("data-thumb-small", thumbUrl);
+						if (isLarge) img.setAttribute("data-thumb-large", thumbUrl);
 						var currentSrc = img.getAttribute("src") || "";
-						if (currentSrc !== thumbUrl) {
-							img.src = thumbUrl;
-							if (o.thumbUrl.indexOf("-small.") !== -1) img.setAttribute("data-thumb-small", thumbUrl);
-							if (o.thumbUrl.indexOf("-large.") !== -1) img.setAttribute("data-thumb-large", thumbUrl);
-							var a = img.closest("a");
-							if (a) a.setAttribute("data-thumb-status", "1");
-							scheduleLayout();
-						}
+						var hasLarge = !!img.getAttribute("data-thumb-large");
+						var shouldApply =
+							isLarge ||
+							(!hasLarge && currentSrc.indexOf("-large.") === -1);
+						if (shouldApply && currentSrc !== thumbUrl) img.src = thumbUrl;
+						var a = img.closest("a");
+						if (a) a.setAttribute("data-thumb-status", "1");
+						scheduleLayout();
 					}
 				}
 				if (o.status === "generated" && o.url) {
