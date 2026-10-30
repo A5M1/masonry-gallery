@@ -8,7 +8,9 @@
 		hasMore = true,
 		isLoading = false,
 		firstLoad = true,
-		lastItemObserver = null;
+		lastItemObserver = null,
+		pollTimer = null,
+		pollDelay = 1500;
 	const galleryContainer = $("#gallery");
 	const loadingIndicator = $("#loading");
 
@@ -103,14 +105,20 @@
 			});
 	}
 
-	let sweepQueued = false;
+	let lastSweep = 0;
+	let sweepTimer = null;
 	function queueSweep() {
-		if (sweepQueued) return;
-		sweepQueued = true;
-		requestAnimationFrame(() => {
-			sweepQueued = false;
+		const now = Date.now();
+		if (now - lastSweep >= 120) {
+			lastSweep = now;
 			sweepThumbs();
-		});
+		} else if (!sweepTimer) {
+			sweepTimer = setTimeout(() => {
+				sweepTimer = null;
+				lastSweep = Date.now();
+				sweepThumbs();
+			}, 120);
+		}
 	}
 	window.addEventListener("scroll", queueSweep, { passive: true });
 	window.addEventListener("resize", queueSweep, { passive: true });
@@ -244,6 +252,7 @@
 						);
 
 						sweepThumbs();
+						startPoll(700);
 						initFancybox();
 					}
 
@@ -557,12 +566,35 @@ function setupThumbSocket() {
 		console.error("Failed to setup thumbnail WebSocket:", e);
 	}
 }
+function thumbsPending() {
+	var imgs = document.querySelectorAll("img.thumb-img[data-media]");
+	for (var i = 0; i < imgs.length; i++) {
+		if (!imgs[i].getAttribute("data-thumb-small")) return true;
+	}
+	return false;
+}
+
+function schedulePoll(delay) {
+	if (pollTimer) clearTimeout(pollTimer);
+	pollTimer = setTimeout(pollThumbs, delay);
+}
+
+function startPoll(delay) {
+	pollDelay = 1500;
+	schedulePoll(delay || 1500);
+}
+
 function pollThumbs() {
-	try {
-		$.getJSON(
-			"/api/thumbs?dir=" + encodeURIComponent(currentDir),
-			function (d) {
-				if (!d || !d.safe) return;
+	pollTimer = null;
+	if (!thumbsPending()) {
+		pollDelay = 1500;
+		return;
+	}
+	$.getJSON(
+		"/api/thumbs?dir=" + encodeURIComponent(currentDir),
+		function (d) {
+			var changed = false;
+			if (d && d.safe) {
 				var safe = d.safe;
 				Array.from(document.querySelectorAll("img.thumb-img[data-media]")).forEach(function (img) {
 					var media = img.getAttribute("data-media") || "";
@@ -571,19 +603,24 @@ function pollThumbs() {
 					if (!md5) return;
 					var small = "/images/thumbs/" + safe + "/" + md5 + "-small.jpg";
 					var large = "/images/thumbs/" + safe + "/" + md5 + "-large.jpg";
+					if (img.getAttribute("data-thumb-small") !== small) changed = true;
 					img.setAttribute("data-thumb-small", small);
 					img.setAttribute("data-thumb-large", large);
 				});
 				sweepThumbs();
 			}
-		);
-	} catch (e) {}
-	setTimeout(pollThumbs, 500);
+			pollDelay = changed ? 1500 : Math.min(pollDelay + 1500, 10000);
+			schedulePoll(pollDelay);
+		}
+	).fail(function () {
+		pollDelay = Math.min(pollDelay + 3000, 15000);
+		schedulePoll(pollDelay);
+	});
 }
 
 	setupSidebarLogic();
 	setupThumbSocket();
-	pollThumbs();
+	startPoll();
 
 	window.w = initFancybox;
 	window.m = initMasonry;
