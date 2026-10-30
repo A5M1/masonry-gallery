@@ -39,6 +39,7 @@ unsigned long platform_get_tid(void);
 void platform_init_network(void);
 void platform_cleanup_network(void);
 void platform_set_socket_options(int sock);
+void platform_clear_socket_timeouts(int sock);
 bool platform_is_file(const char* p);
 bool platform_is_dir(const char* p);
 bool platform_real_path(const char* in, char* out);

@@ -102,12 +102,11 @@ int platform_file_delete(const char* path) {
             LOG_WARN("platform_file_delete: attempt=%d DeleteFileW retry after SetFileAttributesW failed for %s err=%lu", attempts + 1, path, (unsigned long)err2);
         }
         if (err == ERROR_SHARING_VIOLATION) {
-            int backoff = 50 * (attempts + 1);
-            if (backoff < 100) backoff = 100;
-            if (backoff > 2000) backoff = 2000;
+            int backoff = 50 * (1 << attempts); // Exponential backoff
+            if (backoff > 5000) backoff = 5000; // Cap at 5000ms
+            LOG_WARN("platform_file_delete: retrying after %d ms due to sharing violation", backoff);
             platform_sleep_ms(backoff);
-        }
-        else {
+        } else {
             platform_sleep_ms(50);
         }
         attempts++;
@@ -184,10 +183,31 @@ int platform_copy_file(const char* src,const char* dst){
 FILE* platform_fopen(const char* path, const char* mode) {
 #ifdef _WIN32
     WCHAR wpath[PATH_MAX];
-    WCHAR wmode[16];
     if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX) == 0) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 16) == 0) return NULL;
-    return _wfopen(wpath, wmode);
+    DWORD access = 0;
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD disp = OPEN_EXISTING;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL;
+    if (mode[0] == 'w' || mode[0] == 'a') {
+        access = GENERIC_READ | GENERIC_WRITE;
+        disp = (mode[0] == 'a') ? OPEN_ALWAYS : CREATE_ALWAYS;
+    } else {
+        access = GENERIC_READ;
+    }
+    if (mode[0] == 'a') flags |= FILE_APPEND_DATA;
+    HANDLE h = CreateFileW(wpath, access, share, NULL, disp, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    int fd = _open_osfhandle((intptr_t)h, (mode[0] == 'a') ? _O_APPEND : 0);
+    if (fd < 0) { CloseHandle(h); return NULL; }
+    char fmode[8];
+    int mi = 0;
+    if (mode[0] == 'r' && mode[1] == 'b') { fmode[mi++] = 'r'; fmode[mi++] = 'b'; }
+    else if (mode[0] == 'r') { fmode[mi++] = 'r'; fmode[mi++] = 'b'; }
+    else if (mode[0] == 'w') { fmode[mi++] = 'w'; fmode[mi++] = 'b'; }
+    else if (mode[0] == 'a') { fmode[mi++] = 'a'; fmode[mi++] = 'b'; }
+    else { fmode[mi++] = mode[0]; }
+    fmode[mi] = '\0';
+    return _fdopen(fd, fmode);
 #else
     return fopen(path, mode);
 #endif
@@ -619,22 +639,48 @@ int platform_stream_file_payload(int client_socket, const char* path, long start
     long remain = len; if (remain <= 0) {
         struct stat st; if (fstat(fd, &st) == 0) remain = (long)st.st_size - start; else remain = 0;
     }
-    char buf[65536];
-    while (remain > 0) {
-        size_t toread = (remain < (long)sizeof(buf)) ? (size_t)remain : sizeof(buf);
-        if (lseek(fd, offset, SEEK_SET) == (off_t)-1) { close(fd); return -1; }
-        ssize_t rd = read(fd, buf, toread);
-        if (rd <= 0) { if (errno == EINTR) continue; close(fd); return -1; }
-        ssize_t sent_total = 0;
-        while (sent_total < rd) {
-            ssize_t snt = send(client_socket, buf + sent_total, (int)(rd - sent_total), 0);
-            if (snt <= 0) {
-                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
-                close(fd); return -1;
+    if (remain <= 0) { close(fd); unregister_stream_by_sock(client_socket); return 0; }
+    /* Try sendfile() for zero-copy kernel-mode transfer; fall back to manual loop on EAGAIN/EINTR. */
+    off_t sf_off = offset;
+    long sf_remain = remain;
+    int used_sendfile = 0;
+    while (sf_remain > 0) {
+        ssize_t snt = sendfile(client_socket, fd, &sf_off, (size_t)sf_remain);
+        if (snt > 0) { sf_remain -= snt; used_sendfile = 1; continue; }
+        if (snt == 0) break;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            struct timeval tv; tv.tv_sec = 30; tv.tv_usec = 0;
+            setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            fd_set wfds; FD_ZERO(&wfds); FD_SET(client_socket, &wfds);
+            int sr = select(client_socket + 1, NULL, &wfds, NULL, NULL);
+            if (sr > 0) continue;
+            break;
+        }
+        break;
+    }
+    if (sf_remain == 0) { close(fd); unregister_stream_by_sock(client_socket); return 0; }
+    /* Fallback: manual read/send loop (only if sendfile was not usable or failed mid-stream). */
+    if (!used_sendfile) {
+        char buf[65536];
+        off_t off = offset;
+        long rem = remain;
+        while (rem > 0) {
+            size_t toread = (rem < (long)sizeof(buf)) ? (size_t)rem : sizeof(buf);
+            if (lseek(fd, off, SEEK_SET) == (off_t)-1) { close(fd); unregister_stream_by_sock(client_socket); return -1; }
+            ssize_t rd = read(fd, buf, toread);
+            if (rd <= 0) { if (rd < 0 && errno == EINTR) continue; close(fd); unregister_stream_by_sock(client_socket); return -1; }
+            ssize_t sent_total = 0;
+            while (sent_total < rd) {
+                ssize_t snt = send(client_socket, buf + sent_total, (int)(rd - sent_total), 0);
+                if (snt <= 0) {
+                    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                    close(fd); unregister_stream_by_sock(client_socket); return -1;
+                }
+                sent_total += snt;
+                off += snt;
+                rem -= snt;
             }
-            sent_total += snt;
-            offset += snt;
-            remain -= snt;
         }
     }
     close(fd);
@@ -916,6 +962,19 @@ long platform_get_physical_memory_mb(void) {
     long pages = sysconf(_SC_PHYS_PAGES); long page_size = sysconf(_SC_PAGESIZE);
     if (pages > 0 && page_size > 0) return (long)((pages * page_size) / (1024 * 1024));
     return -1;
+#endif
+}
+
+void platform_clear_socket_timeouts(int sock) {
+#ifdef _WIN32
+    DWORD zero = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zero, sizeof(zero));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&zero, sizeof(zero));
+#else
+    struct timeval zero;
+    zero.tv_sec = 0; zero.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof(zero));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &zero, sizeof(zero));
 #endif
 }
 

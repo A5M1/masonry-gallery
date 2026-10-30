@@ -6,1447 +6,1997 @@
 #include "thread_pool.h"
 #include "crypto.h"
 #include "common.h"
-#include "blaze.h"
 #include "arena.h"
 #include "config.h"
 #include "thumbs.h"
 #include "robinhood_hash.h"
 
-#define DB_FILENAME "thumbs.db"
-#define LINE_MAX 4096
-#define INITIAL_BUCKETS 65536
-#define DB_MAGIC "TNDB"
-#define DB_MAGIC_LEN 4
+#define DB_FILENAME "thumbs.tdb"
+#define INITIAL_BUCKETS_BITS 16
+#define WAL_DIR_NAME "wal"
+#define WAL_CHUNK_FMT "chunk-%lld-%u-%u.wal"
+#define MAX_INSTANCES 64
 
-const uint8_t OP_BEGIN_RECORD   = 0xAA;
-const uint8_t OP_SEPERATOR      = 0x0A;
-const uint8_t OP_MP4            = 0x0B;
-const uint8_t OP_JPG            = 0x0C;
-const uint8_t OP_WEBM           = 0x0D;
-const uint8_t OP_GIF            = 0x10;
-const uint8_t OP_WEBP           = 0x0E;
-const uint8_t OP_PNG            = 0x0F;
-const uint8_t OP_END_RECORD     = 0xFF;
-const uint8_t OP_BASE_DIR       = 0xBB;
-const uint8_t OP_NEWLINE        = 0xFA;
-const uint8_t OP_BACKSLASH      = 0xFB;
-const uint8_t OP_LARGE_JPG      = 0xAD;
-const uint8_t OP_SMALL_JPG      = 0xBE;
+typedef struct {
+    uint16_t db_magic;
+    uint16_t index_magic;
+    uint8_t version;
+} mediavault_constants_t;
 
-static const struct { const char* ext; uint8_t code; } ext_map[] = {
-    {".jpg", OP_JPG}, {".jpeg", OP_JPG}, {".png", OP_PNG},
-    {".gif", OP_GIF}, {".webp", OP_WEBP}, {".mp4", OP_MP4},
-    {".webm", OP_WEBM}, {NULL, 0}
+typedef struct {
+    uint8_t begin;
+    uint8_t end;
+    uint8_t tx_begin;
+    uint8_t tx_end;
+    uint8_t delete_op;
+} mediavault_opcodes_t;
+
+static const mediavault_constants_t MV_CONSTANTS = {
+    .db_magic = 0x4D56,
+    .index_magic = 0x4958,
+    .version = 0x21
 };
 
-static unsigned char get_ext_opcode(const char* path) {
-    const char* dot = strrchr(path, '.');
-    if (!dot) return OP_JPG;  
-    for (int i = 0; ext_map[i].ext; i++) {
-        if (ascii_stricmp(dot, ext_map[i].ext) == 0) return ext_map[i].code;
-    }
-    return OP_JPG; 
+static const mediavault_opcodes_t MV_OPCODES = {
+    .begin = 0xAA,
+    .end = 0xFF,
+    .tx_begin = 0xBB,
+    .tx_end = 0xCC,
+    .delete_op = 0xDD
+};
+
+typedef enum {
+    MEDIA_JPG = 0,
+    MEDIA_PNG = 1,
+    MEDIA_GIF = 2,
+    MEDIA_WEBP = 3,
+    MEDIA_MP4 = 4,
+    MEDIA_WEBM = 5
+} media_type_t;
+
+typedef enum {
+    HASH_FULL_MD5 = 0,
+    HASH_HALF_MD5 = 1,
+    HASH_RIPEMD128 = 2,
+    HASH_NONE = 3
+} hash_mode_t;
+
+typedef struct {
+    uint8_t dimensions_delta;
+    uint8_t orientation;
+    uint8_t codec_info;
+    uint8_t gps_coords;
+    uint8_t perceptual_hash;
+} mediavault_extension_tags_t;
+
+static const mediavault_extension_tags_t MV_EXT_TAGS = {
+    .dimensions_delta = 0x01,
+    .orientation = 0x02,
+    .codec_info = 0x03,
+    .gps_coords = 0x04,
+    .perceptual_hash = 0x05
+};
+
+typedef struct {
+    uint8_t varint_continue_bit;
+    uint8_t varint_data_mask;
+    uint8_t meta_type_mask;
+    uint8_t meta_thumb_mode_mask;
+    uint8_t meta_bit_mask;
+    uint8_t byte_mask;
+    uint8_t flags_init;
+} mediavault_bitmasks_t;
+
+static const mediavault_bitmasks_t MV_BITMASKS = {
+    .varint_continue_bit = 0x80,
+    .varint_data_mask = 0x7F,
+    .meta_type_mask = 0x07,
+    .meta_thumb_mode_mask = 0x03,
+    .meta_bit_mask = 0x01,
+    .byte_mask = 0xFF,
+    .flags_init = 0x00
+};
+
+typedef struct {
+    media_type_t type;
+    int animated;
+    int thumb_mode;
+    int hash_override;
+    int has_extensions;
+    hash_mode_t hash_mode;
+} meta_byte_t;
+
+typedef struct {
+    uint8_t flags;
+    uint64_t base_timestamp;
+    hash_mode_t default_hash_mode;
+    int timestamp_precision;
+    int has_index;
+} file_header_t;
+
+typedef struct {
+    char** dirs;
+    size_t count;
+    size_t capacity;
+} dir_table_t;
+
+typedef struct {
+    uint64_t record_sequence;
+    char* filename;
+    uint64_t timestamp;
+    meta_byte_t meta;
+    uint8_t hash[16];
+    size_t hash_len;
+    size_t dir_count;
+    uint32_t* dir_indexes;
+    uint32_t width;
+    uint32_t height;
+    uint32_t duration;
+    uint32_t crc32;
+    uint8_t orientation;
+    uint8_t perceptual_hash[8];
+    int perceptual_hash_valid;
+    char* codec_info;
+    double gps_lat;
+    double gps_lon;
+} record_t;
+
+typedef struct {
+    uint64_t file_offset;
+    uint64_t filename_hash;
+} index_entry_t;
+
+typedef struct {
+    index_entry_t* entries;
+    size_t count;
+    size_t capacity;
+} index_table_t;
+
+typedef struct async_op {
+    char key[PATH_MAX];
+    char value[PATH_MAX];
+    int is_delete;
+    struct async_op* next;
+} async_op_t;
+
+struct thumbdb_instance {
+    char db_path[PATH_MAX];
+    rh_table_t* rh_tbl;
+    dir_table_t dir_table;
+    index_table_t index_table;
+    file_header_t file_header;
+    uint64_t current_record_seq;
+    uint64_t last_filename_value;
+    uint64_t last_timestamp_value;
+    int tx_active;
+    rh_table_t* tx_snapshot;
+    thread_mutex_t mutex;
+    int compaction_requested;
+    thread_mutex_t compaction_mutex;
+    async_op_t* async_queue_head;
+    async_op_t* async_queue_tail;
+    thread_mutex_t async_queue_mutex;
+    int async_worker_running;
+    int ref_count;
+    int db_inited;
+    struct thumbdb_instance* next;
+};
+
+static thumbdb_instance_t* g_instances = NULL;
+static thread_mutex_t g_registry_mutex;
+static atomic_flag g_registry_mutex_once = ATOMIC_FLAG_INIT;
+
+static atomic_uint wal_chunk_seq = ATOMIC_VAR_INIT(0);
+static thread_mutex_t wal_seq_mutex;
+static atomic_flag wal_seq_mutex_once = ATOMIC_FLAG_INIT;
+
+static void registry_lock(void) {
+    if (!atomic_flag_test_and_set(&g_registry_mutex_once))
+        thread_mutex_init(&g_registry_mutex);
+    thread_mutex_lock(&g_registry_mutex);
 }
 
-static const char* get_ext_from_opcode(uint8_t code) {
-    for (int i = 0; ext_map[i].ext; i++) {
-        if (ext_map[i].code == code) return ext_map[i].ext;
-    }
-    return ".jpg";  
+static void registry_unlock(void) {
+    thread_mutex_unlock(&g_registry_mutex);
 }
 
-static uint8_t get_media_opcode(const char* path) {
-    if (!path) return OP_JPG;
-    const char* dot = strrchr(path, '.');
-    const char* ext = dot ? dot : ".jpg";
-    return get_ext_opcode(ext);
-}
-
-static int write_media_segments(FILE* f, const char* media) {
-    if (!f || !media) return -1;
-    size_t path_len = strlen(media);
-    size_t emit_len = path_len;
-    const char* dot = strrchr(media, '.');
-    if (dot) emit_len = (size_t)(dot - media);
-
-    uint8_t base_marker = OP_BASE_DIR;
-    if (fwrite(&base_marker, 1, 1, f) != 1) return -1;
-    for (size_t i = 0; i < emit_len; ++i) {
-        unsigned char c = (unsigned char)media[i];
-        if (c == '/' || c == '\\') {
-            uint8_t slash = OP_BACKSLASH;
-            if (fwrite(&slash, 1, 1, f) != 1) return -1;
-            continue;
+thumbdb_instance_t* thumbdb_find_instance(const char* db_path) {
+    if (!db_path) return NULL;
+    registry_lock();
+    thumbdb_instance_t* inst = g_instances;
+    while (inst) {
+        if (strcmp(inst->db_path, db_path) == 0) {
+            registry_unlock();
+            return inst;
         }
-        if (fwrite(&c, 1, 1, f) != 1) return -1;
+        inst = inst->next;
     }
-    uint8_t sep = OP_SEPERATOR;
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    uint8_t ext_code = get_media_opcode(media);
-    if (fwrite(&ext_code, 1, 1, f) != 1) return -1;
+    registry_unlock();
+    return NULL;
+}
+
+static thumbdb_instance_t* thumbdb_get_or_create_instance(const char* db_path) {
+    registry_lock();
+    thumbdb_instance_t* inst = g_instances;
+    while (inst) {
+        if (strcmp(inst->db_path, db_path) == 0) {
+            inst->ref_count++;
+            registry_unlock();
+            return inst;
+        }
+        inst = inst->next;
+    }
+
+    inst = calloc(1, sizeof(thumbdb_instance_t));
+    if (!inst) {
+        registry_unlock();
+        return NULL;
+    }
+    strncpy(inst->db_path, db_path, sizeof(inst->db_path) - 1);
+    inst->db_path[sizeof(inst->db_path) - 1] = '\0';
+    inst->ref_count = 1;
+    if (thread_mutex_init(&inst->mutex) != 0) {
+        free(inst);
+        registry_unlock();
+        return NULL;
+    }
+    if (thread_mutex_init(&inst->compaction_mutex) != 0) {
+        thread_mutex_destroy(&inst->mutex);
+        free(inst);
+        registry_unlock();
+        return NULL;
+    }
+    if (thread_mutex_init(&inst->async_queue_mutex) != 0) {
+        thread_mutex_destroy(&inst->compaction_mutex);
+        thread_mutex_destroy(&inst->mutex);
+        free(inst);
+        registry_unlock();
+        return NULL;
+    }
+    inst->next = g_instances;
+    g_instances = inst;
+    registry_unlock();
+    return inst;
+}
+
+static void thumbdb_release_instance(thumbdb_instance_t* inst) {
+    if (!inst) return;
+    registry_lock();
+    inst->ref_count--;
+    if (inst->ref_count > 0) {
+        registry_unlock();
+        return;
+    }
+    thumbdb_instance_t** prev = &g_instances;
+    thumbdb_instance_t* cur = g_instances;
+    while (cur) {
+        if (cur == inst) {
+            *prev = cur->next;
+            break;
+        }
+        prev = &cur->next;
+        cur = cur->next;
+    }
+    registry_unlock();
+
+    inst->async_worker_running = 0;
+    platform_sleep_ms(100);
+    if (inst->rh_tbl) rh_destroy(inst->rh_tbl);
+    if (inst->tx_snapshot) rh_destroy(inst->tx_snapshot);
+    for (size_t i = 0; i < inst->dir_table.count; i++) free(inst->dir_table.dirs[i]);
+    free(inst->dir_table.dirs);
+    free(inst->index_table.entries);
+    async_op_t* op = inst->async_queue_head;
+    while (op) { async_op_t* next = op->next; free(op); op = next; }
+    thread_mutex_destroy(&inst->mutex);
+    thread_mutex_destroy(&inst->compaction_mutex);
+    thread_mutex_destroy(&inst->async_queue_mutex);
+    memset(inst, 0, sizeof(*inst));
+    free(inst);
+}
+
+static int write_uint64_le(FILE* f, uint64_t value) {
+    uint8_t buf[8];
+    for (int i = 0; i < 8; i++) buf[i] = (value >> (i * 8)) & 0xFF;
+    return fwrite(buf, 1, 8, f) == 8 ? 0 : -1;
+}
+
+static int read_uint64_le(FILE* f, uint64_t* out) {
+    uint8_t buf[8];
+    if (fread(buf, 1, 8, f) != 8) return -1;
+    *out = 0;
+    for (int i = 0; i < 8; i++) *out |= ((uint64_t)buf[i]) << (i * 8);
     return 0;
 }
 
-static int append_db_record(FILE* f, const char* key, const char* val) {
-    if (!f || !key) return -1;
-    uint8_t begin = OP_BEGIN_RECORD;
-    if (fwrite(&begin, 1, 1, f) != 1) return -1;
-    uint8_t sep = OP_SEPERATOR;
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    size_t key_len = strlen(key);
-    if (fwrite(key, 1, key_len, f) != key_len) return -1;
-    if (fwrite(&sep, 1, 1, f) != 1) return -1;
-    if (val) {
-        if (write_media_segments(f, val) != 0) return -1;
-    }
-    uint8_t end = OP_END_RECORD;
-    if (fwrite(&end, 1, 1, f) != 1) return -1;
-    uint8_t newline = OP_NEWLINE;
-    if (fwrite(&newline, 1, 1, f) != 1) return -1;
+static int write_uint32_le(FILE* f, uint32_t value) {
+    uint8_t buf[4];
+    for (int i = 0; i < 4; i++) buf[i] = (value >> (i * 8)) & 0xFF;
+    return fwrite(buf, 1, 4, f) == 4 ? 0 : -1;
+}
+
+static int read_uint32_le(FILE* f, uint32_t* out) {
+    uint8_t buf[4];
+    if (fread(buf, 1, 4, f) != 4) return -1;
+    *out = 0;
+    for (int i = 0; i < 4; i++) *out |= ((uint32_t)buf[i]) << (i * 8);
     return 0;
 }
 
-static int is_valid_media_path(const char* path) {
-    if (!path || !path[0]) return 0;
+static int write_float_le(FILE* f, float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, 4);
+    return write_uint32_le(f, bits);
+}
+
+static int read_float_le(FILE* f, float* out) {
+    uint32_t bits;
+    if (read_uint32_le(f, &bits) != 0) return -1;
+    memcpy(out, &bits, 4);
+    return 0;
+}
+
+static int write_varint(FILE* f, uint64_t value) {
+    uint8_t buf[10];
+    int pos = 0;
+    while (value >= MV_BITMASKS.varint_continue_bit) {
+        buf[pos++] = (uint8_t)((value & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
+        value >>= 7;
+    }
+    buf[pos++] = (uint8_t)(value & MV_BITMASKS.varint_data_mask);
+    return fwrite(buf, 1, pos, f) == (size_t)pos ? 0 : -1;
+}
+
+static int read_varint(FILE* f, uint64_t* out) {
+    uint64_t result = 0;
+    int shift = 0;
+    uint8_t byte;
+    do {
+        if (fread(&byte, 1, 1, f) != 1) return -1;
+        result |= (uint64_t)(byte & MV_BITMASKS.varint_data_mask) << shift;
+        shift += 7;
+        if (shift > 63) return -1;
+    } while (byte & MV_BITMASKS.varint_continue_bit);
+    *out = result;
+    return 0;
+}
+
+static uint64_t zigzag_encode(int64_t value) {
+    return (uint64_t)((value << 1) ^ (value >> 63));
+}
+
+static int64_t zigzag_decode(uint64_t value) {
+    return (int64_t)((value >> 1) ^ -(value & 1));
+}
+
+static int write_signed_varint(FILE* f, int64_t value) {
+    return write_varint(f, zigzag_encode(value));
+}
+
+static int read_signed_varint(FILE* f, int64_t* out) {
+    uint64_t raw;
+    if (read_varint(f, &raw) != 0) return -1;
+    *out = zigzag_decode(raw);
+    return 0;
+}
+
+static size_t write_varint_to_buf(uint8_t* buf, size_t pos, uint64_t value) {
+    while (value >= 0x80) {
+        buf[pos++] = (uint8_t)((value & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    buf[pos++] = (uint8_t)(value & 0x7F);
+    return pos;
+}
+
+static int read_varint_with_size(FILE* f, uint64_t* out, size_t* bytes_read) {
+    uint64_t result = 0;
+    int shift = 0;
+    uint8_t byte;
+    size_t count = 0;
+    do {
+        if (fread(&byte, 1, 1, f) != 1) return -1;
+        count++;
+        result |= (uint64_t)(byte & MV_BITMASKS.varint_data_mask) << shift;
+        shift += 7;
+        if (shift > 63) return -1;
+    } while (byte & MV_BITMASKS.varint_continue_bit);
+    *out = result;
+    *bytes_read = count;
+    return 0;
+}
+
+static int write_bit_packed_indexes(FILE* f, uint32_t* indexes, size_t count, size_t table_size) {
+    if (count == 0) return 0;
+    int bits_per_index = 1;
+    size_t tmp = table_size;
+    while (tmp > 1) { bits_per_index++; tmp >>= 1; }
+    uint8_t current_byte = 0;
+    int bits_in_byte = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t idx = indexes[i];
+        int bits_remaining = bits_per_index;
+        while (bits_remaining > 0) {
+            int bits_to_write = bits_remaining;
+            if (bits_to_write > 8 - bits_in_byte) bits_to_write = 8 - bits_in_byte;
+            uint32_t mask = (1u << bits_to_write) - 1;
+            uint8_t bits = (idx >> (bits_remaining - bits_to_write)) & mask;
+            current_byte |= bits << (8 - bits_in_byte - bits_to_write);
+            bits_in_byte += bits_to_write;
+            bits_remaining -= bits_to_write;
+            if (bits_in_byte == 8) {
+                if (fwrite(&current_byte, 1, 1, f) != 1) return -1;
+                current_byte = 0;
+                bits_in_byte = 0;
+            }
+        }
+    }
+    if (bits_in_byte > 0) {
+        if (fwrite(&current_byte, 1, 1, f) != 1) return -1;
+    }
+    return 0;
+}
+
+static int read_bit_packed_indexes(FILE* f, uint32_t** out_indexes, size_t count, size_t table_size) {
+    if (count == 0) { *out_indexes = NULL; return 0; }
+    int bits_per_index = 1;
+    size_t tmp = table_size;
+    while (tmp > 1) { bits_per_index++; tmp >>= 1; }
+    uint32_t* indexes = calloc(count, sizeof(uint32_t));
+    if (!indexes) return -1;
+    uint8_t current_byte = 0;
+    int bits_available = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t idx = 0;
+        int bits_remaining = bits_per_index;
+        while (bits_remaining > 0) {
+            if (bits_available == 0) {
+                if (fread(&current_byte, 1, 1, f) != 1) { free(indexes); return -1; }
+                bits_available = 8;
+            }
+            int bits_to_read = bits_remaining;
+            if (bits_to_read > bits_available) bits_to_read = bits_available;
+            uint8_t mask = (1u << bits_to_read) - 1;
+            uint8_t bits = (current_byte >> (8 - bits_to_read)) & mask;
+            idx = (idx << bits_to_read) | bits;
+            current_byte <<= bits_to_read;
+            bits_available -= bits_to_read;
+            bits_remaining -= bits_to_read;
+        }
+        indexes[i] = idx;
+    }
+    *out_indexes = indexes;
+    return 0;
+}
+
+static uint8_t encode_meta_byte(meta_byte_t meta) {
+    uint8_t byte = 0;
+    byte |= (meta.type & MV_BITMASKS.meta_type_mask) << 5;
+    byte |= (meta.animated ? 1 : 0) << 4;
+    byte |= (meta.thumb_mode & 3) << 2;
+    byte |= (meta.hash_override ? 1 : 0) << 1;
+    byte |= (meta.has_extensions ? 1 : 0);
+    return byte;
+}
+
+static meta_byte_t decode_meta_byte(uint8_t byte) {
+    meta_byte_t meta;
+    meta.type = (byte >> 5) & MV_BITMASKS.meta_type_mask;
+    meta.animated = (byte >> 4) & MV_BITMASKS.meta_bit_mask;
+    meta.thumb_mode = (byte >> 2) & MV_BITMASKS.meta_thumb_mode_mask;
+    meta.hash_override = (byte >> 1) & MV_BITMASKS.meta_bit_mask;
+    meta.has_extensions = byte & MV_BITMASKS.meta_bit_mask;
+    meta.hash_mode = HASH_FULL_MD5;
+    return meta;
+}
+
+static size_t get_hash_length(hash_mode_t mode) {
+    switch (mode) {
+        case HASH_HALF_MD5: return 8;
+        case HASH_NONE: return 0;
+        case HASH_FULL_MD5:
+        case HASH_RIPEMD128:
+        default: return 16;
+    }
+}
+
+static media_type_t get_media_type_from_path(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (!dot) return MEDIA_JPG;
+    if (ascii_stricmp(dot, ".jpg") == 0 || ascii_stricmp(dot, ".jpeg") == 0) return MEDIA_JPG;
+    if (ascii_stricmp(dot, ".png") == 0) return MEDIA_PNG;
+    if (ascii_stricmp(dot, ".gif") == 0) return MEDIA_GIF;
+    if (ascii_stricmp(dot, ".webp") == 0) return MEDIA_WEBP;
+    if (ascii_stricmp(dot, ".mp4") == 0) return MEDIA_MP4;
+    if (ascii_stricmp(dot, ".webm") == 0) return MEDIA_WEBM;
+    return MEDIA_JPG;
+}
+
+static int is_jpeg_extension(const char* ext) {
+    if (!ext) return 0;
+    return (ascii_stricmp(ext, ".jpg") == 0 || ascii_stricmp(ext, ".jpeg") == 0);
+}
+
+static int add_dir_to_table(thumbdb_instance_t* inst, const char* dir) {
+    for (size_t i = 0; i < inst->dir_table.count; i++) {
+        if (strcmp(inst->dir_table.dirs[i], dir) == 0) return i;
+    }
+    if (inst->dir_table.count >= inst->dir_table.capacity) {
+        size_t new_cap = inst->dir_table.capacity == 0 ? 64 : inst->dir_table.capacity * 2;
+        char** new_dirs = realloc(inst->dir_table.dirs, new_cap * sizeof(char*));
+        if (!new_dirs) return -1;
+        inst->dir_table.dirs = new_dirs;
+        inst->dir_table.capacity = new_cap;
+    }
+    inst->dir_table.dirs[inst->dir_table.count] = strdup(dir);
+    if (!inst->dir_table.dirs[inst->dir_table.count]) return -1;
+    return inst->dir_table.count++;
+}
+
+static uint64_t hash_filename(const char* filename) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    const uint64_t prime = 0x100000001b3ULL;
+    for (const char* p = filename; *p; p++) {
+        hash ^= (uint64_t)(unsigned char)*p;
+        hash *= prime;
+    }
+    return hash;
+}
+
+static int add_index_entry(thumbdb_instance_t* inst, uint64_t file_offset, const char* filename) {
+    if (inst->index_table.count >= inst->index_table.capacity) {
+        size_t new_cap = inst->index_table.capacity == 0 ? 256 : inst->index_table.capacity * 2;
+        index_entry_t* new_entries = realloc(inst->index_table.entries, new_cap * sizeof(index_entry_t));
+        if (!new_entries) return -1;
+        inst->index_table.entries = new_entries;
+        inst->index_table.capacity = new_cap;
+    }
+    inst->index_table.entries[inst->index_table.count].file_offset = file_offset;
+    inst->index_table.entries[inst->index_table.count].filename_hash = hash_filename(filename);
+    inst->index_table.count++;
+    return 0;
+}
+
+static int compare_index_entries(const void* a, const void* b) {
+    const index_entry_t* ea = (const index_entry_t*)a;
+    const index_entry_t* eb = (const index_entry_t*)b;
+    if (ea->filename_hash < eb->filename_hash) return -1;
+    if (ea->filename_hash > eb->filename_hash) return 1;
+    return 0;
+}
+
+static int write_index_block(thumbdb_instance_t* inst, FILE* f) {
+    if (inst->index_table.count == 0) return 0;
+    qsort(inst->index_table.entries, inst->index_table.count, sizeof(index_entry_t), compare_index_entries);
+    uint8_t magic_hi = (MV_CONSTANTS.index_magic >> 8) & 0xFF;
+    uint8_t magic_lo = MV_CONSTANTS.index_magic & 0xFF;
+    if (fwrite(&magic_hi, 1, 1, f) != 1) return -1;
+    if (fwrite(&magic_lo, 1, 1, f) != 1) return -1;
+    if (write_varint(f, inst->index_table.count) != 0) return -1;
+    for (size_t i = 0; i < inst->index_table.count; i++) {
+        if (write_varint(f, inst->index_table.entries[i].file_offset) != 0) return -1;
+        if (write_varint(f, inst->index_table.entries[i].filename_hash) != 0) return -1;
+    }
+    return 0;
+}
+
+static int parse_path_into_dirs(thumbdb_instance_t* inst, const char* path, uint32_t** out_indexes, size_t* out_count) {
+    char tmp[PATH_MAX];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    normalize_path(tmp);
+    char* components[64];
+    size_t comp_count = 0;
+    char* scan = tmp;
+    while (*scan && comp_count < 64) {
+        while (*scan == '/' || *scan == '\\') scan++;
+        if (!*scan) break;
+        char* end = scan;
+        while (*end && *end != '/' && *end != '\\') end++;
+        size_t tok_len = (size_t)(end - scan);
+        if (tok_len > 0) {
+            char saved = *end;
+            *end = '\0';
+            components[comp_count] = scan;
+            comp_count++;
+            scan = end;
+            if (saved) *scan = saved;
+            if (*scan) scan++;
+        }
+    }
+    if (comp_count == 0) { *out_indexes = NULL; *out_count = 0; return 0; }
+    uint32_t* indexes = calloc(comp_count, sizeof(uint32_t));
+    if (!indexes) return -1;
+    for (size_t i = 0; i < comp_count; i++) {
+        int idx = add_dir_to_table(inst, components[i]);
+        if (idx < 0) { free(indexes); return -1; }
+        indexes[i] = (uint32_t)idx;
+    }
+    *out_indexes = indexes;
+    *out_count = comp_count;
+    return 0;
+}
+
+static int reconstruct_path_from_indexes(thumbdb_instance_t* inst, uint32_t* indexes, size_t count, char* out, size_t outlen) {
+    out[0] = '\0';
+    for (size_t i = 0; i < count; i++) {
+        if (indexes[i] >= inst->dir_table.count) return -1;
+        if (i > 0) strncat(out, DIR_SEP_STR, outlen - strlen(out) - 1);
+        strncat(out, inst->dir_table.dirs[indexes[i]], outlen - strlen(out) - 1);
+    }
+    return 0;
+}
+
+static int write_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_first) {
+    uint8_t record_buf[8192];
+    size_t buf_pos = 0;
+
+    record_buf[buf_pos++] = MV_OPCODES.begin;
+
+    uint8_t seq_buf[10];
+    size_t seq_len = 0;
+    uint64_t seq = rec->record_sequence;
+    while (seq >= MV_BITMASKS.varint_continue_bit) {
+        seq_buf[seq_len++] = (uint8_t)((seq & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
+        seq >>= 7;
+    }
+    seq_buf[seq_len++] = (uint8_t)(seq & MV_BITMASKS.varint_data_mask);
+    for (size_t i = 0; i < seq_len; i++) record_buf[buf_pos++] = seq_buf[i];
+
+    uint8_t dir_buf[10];
+    size_t dir_len = 0;
+    uint64_t dc = rec->dir_count;
+    while (dc >= MV_BITMASKS.varint_continue_bit) {
+        dir_buf[dir_len++] = (uint8_t)((dc & MV_BITMASKS.varint_data_mask) | MV_BITMASKS.varint_continue_bit);
+        dc >>= 7;
+    }
+    dir_buf[dir_len++] = (uint8_t)(dc & MV_BITMASKS.varint_data_mask);
+    for (size_t i = 0; i < dir_len; i++) record_buf[buf_pos++] = dir_buf[i];
+
+    size_t dir_table_size = inst->dir_table.count > 0 ? inst->dir_table.count : 1;
+    int bits_per_index = 1;
+    size_t tmp = dir_table_size;
+    while (tmp > 1) { bits_per_index++; tmp >>= 1; }
+
+    uint8_t current_byte = 0;
+    int bits_in_byte = 0;
+    for (size_t i = 0; i < rec->dir_count; i++) {
+        uint32_t idx = rec->dir_indexes[i];
+        int bits_remaining = bits_per_index;
+        while (bits_remaining > 0) {
+            int bits_to_write = bits_remaining;
+            if (bits_to_write > 8 - bits_in_byte) bits_to_write = 8 - bits_in_byte;
+            uint32_t mask = (1u << bits_to_write) - 1;
+            uint8_t bits = (idx >> (bits_remaining - bits_to_write)) & mask;
+            current_byte |= bits << (8 - bits_in_byte - bits_to_write);
+            bits_in_byte += bits_to_write;
+            bits_remaining -= bits_to_write;
+            if (bits_in_byte == 8) {
+                record_buf[buf_pos++] = current_byte;
+                current_byte = 0;
+                bits_in_byte = 0;
+            }
+        }
+    }
+    if (bits_in_byte > 0) record_buf[buf_pos++] = current_byte;
+
+    int is_numeric_key = 1;
+    char* endptr = NULL;
+    uint64_t filename_val = strtoull(rec->filename, &endptr, 10);
+    if (endptr == rec->filename || *endptr != '\0') is_numeric_key = 0;
+
+    if (is_numeric_key) {
+        if (rec->record_sequence == 0) {
+            buf_pos = write_varint_to_buf(record_buf, buf_pos, filename_val);
+        } else {
+            int64_t delta = (int64_t)filename_val - (int64_t)inst->last_filename_value;
+            buf_pos = write_varint_to_buf(record_buf, buf_pos, zigzag_encode(delta));
+        }
+        inst->last_filename_value = filename_val;
+    } else {
+        record_buf[buf_pos++] = 0x00;
+        size_t key_len = strlen(rec->filename);
+        if (key_len > 255) key_len = 255;
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)key_len);
+        memcpy(record_buf + buf_pos, rec->filename, key_len);
+        buf_pos += key_len;
+    }
+
+    uint8_t meta = encode_meta_byte(rec->meta);
+    record_buf[buf_pos++] = meta;
+
+    if (rec->meta.hash_override) {
+        uint8_t hash_mode_byte = (uint8_t)(rec->meta.hash_mode & 3);
+        record_buf[buf_pos++] = hash_mode_byte;
+    }
+
+    if (rec->meta.has_extensions) {
+        uint8_t ext_buf[2048];
+        size_t ext_pos = 0;
+        if (rec->width > 0 && rec->height > 0) {
+            ext_buf[ext_pos++] = MV_EXT_TAGS.dimensions_delta;
+            ext_buf[ext_pos++] = 0;
+        }
+        if (rec->orientation > 0) {
+            ext_buf[ext_pos++] = MV_EXT_TAGS.orientation;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, 1);
+            ext_buf[ext_pos++] = rec->orientation;
+        }
+        if (rec->codec_info && rec->codec_info[0]) {
+            size_t codec_len = strlen(rec->codec_info);
+            if (codec_len > 255) codec_len = 255;
+            ext_buf[ext_pos++] = MV_EXT_TAGS.codec_info;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, (uint64_t)codec_len);
+            memcpy(ext_buf + ext_pos, rec->codec_info, codec_len);
+            ext_pos += codec_len;
+        }
+        if (rec->gps_lat != 0.0 || rec->gps_lon != 0.0) {
+            ext_buf[ext_pos++] = MV_EXT_TAGS.gps_coords;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, 8);
+            float lat_f = (float)rec->gps_lat, lon_f = (float)rec->gps_lon;
+            uint32_t lat_bits, lon_bits;
+            memcpy(&lat_bits, &lat_f, 4); memcpy(&lon_bits, &lon_f, 4);
+            ext_buf[ext_pos++] = (lat_bits >> 0) & 0xFF; ext_buf[ext_pos++] = (lat_bits >> 8) & 0xFF;
+            ext_buf[ext_pos++] = (lat_bits >> 16) & 0xFF; ext_buf[ext_pos++] = (lat_bits >> 24) & 0xFF;
+            ext_buf[ext_pos++] = (lon_bits >> 0) & 0xFF; ext_buf[ext_pos++] = (lon_bits >> 8) & 0xFF;
+            ext_buf[ext_pos++] = (lon_bits >> 16) & 0xFF; ext_buf[ext_pos++] = (lon_bits >> 24) & 0xFF;
+        }
+        if (rec->perceptual_hash_valid) {
+            ext_buf[ext_pos++] = MV_EXT_TAGS.perceptual_hash;
+            ext_pos = write_varint_to_buf(ext_buf, ext_pos, 8);
+            memcpy(ext_buf + ext_pos, rec->perceptual_hash, 8);
+            ext_pos += 8;
+        }
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)ext_pos);
+        memcpy(record_buf + buf_pos, ext_buf, ext_pos);
+        buf_pos += ext_pos;
+    }
+
+    int64_t ts_delta = (int64_t)rec->timestamp - (int64_t)inst->last_timestamp_value;
+    buf_pos = write_varint_to_buf(record_buf, buf_pos, zigzag_encode(ts_delta));
+    inst->last_timestamp_value = rec->timestamp;
+
+    if (rec->meta.has_extensions && (rec->width > 0 && rec->height > 0)) {
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)rec->width);
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)rec->height);
+        buf_pos = write_varint_to_buf(record_buf, buf_pos, (uint64_t)rec->duration);
+    }
+
+    if (buf_pos + rec->hash_len + 6 > sizeof(record_buf)) return -1;
+    for (size_t i = 0; i < rec->hash_len; i++) record_buf[buf_pos++] = rec->hash[i];
+
+    uint32_t crc;
+    crypto_crc32(record_buf, buf_pos, &crc);
+    record_buf[buf_pos++] = (crc >> 0) & MV_BITMASKS.byte_mask;
+    record_buf[buf_pos++] = (crc >> 8) & MV_BITMASKS.byte_mask;
+    record_buf[buf_pos++] = (crc >> 16) & MV_BITMASKS.byte_mask;
+    record_buf[buf_pos++] = (crc >> 24) & MV_BITMASKS.byte_mask;
+
+    record_buf[buf_pos++] = MV_OPCODES.end;
+
+    if (fwrite(record_buf, 1, buf_pos, f) != buf_pos) return -1;
+    return 0;
+}
+
+static int read_record(thumbdb_instance_t* inst, FILE* f, record_t* rec, int is_first) {
+    uint8_t record_buf[8192];
+    size_t buf_pos = 0;
+    long start_pos = ftell(f);
+
+    uint8_t begin;
+    if (fread(&begin, 1, 1, f) != 1) return -1;
+    if (begin != MV_OPCODES.begin) return -1;
+    record_buf[buf_pos++] = begin;
+
+    uint64_t record_seq;
+    if (read_varint(f, &record_seq) != 0) return -1;
+    rec->record_sequence = record_seq;
+
+    uint64_t dir_count;
+    if (read_varint(f, &dir_count) != 0) return -1;
+    if (dir_count > 256) return -1;
+    rec->dir_count = (size_t)dir_count;
+
+    if (read_bit_packed_indexes(f, &rec->dir_indexes, rec->dir_count, inst->dir_table.count > 0 ? inst->dir_table.count : 1) != 0)
+        return -1;
+
+    uint64_t raw_filename;
+    if (read_varint(f, &raw_filename) != 0) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+
+    if (raw_filename == 0) {
+        long before_strlen = ftell(f);
+        uint64_t maybe_strlen;
+        size_t varint_bytes;
+        if (read_varint_with_size(f, &maybe_strlen, &varint_bytes) == 0 && maybe_strlen > 0 && maybe_strlen <= 255) {
+            rec->filename = malloc((size_t)maybe_strlen + 1);
+            if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+            if (fread(rec->filename, 1, (size_t)maybe_strlen, f) != (size_t)maybe_strlen) {
+                free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
+            }
+            rec->filename[maybe_strlen] = '\0';
+            /* Writer does not update the numeric base for string filenames. */
+        } else {
+            fseek(f, before_strlen, SEEK_SET);
+            rec->filename = malloc(32);
+            if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+            snprintf(rec->filename, 32, "0");
+            if (is_first) inst->last_filename_value = 0;
+        }
+    } else {
+        int64_t filename_delta = is_first ? (int64_t)raw_filename : zigzag_decode(raw_filename);
+        uint64_t abs_val = is_first
+            ? (uint64_t)filename_delta
+            : inst->last_filename_value + (uint64_t)filename_delta;
+        inst->last_filename_value = abs_val;
+        rec->filename = malloc(32);
+        if (!rec->filename) { free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        snprintf(rec->filename, 32, "%llu", (unsigned long long)abs_val);
+    }
+
+    uint8_t meta;
+    if (fread(&meta, 1, 1, f) != 1) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    rec->meta = decode_meta_byte(meta);
+
+    if (rec->meta.hash_override) {
+        uint8_t hash_mode_byte;
+        if (fread(&hash_mode_byte, 1, 1, f) != 1) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        rec->meta.hash_mode = (hash_mode_t)(hash_mode_byte & 3);
+    } else {
+        rec->meta.hash_mode = inst->file_header.default_hash_mode;
+    }
+
+    int dims_in_ext = 0;
+    if (rec->meta.has_extensions) {
+        uint64_t ext_len;
+        if (read_varint(f, &ext_len) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        if (ext_len > 65535) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        size_t ext_bytes_read = 0;
+        while (ext_bytes_read < ext_len) {
+            uint8_t tag;
+            if (fread(&tag, 1, 1, f) != 1) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+            ext_bytes_read++;
+            uint64_t value_len; size_t varint_size;
+            if (read_varint_with_size(f, &value_len, &varint_size) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+            ext_bytes_read += varint_size;
+            if (tag == MV_EXT_TAGS.dimensions_delta) {
+                dims_in_ext = 1;
+            } else if (tag == MV_EXT_TAGS.orientation && value_len == 1) {
+                if (fread(&rec->orientation, 1, 1, f) != 1) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+                ext_bytes_read++;
+            } else if (tag == MV_EXT_TAGS.codec_info && value_len > 0 && value_len < 256) {
+                rec->codec_info = malloc(value_len + 1);
+                if (rec->codec_info) {
+                    if (fread(rec->codec_info, 1, value_len, f) != value_len) { free(rec->codec_info); rec->codec_info = NULL; free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+                    rec->codec_info[value_len] = '\0'; ext_bytes_read += value_len;
+                }
+            } else if (tag == MV_EXT_TAGS.gps_coords && value_len == 8) {
+                float lat_f, lon_f;
+                if (read_float_le(f, &lat_f) != 0 || read_float_le(f, &lon_f) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+                rec->gps_lat = (double)lat_f; rec->gps_lon = (double)lon_f; ext_bytes_read += 8;
+            } else if (tag == MV_EXT_TAGS.perceptual_hash && value_len == 8) {
+                if (fread(rec->perceptual_hash, 1, 8, f) != 8) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+                rec->perceptual_hash_valid = 1; ext_bytes_read += 8;
+            } else {
+                for (uint64_t i = 0; i < value_len; i++) {
+                    uint8_t dummy;
+                    if (fread(&dummy, 1, 1, f) != 1) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+                    ext_bytes_read++;
+                }
+            }
+        }
+    }
+
+    int64_t ts_delta;
+    if (read_signed_varint(f, &ts_delta) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    rec->timestamp = (uint64_t)((int64_t)inst->last_timestamp_value + ts_delta);
+    inst->last_timestamp_value = rec->timestamp;
+
+    if (dims_in_ext) {
+        uint64_t w, h, dur;
+        if (read_varint(f, &w) != 0 || read_varint(f, &h) != 0 || read_varint(f, &dur) != 0) {
+            free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
+        }
+        rec->width = (uint32_t)w; rec->height = (uint32_t)h; rec->duration = (uint32_t)dur;
+    }
+
+    rec->hash_len = get_hash_length(rec->meta.hash_mode);
+    if (rec->hash_len > 0) {
+        if (fread(rec->hash, 1, rec->hash_len, f) != rec->hash_len) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+    }
+
+    uint32_t stored_crc;
+    if (read_uint32_le(f, &stored_crc) != 0) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+
+    uint8_t end;
+    if (fread(&end, 1, 1, f) != 1 || end != MV_OPCODES.end) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+
+    long end_pos = ftell(f);
+    fseek(f, start_pos, SEEK_SET);
+    size_t record_size = (size_t)(end_pos - start_pos - 5);
+    uint8_t* crc_buf = record_buf;
+    int crc_on_heap = 0;
+    if (record_size > sizeof(record_buf)) {
+        crc_buf = malloc(record_size);
+        if (!crc_buf) { free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1; }
+        crc_on_heap = 1;
+    }
+    if (fread(crc_buf, 1, record_size, f) != record_size) {
+        if (crc_on_heap) free(crc_buf);
+        free(rec->filename); rec->filename = NULL; free(rec->dir_indexes); rec->dir_indexes = NULL; return -1;
+    }
+    fseek(f, end_pos, SEEK_SET);
+
+    uint32_t calc_crc;
+    crypto_crc32(crc_buf, record_size, &calc_crc);
+    if (crc_on_heap) free(crc_buf);
+    if (calc_crc != stored_crc) {
+        LOG_ERROR("CRC32 mismatch for record sequence %llu — rejecting corrupt record", (unsigned long long)record_seq);
+        free(rec->filename); rec->filename = NULL;
+        free(rec->dir_indexes); rec->dir_indexes = NULL;
+        return -1;
+    }
+
+    return 0;
+}
+
+static void free_record(record_t* rec) {
+    if (!rec) return;
+    free(rec->filename);
+    free(rec->dir_indexes);
+    free(rec->codec_info);
+}
+
+static int path_has_media_extension(const char* path) {
+    if (!path) return 0;
     const char* dot = strrchr(path, '.');
     if (!dot) return 0;
-    for (int i = 0; ext_map[i].ext; i++) {
-        if (ascii_stricmp(dot, ext_map[i].ext) == 0) return 1;
+    static const char* media_exts[] = { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", NULL };
+    for (size_t i = 0; media_exts[i]; i++) {
+        if (ascii_stricmp(dot, media_exts[i]) == 0) return 1;
     }
     return 0;
 }
-typedef struct ht_entry {
-    char* key;
-    char* val;
-    struct ht_entry* next;
-} ht_entry_t;
 
-typedef struct tx_op {
-    char* key;
-    char* val;
-    int skip;
-    struct tx_op* next;
-} tx_op_t;
-static void free_ht_table(ht_entry_t** table, size_t buckets);
+static int serialize_record_to_value(thumbdb_instance_t* inst, record_t* rec, char* out, size_t outlen) {
+    const char* ext = "";
+    switch (rec->meta.type) {
+        case MEDIA_JPG: ext = ".jpg"; break;
+        case MEDIA_PNG: ext = ".png"; break;
+        case MEDIA_GIF: ext = ".gif"; break;
+        case MEDIA_WEBP: ext = ".webp"; break;
+        case MEDIA_MP4: ext = ".mp4"; break;
+        case MEDIA_WEBM: ext = ".webm"; break;
+    }
 
-static int rh_write_bin_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx);
+    if (rec->dir_count > 0) {
+        int indexes_valid = 1;
+        for (size_t i = 0; i < rec->dir_count; i++) {
+            if (rec->dir_indexes[i] >= inst->dir_table.count) {
+                indexes_valid = 0;
+                break;
+            }
+        }
+        if (indexes_valid) {
+            const char* first = inst->dir_table.dirs[rec->dir_indexes[0]];
+            int suffix_chain = 1;
+            for (size_t i = 1; i < rec->dir_count; i++) {
+                const char* current = inst->dir_table.dirs[rec->dir_indexes[i]];
+                size_t first_len = strlen(first);
+                size_t current_len = strlen(current);
+                if (current_len > first_len ||
+                    strcmp(first + (first_len - current_len), current) != 0) {
+                    suffix_chain = 0;
+                    break;
+                }
+            }
+            if (suffix_chain) {
+                snprintf(out, outlen, "%s", first);
+                return 0;
+            }
 
-static ht_entry_t** ht = NULL;
-static size_t ht_buckets = 0;
-static rh_table_t* rh_tbl = NULL;
-static thread_mutex_t db_mutex;
-static int db_inited = 0;
-static char db_path[PATH_MAX];
-static int tx_active = 0;
-static tx_op_t* tx_head = NULL;
-static thread_mutex_t db_open_mutex;
-static int db_open_mutex_inited = 0;
-static thread_mutex_t compaction_mutex;
-static int compaction_mutex_inited = 0;
-static int compaction_requested = 0;
-static char compaction_target[PATH_MAX];
+            int prefix_chain = 1;
+            for (size_t i = 1; i < rec->dir_count; i++) {
+                const char* previous = inst->dir_table.dirs[rec->dir_indexes[i - 1]];
+                const char* current = inst->dir_table.dirs[rec->dir_indexes[i]];
+                if (strncmp(current, previous, strlen(previous)) != 0) {
+                    prefix_chain = 0;
+                    break;
+                }
+            }
+            if (prefix_chain) {
+                const char* last = inst->dir_table.dirs[rec->dir_indexes[rec->dir_count - 1]];
+                snprintf(out, outlen, "%s%s%s%s",
+                    last, strlen(last) > 0 ? DIR_SEP_STR : "", rec->filename, ext);
+                return 0;
+            }
+        }
+    }
 
-static unsigned int thumbdb_wal_chunk_seq = 0;
-static thread_mutex_t thumbdb_wal_seq_mutex;
-static int thumbdb_wal_seq_mutex_inited = 0;
-
-static time_t db_last_mtime = 0;
-static off_t db_last_size = 0;
-static int db_rebuilding = 0;
-
-static uint32_t ht_hash(const char* s) {
-
-    uint32_t h = 2166136261u;
-    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
-    return h;
+    char path[PATH_MAX];
+    if (reconstruct_path_from_indexes(inst, rec->dir_indexes, rec->dir_count, path, sizeof(path)) != 0) return -1;
+    if (path_has_media_extension(path)) {
+        snprintf(out, outlen, "%s", path);
+        return 0;
+    }
+    snprintf(out, outlen, "%s%s%s%s", path, strlen(path) > 0 ? DIR_SEP_STR : "", rec->filename, ext);
+    return 0;
 }
 
-
-static void thumbname_to_base_and_kind(const char* name, char* base, size_t base_len, int* is_small, int* is_large) {
-    base[0] = '\0'; if (is_small) *is_small = 0; if (is_large) *is_large = 0;
-    if (!name) return;
-    char* p = strstr(name, "-small.");
-    if (p) {
-        size_t bl = (size_t)(p - name); if (bl >= base_len) bl = base_len - 1; memcpy(base, name, bl); base[bl] = '\0'; if (is_small) *is_small = 1; return;
-    }
-    p = strstr(name, "-large.");
-    if (p) {
-        size_t bl = (size_t)(p - name); if (bl >= base_len) bl = base_len - 1; memcpy(base, name, bl); base[bl] = '\0'; if (is_large) *is_large = 1; return;
-    }
-    strncpy(base, name, base_len - 1); base[base_len - 1] = '\0';
+static void build_wal_dir_from_dbpath(thumbdb_instance_t* inst, char* wal_dir_out, size_t out_len) {
+    wal_dir_out[0] = '\0';
+    if (!inst->db_path[0]) return;
+    char per_thumbs_root[PATH_MAX];
+    strncpy(per_thumbs_root, inst->db_path, sizeof(per_thumbs_root) - 1);
+    per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0';
+    char* last = strrchr(per_thumbs_root, DIR_SEP);
+    if (!last) return;
+    *last = '\0';
+    snprintf(wal_dir_out, out_len, "%s" DIR_SEP_STR WAL_DIR_NAME, per_thumbs_root);
 }
 
-static int find_thumb_filename_for_base_in_dir(const char* dir, const char* base, int want_small, char* out, size_t outlen) {
+static int write_wal_entry(thumbdb_instance_t* inst, const char* key, const char* value) {
+    if (!atomic_flag_test_and_set(&wal_seq_mutex_once))
+        thread_mutex_init(&wal_seq_mutex);
+    char wal_dir[PATH_MAX];
+    build_wal_dir_from_dbpath(inst, wal_dir, sizeof(wal_dir));
+    if (!wal_dir[0]) return -1;
+    if (!is_dir(wal_dir)) platform_make_dir(wal_dir);
+    unsigned int seq = atomic_fetch_add(&wal_chunk_seq, 1);
+    long long ts = (long long)time(NULL);
+    char chunk_path[PATH_MAX];
+    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR WAL_CHUNK_FMT, wal_dir, ts, seq, platform_get_pid());
+    FILE* f = platform_fopen(chunk_path, "w");
+    if (!f) return -1;
+    const char* val_out = value ? value : "__DELETE__";
+    fprintf(f, "%s\n%s\n", key, val_out);
+    uint32_t crc;
+    char crc_buf[512];
+    snprintf(crc_buf, sizeof(crc_buf), "%s\n%s\n", key, val_out);
+    crypto_crc32(crc_buf, strlen(crc_buf), &crc);
+    fprintf(f, "CRC32:%08X\n", crc);
+    fflush(f);
+    platform_fsync(fileno(f));
+    fclose(f);
+    return 0;
+}
+
+static int process_wal_chunks(thumbdb_instance_t* inst) {
+    char wal_dir[PATH_MAX];
+    build_wal_dir_from_dbpath(inst, wal_dir, sizeof(wal_dir));
+    if (!is_dir(wal_dir)) return 0;
     diriter it;
-    if (!dir_open(&it, dir)) return 0;
-    const char* tname;
-    size_t bl = strlen(base);
-    while ((tname = dir_next(&it))) {
-        if (!tname) continue;
-        if (strncmp(tname, base, bl) != 0) continue;
-        if (want_small) {
-            if (strstr(tname, "-small.")) { strncpy(out, tname, outlen - 1); out[outlen - 1] = '\0'; dir_close(&it); return 1; }
+    if (!dir_open(&it, wal_dir)) return 0;
+    const char* entry;
+    while ((entry = dir_next(&it))) {
+        if (!entry || strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
+        if (strstr(entry, ".wal") == NULL) continue;
+        char chunk_path[PATH_MAX];
+        snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR "%s", wal_dir, entry);
+        FILE* f = platform_fopen(chunk_path, "r");
+        if (!f) continue;
+        char key[PATH_MAX], value[PATH_MAX], crc_line[64];
+        if (fgets(key, sizeof(key), f)) {
+            size_t key_len = strcspn(key, "\r\n"); key[key_len] = '\0';
+            if (fgets(value, sizeof(value), f)) {
+                size_t val_len = strcspn(value, "\r\n"); value[val_len] = '\0';
+                int crc_ok = 0;
+                if (fgets(crc_line, sizeof(crc_line), f)) {
+                    size_t crc_len = strcspn(crc_line, "\r\n"); crc_line[crc_len] = '\0';
+                    if (strncmp(crc_line, "CRC32:", 6) == 0) {
+                        char payload[PATH_MAX * 2];
+                        snprintf(payload, sizeof(payload), "%s\n%s\n", key, value);
+                        uint32_t calc_crc, stored_crc;
+                        crypto_crc32(payload, strlen(payload), &calc_crc);
+                        stored_crc = (uint32_t)strtoul(crc_line + 6, NULL, 16);
+                        crc_ok = (calc_crc == stored_crc);
+                    }
+                }
+                if (crc_ok) {
+                    thread_mutex_lock(&inst->mutex);
+                    if (strcmp(value, "__DELETE__") == 0) rh_remove(inst->rh_tbl, key, strlen(key));
+                    else rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+                    thread_mutex_unlock(&inst->mutex);
+                } else {
+                    LOG_WARN("thumbdb: WAL chunk %s failed CRC32 validation, skipping", chunk_path);
+                }
+            }
         }
-        else {
-            if (strstr(tname, "-large.")) { strncpy(out, tname, outlen - 1); out[outlen - 1] = '\0'; dir_close(&it); return 1; }
-        }
+        fclose(f);
+        platform_file_delete(chunk_path);
     }
     dir_close(&it);
     return 0;
 }
 
-static int find_thumb_filename_for_base(const char* base, int want_small, char* out, size_t outlen) {
-    char thumb_dir[PATH_MAX]; thumb_dir[0] = '\0';
-    if (db_path[0]) {
-        strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1); thumb_dir[sizeof(thumb_dir) - 1] = '\0';
-        char* last = strrchr(thumb_dir, DIR_SEP);
-        if (last) *last = '\0'; else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
-        if (find_thumb_filename_for_base_in_dir(thumb_dir, base, want_small, out, outlen)) return 1;
+static int thumbdb_recover_from_corruption(thumbdb_instance_t* inst) {
+    LOG_WARN("thumbdb: database corrupted, attempting salvage recovery");
+    if (!inst->db_path[0]) return -1;
+    char backup_path[PATH_MAX];
+    snprintf(backup_path, sizeof(backup_path), "%s.corrupt", inst->db_path);
+    platform_move_file(inst->db_path, backup_path);
+    LOG_INFO("thumbdb: backed up corrupted database to %s", backup_path);
+
+    FILE* f_corrupt = platform_fopen(backup_path, "rb");
+    if (!f_corrupt) {
+        LOG_ERROR("thumbdb: cannot open backup for salvage");
+        return -1;
     }
-    char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-    if (find_thumb_filename_for_base_in_dir(thumbs_root, base, want_small, out, outlen)) return 1;
-    diriter dit;
-    if (dir_open(&dit, thumbs_root)) {
-        const char* dname;
-        while ((dname = dir_next(&dit))) {
-            if (!strcmp(dname, ".") || !strcmp(dname, "..")) continue;
-            char sub[PATH_MAX]; path_join(sub, thumbs_root, dname);
-            if (!is_dir(sub)) continue;
-            if (find_thumb_filename_for_base_in_dir(sub, base, want_small, out, outlen)) { dir_close(&dit); return 1; }
+
+    if (inst->rh_tbl) rh_destroy(inst->rh_tbl);
+    inst->rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
+    if (!inst->rh_tbl) { fclose(f_corrupt); return -1; }
+
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp;
+
+    fseek(f_corrupt, 0, SEEK_END);
+    long file_size = ftell(f_corrupt);
+    fseek(f_corrupt, 0, SEEK_SET);
+    if (file_size <= 0) { fclose(f_corrupt); return -1; }
+
+    int records_salvaged = 0;
+    long pos = 0;
+    while (pos < file_size) {
+        fseek(f_corrupt, pos, SEEK_SET);
+        uint8_t byte;
+        if (fread(&byte, 1, 1, f_corrupt) != 1) break;
+        if (byte != MV_OPCODES.begin) { pos++; continue; }
+
+        long record_start = pos;
+        record_t rec = {0};
+        rec.record_sequence = (uint64_t)records_salvaged;
+        if (read_record(inst, f_corrupt, &rec, 0) == 0) {
+            char value[PATH_MAX];
+            if (serialize_record_to_value(inst, &rec, value, sizeof(value)) == 0) {
+                char key[64];
+                snprintf(key, sizeof(key), "%s", rec.filename);
+                rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+                records_salvaged++;
+            }
+            free_record(&rec);
         }
-        dir_close(&dit);
+        pos = ftell(f_corrupt);
+        if (pos <= record_start) pos = record_start + 1;
+    }
+    fclose(f_corrupt);
+
+    LOG_INFO("thumbdb: salvage recovery found %d valid records", records_salvaged);
+    if (records_salvaged > 0) {
+        thumbdb_compact(inst);
+        LOG_INFO("thumbdb: salvage recovery complete, %d records written to %s", records_salvaged, inst->db_path);
+    } else {
+        FILE* f_new = platform_fopen(inst->db_path, "wb");
+        if (f_new) {
+            uint8_t magic_hi = (MV_CONSTANTS.db_magic >> 8) & 0xFF;
+            uint8_t magic_lo = MV_CONSTANTS.db_magic & 0xFF;
+            fwrite(&magic_hi, 1, 1, f_new); fwrite(&magic_lo, 1, 1, f_new);
+            uint8_t version = MV_CONSTANTS.version; fwrite(&version, 1, 1, f_new);
+            uint8_t flags = MV_BITMASKS.flags_init; fwrite(&flags, 1, 1, f_new);
+            uint64_t record_count = 0; write_varint(f_new, record_count);
+            uint64_t base_timestamp = (uint64_t)time(NULL);
+            write_uint64_le(f_new, base_timestamp);
+            uint64_t dir_table_size = 0; write_varint(f_new, dir_table_size);
+            fflush(f_new); platform_fsync(fileno(f_new)); fclose(f_new);
+        }
+        LOG_WARN("thumbdb: no records could be salvaged, created empty database");
     }
     return 0;
 }
 
-static int ht_ensure(size_t buckets) {
-    if (rh_tbl) return 0;
-    size_t power = 16;
-    if (buckets > 0) {
-        size_t b = 1; power = 0;
-        while (b < buckets) { b <<= 1; power++; }
-        if (power == 0) power = 1;
+static int load_database(thumbdb_instance_t* inst) {
+    FILE* f = platform_fopen(inst->db_path, "rb");
+    if (!f) return 0;
+    uint8_t magic_hi, magic_lo;
+    if (fread(&magic_hi, 1, 1, f) != 1 || fread(&magic_lo, 1, 1, f) != 1) { LOG_ERROR("thumbdb: cannot read magic header in %s", inst->db_path); fclose(f); return -1; }
+    uint16_t magic = ((uint16_t)magic_hi << 8) | magic_lo;
+    if (magic != MV_CONSTANTS.db_magic) { LOG_ERROR("thumbdb: invalid magic header 0x%04X in %s", magic, inst->db_path); fclose(f); return -1; }
+    uint8_t version;
+    if (fread(&version, 1, 1, f) != 1 || version != MV_CONSTANTS.version) LOG_WARN("thumbdb: version mismatch in %s", inst->db_path);
+    uint8_t flags;
+    if (fread(&flags, 1, 1, f) != 1) { fclose(f); return -1; }
+    inst->file_header.flags = flags;
+    inst->file_header.has_index = (flags >> 7) & 1;
+    inst->file_header.timestamp_precision = (flags >> 6) & 1;
+    inst->file_header.default_hash_mode = (hash_mode_t)((flags >> 4) & 3);
+    uint64_t record_count;
+    if (read_varint(f, &record_count) != 0) { fclose(f); return -1; }
+    if (read_uint64_le(f, &inst->file_header.base_timestamp) != 0) { fclose(f); return -1; }
+    uint64_t dir_table_size;
+    if (read_varint(f, &dir_table_size) != 0) { fclose(f); return -1; }
+    if (dir_table_size > 100000) { LOG_ERROR("thumbdb: dir_table_size %llu exceeds limit", (unsigned long long)dir_table_size); fclose(f); return -1; }
+    for (uint64_t i = 0; i < dir_table_size; i++) {
+        uint64_t prefix_len, suffix_len;
+        if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); return -1; }
+        char suffix[PATH_MAX];
+        if (suffix_len > 0) { if (fread(suffix, 1, suffix_len, f) != suffix_len) { fclose(f); return -1; } suffix[suffix_len] = '\0'; }
+        else suffix[0] = '\0';
+        char full_path[PATH_MAX];
+        if (prefix_len > 0 && inst->dir_table.count > 0) {
+            size_t copy_len = prefix_len; if (copy_len >= PATH_MAX) copy_len = PATH_MAX - 1;
+            strncpy(full_path, inst->dir_table.dirs[inst->dir_table.count - 1], copy_len); full_path[copy_len] = '\0';
+            strncat(full_path, suffix, PATH_MAX - strlen(full_path) - 1);
+        } else { strncpy(full_path, suffix, PATH_MAX - 1); full_path[PATH_MAX - 1] = '\0'; }
+        add_dir_to_table(inst, full_path);
     }
-    rh_tbl = rh_create(power);
-    if (!rh_tbl) return -1;
-    ht_buckets = (size_t)1 << power;
-    if (ht) { free_ht_table(ht, ht_buckets); ht = NULL; }
-    return 0;
-}
-
-static const char* ht_get(const char* key) {
-    if (!rh_tbl || !key) return NULL;
-    unsigned char* v = NULL; size_t vlen = 0;
-    if (rh_find(rh_tbl, key, strlen(key), &v, &vlen) == 0 && v && vlen > 0) return (const char*)v;
-    return NULL;
-}
-
-static ht_entry_t* ht_find(const char* key) {
-    static ht_entry_t tmp;
-    tmp.key = (char*)key;
-    tmp.val = NULL;
-    if (!rh_tbl || !key) return NULL;
-    unsigned char* v = NULL; size_t vlen = 0;
-    if (rh_find(rh_tbl, key, strlen(key), &v, &vlen) == 0 && v && vlen > 0) { tmp.val = (char*)v; return &tmp; }
-    return NULL;
-}
-
-static int ht_set_internal(const char* key, const char* val) {
-    if (!rh_tbl || !key) return -1;
-    if (!val) return rh_remove(rh_tbl, key, strlen(key));
-    return rh_insert(rh_tbl, key, strlen(key), (const unsigned char*)val, strlen(val) + 1);
-}
-
-static void ht_free_all(void) {
-    if (rh_tbl) { rh_destroy(rh_tbl); rh_tbl = NULL; ht_buckets = 0; }
-    if (ht) { free_ht_table(ht, ht_buckets); ht = NULL; ht_buckets = 0; }
-}
-
-
-typedef int (*record_iter_cb)(const char*, const char*, void*);
-
-static void skip_trailing_newline(FILE* f) {
-    int ch = fgetc(f);
-    if (ch == EOF) return;
-    if ((uint8_t)ch != OP_NEWLINE) ungetc(ch, f);
-}
-
-static int read_binary_value(FILE* f, char* val_buf, size_t val_len) {
-    size_t vpos = 0;
-    int ch; 
-    while ((ch = fgetc(f)) != EOF) {
-        uint8_t b = (uint8_t)ch;
-        if (b == OP_END_RECORD) break;
-        if (b == OP_NEWLINE) continue;
-        if (b == OP_BASE_DIR) continue;
-        if (b == OP_BACKSLASH) {
-            if (vpos + 1 < val_len) val_buf[vpos++] = DIR_SEP;
-            continue;
-        }
-        if (b == OP_SEPERATOR) {
-            int ext_code = fgetc(f);
-            if (ext_code == EOF) return -1;
-            const char* ext = get_ext_from_opcode((uint8_t)ext_code);
-            size_t ext_len = strlen(ext);
-            if (vpos + ext_len < val_len) {
-                memcpy(val_buf + vpos, ext, ext_len);
-                vpos += ext_len;
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp; inst->current_record_seq = 0;
+    int is_first = 1; long records_end_pos = 0; int in_transaction = 0;
+    for (;;) {
+        uint8_t peek; long pos = ftell(f);
+        if (fread(&peek, 1, 1, f) != 1) break;
+        fseek(f, pos, SEEK_SET);
+        if (inst->file_header.has_index && peek == ((MV_CONSTANTS.index_magic >> 8) & 0xFF)) { records_end_pos = pos; break; }
+        if (peek == MV_OPCODES.tx_begin) { fgetc(f); in_transaction = 1; continue; }
+        if (peek == MV_OPCODES.tx_end) { fgetc(f); in_transaction = 0; continue; }
+        if (peek == MV_OPCODES.delete_op) {
+            fgetc(f); uint64_t filename_val; uint64_t ts;
+            if (read_varint(f, &filename_val) == 0 && read_varint(f, &ts) == 0) {
+                uint8_t end_marker;
+                if (fread(&end_marker, 1, 1, f) == 1 && end_marker == MV_OPCODES.end) {
+                    char key[64]; snprintf(key, sizeof(key), "%llu", (unsigned long long)filename_val);
+                    rh_remove(inst->rh_tbl, key, strlen(key));
+                }
             }
             continue;
         }
-        if (b == OP_LARGE_JPG || b == OP_SMALL_JPG) continue;
-        if (vpos + 1 < val_len) val_buf[vpos++] = (char)b;
+        record_t rec = {0};
+        rec.record_sequence = inst->current_record_seq++;
+        if (read_record(inst, f, &rec, is_first) != 0) { if (feof(f)) break; LOG_ERROR("Failed to read record from database"); free_record(&rec); continue; }
+        is_first = 0;
+        char value[PATH_MAX];
+        if (serialize_record_to_value(inst, &rec, value, sizeof(value)) == 0) {
+            char key[64]; snprintf(key, sizeof(key), "%s", rec.filename);
+            rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+        }
+        free_record(&rec);
     }
-    if (ch == EOF) return -1;
-    val_buf[vpos] = '\0';
-    return 0;
-}
-
-static int read_record(FILE* f, char* key_buf, size_t key_len, char* val_buf, size_t val_len) {
-    uint8_t sep = 0;
-    if (fread(&sep, 1, 1, f) != 1) return -1;
-    if (sep != OP_SEPERATOR) return -1;
-    size_t kpos = 0;
-    int ch;
-    while ((ch = fgetc(f)) != EOF) {
-        uint8_t b = (uint8_t)ch;
-        if (b == OP_SEPERATOR) break;
-        if (kpos + 1 < key_len) key_buf[kpos++] = (char)b;
-    }
-    if (ch == EOF) return -1;
-    key_buf[kpos] = '\0';
-    int next = fgetc(f); 
-    if (next == EOF) return -1;
-    if ((uint8_t)next == OP_END_RECORD) {
-        skip_trailing_newline(f);
-        val_buf[0] = '\0';
-        return 0;
-    }
-    ungetc(next, f);
-    if (read_binary_value(f, val_buf, val_len) != 0) return -1;
-    skip_trailing_newline(f);
-    return 0;
-}
-
-static int iterate_db_records(FILE* f, record_iter_cb cb, void* ctx) {
-    if (!f || !cb) return -1;
-    if (fseek(f, DB_MAGIC_LEN, SEEK_SET) != 0) return -1;
-    char key_buf[PATH_MAX];
-    char val_buf[PATH_MAX];
-    for (;;) {
-        int c = fgetc(f);
-        if (c == EOF) break;
-        uint8_t opcode = (uint8_t)c;
-        if (opcode == OP_BEGIN_RECORD) {
-            if (read_record(f, key_buf, sizeof(key_buf), val_buf, sizeof(val_buf)) != 0) return -1;
-            const char* val_ptr = val_buf[0] ? val_buf : NULL;
-            int cb_ret = cb(key_buf, val_ptr, ctx);
-            if (cb_ret < 0) return -1;
-            if (cb_ret > 0) break;
-        } else if (opcode == OP_NEWLINE) {
-            continue;
-        } else {
-            continue;
+    if (inst->file_header.has_index && records_end_pos > 0) {
+        fseek(f, records_end_pos, SEEK_SET);
+        uint8_t idx_magic_hi, idx_magic_lo;
+        if (fread(&idx_magic_hi, 1, 1, f) != 1 || fread(&idx_magic_lo, 1, 1, f) != 1) { LOG_WARN("thumbdb: cannot read index magic"); fclose(f); return 0; }
+        if ((((uint16_t)idx_magic_hi << 8) | idx_magic_lo) != MV_CONSTANTS.index_magic) { LOG_WARN("thumbdb: invalid index magic"); fclose(f); return 0; }
+        uint64_t index_count;
+        if (read_varint(f, &index_count) != 0) { fclose(f); return 0; }
+        if (inst->index_table.entries) free(inst->index_table.entries);
+        inst->index_table.entries = calloc(index_count, sizeof(index_entry_t));
+        if (!inst->index_table.entries) { fclose(f); return 0; }
+        inst->index_table.count = index_count; inst->index_table.capacity = index_count;
+        for (uint64_t i = 0; i < index_count; i++) {
+            if (read_varint(f, &inst->index_table.entries[i].file_offset) != 0) break;
+            if (read_varint(f, &inst->index_table.entries[i].filename_hash) != 0) break;
         }
     }
-    return 0;
-}
-
-static int load_record_cb(const char* key, const char* value, void* ctx) {
-    (void)ctx;
-    return ht_set_internal(key, value);
-}
-
-static int backup_file(const char* path) {
-    if (!path) return -1;
-    char bak[PATH_MAX]; snprintf(bak, sizeof(bak), "%s.bak", path);
-    FILE* in = platform_fopen(path, "rb");
-    if (!in) return -1;
-    FILE* out = platform_fopen(bak, "wb");
-    if (!out) { fclose(in); return -1; }
-    unsigned char buf[8192]; size_t r;
-    while ((r = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, r, out) != r) { fclose(in); fclose(out); return -1; }
-    }
-    fflush(out); platform_fsync(fileno(out)); fclose(in); fclose(out);
-    return 0;
-}
-
-static int persist_tx_ops(tx_op_t* ops) {
-    if (!ops) return 0;
-    FILE* f = platform_fopen(db_path, "ab");
-    if (!f) return -1;
-    tx_op_t* cur = ops;
-    while (cur) {
-        if (append_db_record(f, cur->key, cur->val) != 0) { fclose(f); return -1; }
-        cur = cur->next;
-    }
-    fflush(f);
-    platform_fsync(fileno(f));
     fclose(f);
-    struct stat st; if (platform_stat(db_path, &st) == 0) { db_last_mtime = st.st_mtime; db_last_size = st.st_size; }
     return 0;
 }
 
-static void build_wal_dir_from_dbpath(char* wal_dir_out, size_t out_len) {
-    wal_dir_out[0] = '\0';
-    if (!db_path || db_path[0] == '\0') return;
-    char per_thumbs_root[PATH_MAX];
-    strncpy(per_thumbs_root, db_path, sizeof(per_thumbs_root) - 1);
-    per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0';
-    char* last = strrchr(per_thumbs_root, DIR_SEP);
-    if (!last) return;
-    *last = '\0';
-    snprintf(wal_dir_out, out_len, "%s" DIR_SEP_STR "wal", per_thumbs_root);
+static void* async_worker_thread(void* arg) {
+    thumbdb_instance_t* inst = (thumbdb_instance_t*)arg;
+    if (!inst) return NULL;
+    while (inst->async_worker_running) {
+        async_op_t* op = NULL;
+        thread_mutex_lock(&inst->async_queue_mutex);
+        if (inst->async_queue_head) {
+            op = inst->async_queue_head;
+            inst->async_queue_head = op->next;
+            if (!inst->async_queue_head) inst->async_queue_tail = NULL;
+        }
+        thread_mutex_unlock(&inst->async_queue_mutex);
+        if (op) {
+            thread_mutex_lock(&inst->mutex);
+            if (op->is_delete) rh_remove(inst->rh_tbl, op->key, strlen(op->key));
+            else rh_insert(inst->rh_tbl, op->key, strlen(op->key), (const unsigned char*)op->value, strlen(op->value) + 1);
+            thread_mutex_unlock(&inst->mutex);
+            free(op);
+        } else {
+            platform_sleep_ms(50);
+        }
+    }
+    return NULL;
 }
 
-static int thumbdb_write_wal_entry_internal(const char* per_thumbs_root, const char* key, const char* value) {
-    if (!per_thumbs_root || !key) return -1;
-    if (!thumbdb_wal_seq_mutex_inited) { if (thread_mutex_init(&thumbdb_wal_seq_mutex) == 0) thumbdb_wal_seq_mutex_inited = 1; }
-    if (!thumbdb_wal_seq_mutex_inited) return -1;
-    char wal_dir[PATH_MAX]; wal_dir[0] = '\0';
-    snprintf(wal_dir, sizeof(wal_dir), "%s" DIR_SEP_STR "wal", per_thumbs_root);
-    if (!is_dir(wal_dir)) platform_make_dir(wal_dir);
-    unsigned int seq = 0;
-    thread_mutex_lock(&thumbdb_wal_seq_mutex);
-    seq = ++thumbdb_wal_chunk_seq;
-    thread_mutex_unlock(&thumbdb_wal_seq_mutex);
-    long long ts = (long long)time(NULL);
-    if (ts < 0) ts = 0;
-    char chunk_path[PATH_MAX];
-    snprintf(chunk_path, sizeof(chunk_path), "%s" DIR_SEP_STR "chunk-%lld-%u-%u.wal", wal_dir, ts, seq, platform_get_pid());
-    FILE* f = platform_fopen(chunk_path, "w");
-    if (!f) return -1;
-    fprintf(f, "%s\n%s\n", key, value ? value : "");
-    fflush(f);
-    platform_fsync(fileno(f));
-    fclose(f);
-    LOG_DEBUG("thumbdb_write_wal_entry: wrote wal chunk %s for key=%s", chunk_path, key);
+static int enqueue_async_op(thumbdb_instance_t* inst, const char* key, const char* value, int is_delete) {
+    async_op_t* op = calloc(1, sizeof(async_op_t));
+    if (!op) return -1;
+    strncpy(op->key, key, sizeof(op->key) - 1); op->key[sizeof(op->key) - 1] = '\0';
+    if (!is_delete && value) { strncpy(op->value, value, sizeof(op->value) - 1); op->value[sizeof(op->value) - 1] = '\0'; }
+    op->is_delete = is_delete; op->next = NULL;
+    thread_mutex_lock(&inst->async_queue_mutex);
+    if (inst->async_queue_tail) { inst->async_queue_tail->next = op; inst->async_queue_tail = op; }
+    else { inst->async_queue_head = inst->async_queue_tail = op; }
+    thread_mutex_unlock(&inst->async_queue_mutex);
     return 0;
-}
-
-static int thumbdb_write_wal_entry(const char* key, const char* value) {
-    char wal_dir[PATH_MAX]; wal_dir[0] = '\0';
-    build_wal_dir_from_dbpath(wal_dir, sizeof(wal_dir));
-    if (!wal_dir[0]) return -1;
-    return thumbdb_write_wal_entry_internal(wal_dir, key, value);
 }
 
 int thumbdb_open(void) {
-    LOG_WARN("thumbdb_open: opening global top-level DB is disabled; use thumbdb_open_for_dir() with a per-gallery path");
-    return -1;
+    const char* path = getenv("GALLERIA_THUMBDB");
+    if (!path || path[0] == '\0') path = "thumbs.tdb";
+    thumbdb_instance_t* inst = thumbdb_open_for_dir(path);
+    if (!inst) {
+        LOG_ERROR("thumbdb_open: failed to open global database %s", path);
+        return -1;
+    }
+    LOG_INFO("thumbdb_open: opened global database %s", path);
+    return 0;
 }
 
-static int count_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    (void)key; (void)val; (void)val_len;
-    int* count = (int*)ctx;
-    (*count)++;
-    return 1;
+thumbdb_instance_t* thumbdb_open_for_dir(const char* db_full_path) {
+    if (!db_full_path || db_full_path[0] == '\0') return NULL;
+
+    thumbdb_instance_t* inst = thumbdb_get_or_create_instance(db_full_path);
+    if (!inst) return NULL;
+
+    thread_mutex_lock(&inst->mutex);
+    if (inst->db_inited) { thread_mutex_unlock(&inst->mutex); return inst; }
+
+    inst->rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
+    if (!inst->rh_tbl) { thread_mutex_unlock(&inst->mutex); thumbdb_release_instance(inst); return NULL; }
+
+    FILE* f_check = platform_fopen(inst->db_path, "rb");
+    if (!f_check) {
+        FILE* f_new = platform_fopen(inst->db_path, "wb");
+        if (f_new) {
+            uint8_t magic_hi = (MV_CONSTANTS.db_magic >> 8) & 0xFF, magic_lo = MV_CONSTANTS.db_magic & 0xFF;
+            fwrite(&magic_hi, 1, 1, f_new); fwrite(&magic_lo, 1, 1, f_new);
+            uint8_t version = MV_CONSTANTS.version; fwrite(&version, 1, 1, f_new);
+            uint8_t flags = MV_BITMASKS.flags_init; fwrite(&flags, 1, 1, f_new);
+            uint64_t record_count = 0; write_varint(f_new, record_count);
+            uint64_t base_timestamp = (uint64_t)time(NULL); write_uint64_le(f_new, base_timestamp);
+            inst->file_header.base_timestamp = base_timestamp;
+            uint64_t dir_table_size = 0; write_varint(f_new, dir_table_size);
+            fflush(f_new); platform_fsync(fileno(f_new)); fclose(f_new);
+            LOG_INFO("thumbdb: created new database %s", inst->db_path);
+        }
+    } else {
+        fclose(f_check);
+        if (load_database(inst) != 0) {
+            LOG_WARN("thumbdb: load_database returned error, attempting recovery");
+            thumbdb_recover_from_corruption(inst);
+        } else if (thumbdb_validate(inst) != 0) {
+            LOG_WARN("thumbdb: validation failed, attempting recovery");
+            thumbdb_recover_from_corruption(inst);
+        }
+        LOG_INFO("thumbdb: loaded and validated database %s", inst->db_path);
+    }
+    inst->db_inited = 1;
+    thread_mutex_unlock(&inst->mutex);
+    return inst;
 }
 
-static int is_table_empty(void) {
-    if (!rh_tbl) return 1;
-    int count = 0;
-    rh_iterate(rh_tbl, count_cb, &count);
-    return count == 0;
+void thumbdb_close(thumbdb_instance_t* inst) {
+    if (!inst) return;
+    thread_mutex_lock(&inst->mutex);
+    if (inst->rh_tbl) { rh_destroy(inst->rh_tbl); inst->rh_tbl = NULL; }
+    for (size_t i = 0; i < inst->dir_table.count; i++) free(inst->dir_table.dirs[i]);
+    free(inst->dir_table.dirs); inst->dir_table.dirs = NULL;
+    inst->dir_table.count = 0; inst->dir_table.capacity = 0;
+    if (inst->index_table.entries) { free(inst->index_table.entries); inst->index_table.entries = NULL; }
+    inst->index_table.count = 0; inst->index_table.capacity = 0;
+    inst->db_inited = 0;
+    thread_mutex_unlock(&inst->mutex);
+    thumbdb_release_instance(inst);
 }
 
-static void populate_db_from_existing_thumbs(void) {
-    size_t gf_count = 0;
-    char** gfolders = get_gallery_folders(&gf_count);
-    if (!gfolders || gf_count == 0) return;
-    
-    char thumbs_root[PATH_MAX];
-    get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-    
-    for (size_t i = 0; i < gf_count; ++i) {
-        char folder_real[PATH_MAX];
-        if (!real_path(gfolders[i], folder_real)) continue;
-        
-        char safe_dir[PATH_MAX];
-        make_safe_dir_name_from(folder_real, safe_dir, sizeof(safe_dir));
-        
-        char per_thumbs_root[PATH_MAX];
-        snprintf(per_thumbs_root, sizeof(per_thumbs_root), "%s" DIR_SEP_STR "%s", thumbs_root, safe_dir);
-        
-        if (!is_dir(per_thumbs_root)) continue;
-        
-        diriter tit;
-        if (!dir_open(&tit, per_thumbs_root)) continue;
-        
-        const char* tname;
-        while ((tname = dir_next(&tit))) {
-            if (!tname) continue;
-            if (!strstr(tname, "-small.") && !strstr(tname, "-large.")) continue;
-            
-            char base[PATH_MAX];
-            int is_small = 0, is_large = 0;
-            base[0] = '\0';
-            thumbname_to_base_and_kind(tname, base, sizeof(base), &is_small, &is_large);
-            if (!base[0]) continue;
-            if (ht_get(base)) continue;
-            diriter mit;
-            if (!dir_open(&mit, folder_real)) continue;
-            
-            const char* mname;
-            while ((mname = dir_next(&mit))) {
-                if (!mname) continue;
-                if (!has_ext(mname, IMAGE_EXTS) && !has_ext(mname, VIDEO_EXTS)) continue;
-                
-                char media_full[PATH_MAX];
-                path_join(media_full, folder_real, mname);
-                
-                char small_rel[PATH_MAX], large_rel[PATH_MAX];
-                small_rel[0] = large_rel[0] = '\0';
-                get_thumb_rel_names(media_full, mname, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
-                
-                if (strcmp(small_rel, tname) == 0 || strcmp(large_rel, tname) == 0) {
-                    char small_tok[8] = "null";
-                    char large_tok[8] = "null";
-                    char media[PATH_MAX] = "";
-                    
-                    char small_path[PATH_MAX];
-                    char large_path[PATH_MAX];
-                    snprintf(small_path, sizeof(small_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, small_rel);
-                    snprintf(large_path, sizeof(large_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, large_rel);
-                    
-                    if (is_file(small_path)) strncpy(small_tok, "small", sizeof(small_tok) - 1);
-                    if (is_file(large_path)) strncpy(large_tok, "large", sizeof(large_tok) - 1);
-                    strncpy(media, media_full, sizeof(media) - 1);
-                    media[sizeof(media) - 1] = '\0';
-                    ht_set_internal(base, media);
-                    
-                    LOG_DEBUG("thumbdb: populated %s -> %s", base, media);
-                    break;
+static int copy_to_snapshot_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    rh_table_t* snap = (rh_table_t*)ctx;
+    rh_insert(snap, key, strlen(key), val, val_len);
+    return 0;
+}
+
+static int copy_from_snapshot_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    rh_table_t* tbl = (rh_table_t*)ctx;
+    rh_insert(tbl, key, strlen(key), val, val_len);
+    return 0;
+}
+
+typedef struct { thumbdb_instance_t* inst; FILE* fp; } write_changed_ctx_t;
+
+static int write_changed_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
+    write_changed_ctx_t* wctx = (write_changed_ctx_t*)ctx;
+    thumbdb_instance_t* inst = wctx->inst;
+    FILE* fp = wctx->fp;
+    unsigned char* old_val = NULL; size_t old_len = 0; size_t key_len = strlen(key);
+    int found = rh_find(inst->tx_snapshot, key, key_len, &old_val, &old_len);
+    if (found != 0 || !old_val || old_len != val_len || memcmp(old_val, val, val_len) != 0) {
+        char key_str[512]; if (key_len >= sizeof(key_str)) key_len = sizeof(key_str) - 1;
+        memcpy(key_str, key, key_len); key_str[key_len] = '\0';
+        char val_str[PATH_MAX]; if (val_len >= sizeof(val_str)) val_len = sizeof(val_str) - 1;
+        memcpy(val_str, val, val_len); val_str[val_len] = '\0';
+        record_t rec = {0};
+        rec.record_sequence = inst->current_record_seq++;
+        rec.filename = strdup(key_str);
+        rec.timestamp = (uint64_t)time(NULL);
+        rec.meta.type = get_media_type_from_path(val_str);
+        rec.meta.animated = 0; rec.meta.thumb_mode = 0; rec.meta.hash_override = 0; rec.meta.has_extensions = 0;
+        rec.meta.hash_mode = inst->file_header.default_hash_mode;
+        if (parse_path_into_dirs(inst, val_str, &rec.dir_indexes, &rec.dir_count) == 0) {
+            if (is_file(val_str)) { if (crypto_md5_file(val_str, rec.hash) != 0) memset(rec.hash, 0, sizeof(rec.hash)); }
+            else { memset(rec.hash, 0, sizeof(rec.hash)); LOG_WARN("thumbdb_tx_commit: media file missing for hash: %s", val_str); }
+            rec.hash_len = get_hash_length(rec.meta.hash_mode);
+            int is_first = (rec.record_sequence == 0);
+            write_record(inst, fp, &rec, is_first);
+        }
+        free_record(&rec);
+    }
+    return 0;
+}
+
+int thumbdb_tx_begin(thumbdb_instance_t* inst) {
+    if (!inst) return -1;
+    thread_mutex_lock(&inst->mutex);
+    if (inst->tx_active) { thread_mutex_unlock(&inst->mutex); return -1; }
+    if (inst->tx_snapshot) rh_destroy(inst->tx_snapshot);
+    inst->tx_snapshot = rh_create(INITIAL_BUCKETS_BITS);
+    if (!inst->tx_snapshot) { thread_mutex_unlock(&inst->mutex); return -1; }
+    rh_iterate(inst->rh_tbl, copy_to_snapshot_cb, inst->tx_snapshot);
+    inst->tx_active = 1;
+    thread_mutex_unlock(&inst->mutex);
+    return 0;
+}
+
+int thumbdb_tx_abort(thumbdb_instance_t* inst) {
+    if (!inst) return -1;
+    thread_mutex_lock(&inst->mutex);
+    if (!inst->tx_active) { thread_mutex_unlock(&inst->mutex); return -1; }
+    if (inst->tx_snapshot && inst->rh_tbl) {
+        rh_destroy(inst->rh_tbl);
+        inst->rh_tbl = rh_create(INITIAL_BUCKETS_BITS);
+        if (inst->rh_tbl) rh_iterate(inst->tx_snapshot, copy_from_snapshot_cb, inst->rh_tbl);
+        rh_destroy(inst->tx_snapshot); inst->tx_snapshot = NULL;
+    }
+    inst->tx_active = 0;
+    thread_mutex_unlock(&inst->mutex);
+    return 0;
+}
+
+int thumbdb_tx_commit(thumbdb_instance_t* inst) {
+    if (!inst) return -1;
+    thread_mutex_lock(&inst->mutex);
+    if (!inst->tx_active) { thread_mutex_unlock(&inst->mutex); return -1; }
+    int commit_ok = 0;
+    FILE* f = platform_fopen(inst->db_path, "ab");
+    if (f) {
+        if (fputc(MV_OPCODES.tx_begin, f) != EOF) {
+            write_changed_ctx_t wctx = {inst, f};
+            rh_iterate(inst->rh_tbl, write_changed_cb, &wctx);
+            if (fputc(MV_OPCODES.tx_end, f) != EOF) {
+                if (fflush(f) == 0 && platform_fsync(fileno(f)) == 0) {
+                    commit_ok = 1;
                 }
             }
-            dir_close(&mit);
         }
-        dir_close(&tit);
-    }
-}
-
-int thumbdb_open_for_dir(const char* db_full_path) {
-    if (!db_open_mutex_inited) { if (thread_mutex_init(&db_open_mutex) == 0) db_open_mutex_inited = 1; }
-    thread_mutex_lock(&db_open_mutex);
-    
-    if (!db_inited) {
-        if (thread_mutex_init(&db_mutex) != 0) {
-            LOG_ERROR("thumbdb: failed to init mutex");
-            return -1;
-        }
-        if (ht_ensure(INITIAL_BUCKETS) != 0) { thread_mutex_destroy(&db_mutex); return -1; }
-    }
-
-    if (!db_full_path || db_full_path[0] == '\0') {
-        if (!db_inited) thread_mutex_destroy(&db_mutex);
-        return -1;
-    }
-    strncpy(db_path, db_full_path, sizeof(db_path) - 1); db_path[sizeof(db_path) - 1] = '\0';
-    FILE* f_check = platform_fopen(db_path, "rb");
-    if (!f_check) {
-        FILE* f_new = platform_fopen(db_path, "wb");
-        if (!f_new) {
-            LOG_WARN("thumbdb: failed to create db file %s", db_path);
-            ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
-        }
-        fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, f_new);
-        fclose(f_new);
-    } else {
-        char probe[DB_MAGIC_LEN];
-        size_t pr = fread(probe, 1, DB_MAGIC_LEN, f_check);
-        fclose(f_check);
-        if (pr != DB_MAGIC_LEN || memcmp(probe, DB_MAGIC, DB_MAGIC_LEN) != 0) {
-            LOG_INFO("thumbdb: recreating database file with new opcode format");
-            FILE* f_new = platform_fopen(db_path, "wb");
-            if (!f_new) {
-                LOG_WARN("thumbdb: failed to recreate db file %s", db_path);
-                ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
-            }
-            fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, f_new);
-            fclose(f_new);
-        }
-    }
-
-    FILE* f = platform_fopen(db_path, "ab");
-    if (!f) {
-        LOG_WARN("thumbdb: failed to open db file %s", db_path);
-        ht_free_all(); thread_mutex_destroy(&db_mutex); return -1;
-    }
-    fclose(f);
-    f = platform_fopen(db_path, "rb");
-    if (!f) {
-        db_inited = 1;
-        thread_mutex_unlock(&db_open_mutex);
-        return 0;
-    }
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    if (fsize > DB_MAGIC_LEN) {
-        char magic[DB_MAGIC_LEN];
-        if (fread(magic, 1, DB_MAGIC_LEN, f) != DB_MAGIC_LEN || memcmp(magic, DB_MAGIC, DB_MAGIC_LEN) != 0) {
-            LOG_ERROR("thumbdb: invalid magic header in database file");
-            fclose(f);
-            ht_free_all(); thread_mutex_destroy(&db_mutex); thread_mutex_unlock(&db_open_mutex); return -1;
-        }
-        if (iterate_db_records(f, load_record_cb, NULL) != 0) {
-            fclose(f);
-            ht_free_all(); thread_mutex_destroy(&db_mutex); thread_mutex_unlock(&db_open_mutex); return -1;
-        }
-    }
-    fclose(f);
-    
-    struct stat st;
-    if (platform_stat(db_path, &st) == 0) {
-        db_last_mtime = st.st_mtime;
-        db_last_size = st.st_size;
-    } else {
-        db_last_mtime = 0;
-        db_last_size = 0;
-    }
-    
-    if (is_table_empty()) {
-        LOG_INFO("thumbdb: database is empty, scanning for existing thumbnails...");
-        populate_db_from_existing_thumbs();
-    }
-    
-    db_inited = 1;
-    thread_mutex_unlock(&db_open_mutex);
-    LOG_INFO("thumbdb: opened %s (buckets=%zu)", db_path, ht_buckets);
-    return 0;
-}
-
-static void free_ht_table(ht_entry_t** table, size_t buckets) {
-    if (!table) return;
-    for (size_t i = 0; i < buckets; ++i) {
-        ht_entry_t* e = table[i];
-        while (e) { ht_entry_t* nx = e->next; free(e->key); free(e->val); free(e); e = nx; }
-    }
-    free(table);
-}
-
-struct rh_iter_ctx { void (*cb)(const char*, const char*, void*); void* user; };
-static int rh_iter_wrap_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    struct rh_iter_ctx* rc = (struct rh_iter_ctx*)ctx;
-    if (!val || val_len == 0) {
-        rc->cb(key, NULL, rc->user);
-        return 0;
-    }
-    rc->cb(key, (const char*)val, rc->user);
-    return 0;
-}
-
-struct comp_ctx { FILE* f; int restrict_to_base; char allowed_base[PATH_MAX]; int wrote_count; };
-
-static int media_is_under_base(const char* media, const char* base) {
-    if (!media || !base || base[0] == '\0') return 0;
-    char resolved[PATH_MAX]; resolved[0] = '\0';
-    if (strncmp(media, "/images/", 8) == 0) {
-        char rel[PATH_MAX]; rel[0] = '\0';
-        strncpy(rel, media + 8, sizeof(rel) - 1); rel[sizeof(rel) - 1] = '\0';
-        char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "%s" DIR_SEP_STR "%s", BASE_DIR, rel);
-        normalize_path(tmp);
-        if (!real_path(tmp, resolved)) return 0;
-        return safe_under(base, resolved);
-    }
-    if (real_path(media, resolved)) {
-        return safe_under(base, resolved);
-    }
-    return 0;
-}
-
-static int rh_comp_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    struct comp_ctx* c = (struct comp_ctx*)ctx;
-    if (!key) return 0;
-    if (c->restrict_to_base && val && val_len > 0) {
-        if (!media_is_under_base((const char*)val, c->allowed_base)) return 0;
-    }
-    if (append_db_record(c->f, key, (const char*)val) == 0) {
-        c->wrote_count++;
-    }
-    return 0;
-}
-
-
-struct find_media_ctx { const char* media; char* out; size_t out_len; char best[PATH_MAX]; };
-static int rh_find_media_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    struct find_media_ctx* fc = (struct find_media_ctx*)ctx;
-    if (!val || val_len == 0) return 0;
-    if (strcmp((const char*)val, fc->media) == 0) {
-        char found[PATH_MAX]; found[0] = '\0';
-        if (find_thumb_filename_for_base(key, 1, found, sizeof(found))) {
-            strncpy(fc->out, found, fc->out_len - 1); fc->out[fc->out_len - 1] = '\0'; return 1;
-        }
-        if (find_thumb_filename_for_base(key, 0, found, sizeof(found))) {
-            strncpy(fc->out, found, fc->out_len - 1); fc->out[fc->out_len - 1] = '\0'; return 1;
-        }
-        if (fc->best[0] == '\0') strncpy(fc->best, key, sizeof(fc->best) - 1);
-    }
-    return 0;
-}
-
-typedef struct kv_t { char* key; char* val; } kv_t;
-
-struct collect_ctx { kv_t** arrp; size_t* capp; size_t* countp; int err; };
-static int rh_collect_kv_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    struct collect_ctx* c = (struct collect_ctx*)ctx;
-    if (c->err) return 1;
-    kv_t* arr = *c->arrp;
-    size_t cap = *c->capp;
-    size_t count = *c->countp;
-    if (count + 1 > cap) {
-        size_t nc = cap * 2;
-        kv_t* tmp = realloc(arr, nc * sizeof(*arr));
-        if (!tmp) {
-            LOG_ERROR("Failed to realloc array in rh_collect_kv_cb");
-            c->err = 1;
-            return 1;
-        }
-        arr = tmp; *c->arrp = arr; *c->capp = nc; cap = nc;
-    }
-    arr[count].key = key ? strdup(key) : NULL;
-    if (!arr[count].key) { c->err = 1; return 1; }
-    if (val && val_len > 0) arr[count].val = strdup((const char*)val); else arr[count].val = NULL;
-    if (val && val_len > 0 && !arr[count].val) { free(arr[count].key); c->err = 1; return 1; }
-    *c->countp = count + 1;
-    return 0;
-}
-struct rebuild_iter_ctx { rh_table_t* table; };
-
-static int rebuild_record_cb(const char* key, const char* value, void* ctx) {
-    struct rebuild_iter_ctx* rc = (struct rebuild_iter_ctx*)ctx;
-    if (!rc || !rc->table || !key) return -1;
-    if (!value) return rh_remove(rc->table, key, strlen(key));
-    return rh_insert(rc->table, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
-}
-
-static void* rebuild_worker(void* arg) {
-    (void)arg;
-    struct stat st;
-    if (platform_stat(db_path, &st) != 0) return NULL;
-
-    size_t power = 16;
-    rh_table_t* new_tbl = rh_create(power);
-    if (!new_tbl) return NULL;
-
-    FILE* f = platform_fopen(db_path, "rb");
-    if (!f) { rh_destroy(new_tbl); return NULL; }
-
-    char magic[DB_MAGIC_LEN];
-    if (fread(magic, 1, DB_MAGIC_LEN, f) != DB_MAGIC_LEN || memcmp(magic, DB_MAGIC, DB_MAGIC_LEN) != 0) {
-        LOG_ERROR("thumbdb: invalid magic header in database file during rebuild");
         fclose(f);
-        rh_destroy(new_tbl);
-        return NULL;
     }
-
-    struct rebuild_iter_ctx ctx = { new_tbl };
-    if (iterate_db_records(f, rebuild_record_cb, &ctx) != 0) {
-        fclose(f);
-        rh_destroy(new_tbl);
-        return NULL;
-    }
-    fclose(f);
-
-    thread_mutex_lock(&db_mutex);
-    rh_table_t* old = rh_tbl;
-    rh_tbl = new_tbl;
-    ht_buckets = (size_t)1 << power;
-    db_last_mtime = st.st_mtime;
-    db_last_size = st.st_size;
-    db_rebuilding = 0;
-    thread_mutex_unlock(&db_mutex);
-
-    if (old) rh_destroy(old);
-    return NULL;
+    if (inst->tx_snapshot) { rh_destroy(inst->tx_snapshot); inst->tx_snapshot = NULL; }
+    inst->tx_active = 0;
+    thread_mutex_unlock(&inst->mutex);
+    return commit_ok ? 0 : -1;
 }
 
-static int ensure_index_uptodate(void) {
-    struct stat st;
-    if (platform_stat(db_path, &st) != 0) return -1;
-    if (db_last_mtime == st.st_mtime && db_last_size == st.st_size) return 0;
-    if (db_rebuilding) return 0;
-    db_rebuilding = 1;
-    if (thread_create_detached((void* (*)(void*))rebuild_worker, NULL) != 0) {
-        db_rebuilding = 0;
-        return -1;
+int thumbdb_set(thumbdb_instance_t* inst, const char* key, const char* value) {
+    if (!inst || !inst->rh_tbl || !key || !value) return -1;
+    thread_mutex_lock(&inst->mutex);
+    if (!inst->tx_active) {
+        record_t rec = {0};
+        rec.record_sequence = inst->current_record_seq++;
+        rec.filename = strdup(key);
+        rec.timestamp = (uint64_t)time(NULL);
+        rec.meta.type = get_media_type_from_path(value);
+        rec.meta.animated = 0; rec.meta.thumb_mode = 0; rec.meta.hash_override = 0; rec.meta.has_extensions = 0;
+        rec.meta.hash_mode = inst->file_header.default_hash_mode;
+        if (parse_path_into_dirs(inst, value, &rec.dir_indexes, &rec.dir_count) != 0) { free(rec.filename); thread_mutex_unlock(&inst->mutex); return -1; }
+        if (is_file(value)) { if (crypto_md5_file(value, rec.hash) != 0) memset(rec.hash, 0, sizeof(rec.hash)); }
+        else { memset(rec.hash, 0, sizeof(rec.hash)); LOG_WARN("thumbdb_set: media file missing for hash: %s", value); }
+        rec.hash_len = get_hash_length(rec.meta.hash_mode);
+        FILE* f = platform_fopen(inst->db_path, "ab");
+        if (f) { int is_first = (rec.record_sequence == 0); write_record(inst, f, &rec, is_first); fflush(f); platform_fsync(fileno(f)); fclose(f); }
+        free_record(&rec);
     }
-    return 0;
-}
-
-void thumbdb_close(void) {
-    if (!db_inited) return;
-    thread_mutex_lock(&db_mutex);
-    ht_free_all();
-    while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
-    tx_active = 0;
-    thread_mutex_unlock(&db_mutex);
-    thread_mutex_destroy(&db_mutex);
-    db_inited = 0;
-    if (db_open_mutex_inited) {
-        thread_mutex_unlock(&db_open_mutex);
-    }
-}
-
-int thumbdb_tx_begin(void) {
-    if (!db_inited) return -1;
-    thread_mutex_lock(&db_mutex);
-    if (tx_active) { thread_mutex_unlock(&db_mutex); return -1; }
-    tx_active = 1; tx_head = NULL;
-    thread_mutex_unlock(&db_mutex);
-    return 0;
-}
-
-int thumbdb_tx_abort(void) {
-    if (!db_inited) {
-        LOG_ERROR("thumbdb_tx_abort: database not initialized");
-        return -1;
-    }
-    
-    thread_mutex_lock(&db_mutex);
-    if (!tx_active) {
-        thread_mutex_unlock(&db_mutex);
-        LOG_ERROR("thumbdb_tx_abort: no active transaction to abort");
-        return -1;
-    }
-    
-    size_t op_count = 0;
-    tx_op_t* cur = tx_head;
-    while (cur) { op_count++; cur = cur->next; }
-    
-    int cleanup_errors = 0;
-    cur = tx_head;
-    while (cur) {
-        tx_op_t* n = cur->next;
-        if (cur->key) {
-            free(cur->key);
-            cur->key = NULL;
-        }
-        if (cur->val) {
-            free(cur->val);
-            cur->val = NULL;
-        }
-        free(cur);
-        cur = n;
-        op_count--;
-    }
-    tx_head = NULL;
-    tx_active = 0;
-    thread_mutex_unlock(&db_mutex);
-    
-    LOG_DEBUG("thumbdb_tx_abort: successfully aborted transaction (%zu operations discarded)", op_count);
-    return cleanup_errors == 0 ? 0 : -1;
-}
-
-void thumbdb_request_compaction(void) {
-    if (!compaction_mutex_inited) {
-        if (thread_mutex_init(&compaction_mutex) == 0) compaction_mutex_inited = 1;
-    }
-    if (!compaction_mutex_inited) return;
-    thread_mutex_lock(&compaction_mutex);
-    if (db_path[0]) {
-        strncpy(compaction_target, db_path, sizeof(compaction_target) - 1);
-        compaction_target[sizeof(compaction_target) - 1] = '\0';
-        compaction_requested = 1;
-        LOG_DEBUG("thumbdb_request_compaction: requested compaction for target=%s", compaction_target);
-    }
-    thread_mutex_unlock(&compaction_mutex);
-}
-
-int thumbdb_perform_requested_compaction(void) {
-    if (!compaction_mutex_inited) {
-        if (thread_mutex_init(&compaction_mutex) == 0) compaction_mutex_inited = 1;
-    }
-    if (!compaction_mutex_inited) return 0;
-    thread_mutex_lock(&compaction_mutex);
-    int should_run = 0;
-    if (compaction_requested && db_path[0] && strcmp(compaction_target, db_path) == 0) {
-        compaction_requested = 0;
-        should_run = 1;
-    }
-    else if (compaction_requested) {
-        LOG_DEBUG("thumbdb_perform_requested_compaction: compaction requested for %s but current db_path=%s", compaction_target, db_path);
-    }
-    thread_mutex_unlock(&compaction_mutex);
-    if (should_run) {
-        LOG_DEBUG("thumbdb_perform_requested_compaction: running compaction for %s", db_path);
-        thumbdb_compact();
-        return 1;
-    }
-    return 0;
-}
-
-int thumbdb_tx_commit(void) {
-    if (!db_inited) return -1;
-    thread_mutex_lock(&db_mutex);
-    if (!tx_active) {
-        thread_mutex_unlock(&db_mutex);
-        LOG_ERROR("thumbdb_tx_commit: no active transaction");
-        return -1;
-    }
-    
-    
-    if (!tx_head) {
-        LOG_DEBUG("thumbdb_tx_commit: no operations to commit");
-        tx_active = 0;
-        thread_mutex_unlock(&db_mutex);
-        return 0;
-    }
-    
-    
-    tx_op_t* cur = tx_head;
-    int pending_ops = 0;
-    while (cur) {
-        const char* existing = ht_get(cur->key);
-        if (!existing && !cur->val) {
-            cur->skip = 1;
-        } else if (existing && cur->val && strcmp(existing, cur->val) == 0) {
-            cur->skip = 1;
-        } else {
-            cur->skip = 0;
-            pending_ops++;
-        }
-        cur = cur->next;
-    }
-    if (pending_ops == 0) {
-        while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
-        tx_active = 0;
-        thread_mutex_unlock(&db_mutex);
-        LOG_DEBUG("thumbdb_tx_commit: no changes to persist");
-        return 0;
-    }
-    cur = tx_head;
-    while (cur) {
-        if (!cur->skip) {
-            if (ht_set_internal(cur->key, cur->val) != 0) {
-                thread_mutex_unlock(&db_mutex);
-                LOG_ERROR("thumbdb_tx_commit: failed to set internal value for key: %s", cur->key ? cur->key : "(null)");
-                return -1;
-            }
-        }
-        cur = cur->next;
-    }
-    FILE* f = platform_fopen(db_path, "ab");
-    if (!f) {
-        LOG_WARN("thumbdb: failed to open db for append during commit");
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    cur = tx_head;
-    int committed_ops = 0;
-    while (cur) {
-        if (!cur->skip) {
-            if (append_db_record(f, cur->key, cur->val) != 0) {
-                fclose(f);
-                LOG_WARN("thumbdb: failed to write tx op during commit for key: %s", cur->key ? cur->key : "(null)");
-                thread_mutex_unlock(&db_mutex);
-                return -1;
-            }
-            committed_ops++;
-        }
-        cur = cur->next;
-    }
-    if (fflush(f) != 0) {
-        fclose(f);
-        LOG_WARN("thumbdb: failed to flush database during commit");
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    if (platform_fsync(fileno(f)) != 0) {
-        fclose(f);
-        LOG_WARN("thumbdb: failed to sync database during commit");
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    fclose(f);
-    
-    struct stat st;
-    if (platform_stat(db_path, &st) == 0) {
-        db_last_mtime = st.st_mtime;
-        db_last_size = st.st_size;
-    }
-
-    
-    while (tx_head) { tx_op_t* n = tx_head->next; free(tx_head->key); free(tx_head->val); free(tx_head); tx_head = n; }
-    tx_active = 0;
-    thread_mutex_unlock(&db_mutex);
-    LOG_DEBUG("thumbdb_tx_commit: successfully committed %d operations", committed_ops);
-    return 0;
-}
-
-static int tx_record_op(const char* key, const char* val) {
-    if (!key) return -1;
-    tx_op_t* cur = tx_head;
-    while (cur) {
-        if (cur->key && strcmp(cur->key, key) == 0) {
-            free(cur->val);
-            cur->val = val ? strdup(val) : NULL;
-            cur->skip = 0;
-            return 0;
-        }
-        cur = cur->next;
-    }
-    tx_op_t* op = calloc(1, sizeof(tx_op_t));
-    if (!op) {
-        LOG_ERROR("Failed to allocate transaction operation structure");
-        return -1;
-    }
-    op->key = strdup(key);
-    if (!op->key) {
-        LOG_ERROR("Failed to duplicate key in tx_record_op");
-        free(op);
-        return -1;
-    }
-    op->val = val ? strdup(val) : NULL;
-    if (val && !op->val) {
-        LOG_ERROR("Failed to duplicate value in tx_record_op");
-        free(op->key);
-        free(op);
-        return -1;
-    }
-    op->next = NULL;
-    if (!tx_head) tx_head = op; else { cur = tx_head; while (cur->next) cur = cur->next; cur->next = op; }
-    return 0;
-}
-
-static int find_hash_conflict(const char* target_hash, char* conflicting_key, size_t key_len) {
-    if (!rh_tbl || !target_hash || target_hash[0] == '\0') return 0;
-    
-    const char* existing = ht_get(target_hash);
-    if (existing) {
-        strncpy(conflicting_key, target_hash, key_len - 1);
-        conflicting_key[key_len - 1] = '\0';
-        return 1;
-    }
-    return 0;
-}
-
-int thumbdb_set(const char* key, const char* value) {
-    if (!db_inited) return -1;
-    if (!key) return -1;
-    if (value && !is_valid_media_path(value)) {
-        LOG_WARN("thumbdb_set: rejected invalid media path: %s", value);
-        return -1;
-    }
-    thread_mutex_lock(&db_mutex);
-    
-    
-    const char* db_key = key;
-    const char* db_value = value;
-    
-    
-    if (tx_active) {
-        int r = tx_record_op(db_key, db_value);
-        if (r != 0) {
-            thread_mutex_unlock(&db_mutex);
-            LOG_ERROR("thumbdb_set: failed to record transaction operation for key: %s", db_key);
-            return -1;
-        }
-        thread_mutex_unlock(&db_mutex);
-        return 0;
-    }
-    
-    
-    const char* curr = ht_get(db_key);
-    if (curr && db_value && strcmp(curr, db_value) == 0) {
-        thread_mutex_unlock(&db_mutex);
-        return 0;
-    }
-    if (!curr && !db_value) {
-        thread_mutex_unlock(&db_mutex);
-        return 0;
-    }
-    
-    
-    int r = ht_set_internal(db_key, db_value);
-    if (r == 0) {
-        int wal_ret = thumbdb_write_wal_entry(db_key, db_value);
-        if (wal_ret == 0) {
-            thumbdb_request_compaction();
-        } else {
-            LOG_WARN("thumbdb_set: failed to write WAL entry for %s", db_key);
-            r = -1; // propagate failure to caller
-        }
-    }
-    
-    thread_mutex_unlock(&db_mutex);
-    return r;
-}
-
-int thumbdb_get(const char* key, char* buf, size_t buflen) {
-    if (!db_inited) return -1;
-    if (!key || !buf) return -1;
-    if (ensure_index_uptodate() != 0) return -1;
-    thread_mutex_lock(&db_mutex);
-    
-    
-    const char* e_val = ht_get(key);
-    if (!e_val) {
-        thread_mutex_unlock(&db_mutex);
-        return 1;
-    }
-    
-    
-    strncpy(buf, e_val, buflen - 1);
-    buf[buflen - 1] = '\0';
-    thread_mutex_unlock(&db_mutex);
-    return 0;
-}
-
-int thumbdb_delete(const char* key) {
-    if (!db_inited) return -1;
-    if (!key) return -1;
-    thread_mutex_lock(&db_mutex);
-    char base[PATH_MAX]; int is_small = 0, is_large = 0; base[0] = '\0';
-    thumbname_to_base_and_kind(key, base, sizeof(base), &is_small, &is_large);
-
-    
-    char hash_key[PATH_MAX] = "";
-    
-    
-    if (strlen(key) == 32) {
-        const char* hex_chars = "0123456789abcdef";
-        int is_hash = 1;
-        for (int i = 0; i < 32; i++) {
-            if (!strchr(hex_chars, tolower(key[i]))) {
-                is_hash = 0;
-                break;
-            }
-        }
-        if (is_hash) {
-            strncpy(hash_key, key, sizeof(hash_key) - 1);
-        }
-    }
-    
-    
-    if (hash_key[0] == '\0') {
-        strncpy(hash_key, base, sizeof(hash_key) - 1);
-    }
-
-    
-    const char* existing = ht_get(hash_key);
-
-    if (!tx_active && !existing) {
-        thread_mutex_unlock(&db_mutex);
-        return 0;
-    }
-
-    if (tx_active) {
-        int r = tx_record_op(hash_key, NULL);
-        thread_mutex_unlock(&db_mutex);
-        return r;
-    }
-
-    ht_set_internal(hash_key, NULL);
-
-    int ret = thumbdb_write_wal_entry(hash_key, NULL);
-    if (ret == 0) {
-        thumbdb_request_compaction();
-    }
-    
-    thread_mutex_unlock(&db_mutex);
+    int ret = rh_insert(inst->rh_tbl, key, strlen(key), (const unsigned char*)value, strlen(value) + 1);
+    thread_mutex_unlock(&inst->mutex);
     return ret;
 }
 
-void thumbdb_iterate(void (*cb)(const char* key, const char* value, void* ctx), void* ctx) {
-    if (!db_inited) return;
-    if (ensure_index_uptodate() != 0) return;
-    thread_mutex_lock(&db_mutex);
-    if (!rh_tbl) { thread_mutex_unlock(&db_mutex); return; }
-    struct rh_iter_ctx rctx = { cb, ctx };
-    rh_iterate(rh_tbl, rh_iter_wrap_cb, &rctx);
-    thread_mutex_unlock(&db_mutex);
+int thumbdb_get(thumbdb_instance_t* inst, const char* key, char* buf, size_t buflen) {
+    if (!inst || !inst->rh_tbl || !key || !buf || buflen == 0) return -1;
+    thread_mutex_lock(&inst->mutex);
+    unsigned char* val = NULL; size_t val_len = 0;
+    int ret = rh_find(inst->rh_tbl, key, strlen(key), &val, &val_len);
+    if (ret == 0 && val && val_len > 0) { strncpy(buf, (const char*)val, buflen - 1); buf[buflen - 1] = '\0'; thread_mutex_unlock(&inst->mutex); return 0; }
+    thread_mutex_unlock(&inst->mutex);
+    return -1;
 }
 
-int thumbdb_find_for_media(const char* media_path, char* out_key, size_t out_key_len) {
-    if (!media_path || !out_key || out_key_len == 0) return 1;
-    if (!db_inited) return 1;
-    if (ensure_index_uptodate() != 0) return 1;
-    thread_mutex_lock(&db_mutex);
-    char best_large[PATH_MAX]; best_large[0] = '\0';
-    if (!rh_tbl) { thread_mutex_unlock(&db_mutex); return 1; }
-    struct find_media_ctx ctx = { media_path, out_key, out_key_len, {0} };
-    int r = rh_iterate(rh_tbl, rh_find_media_cb, &ctx);
-    if (r != 0) { thread_mutex_unlock(&db_mutex); return 0; }
-    strncpy(best_large, ctx.best, sizeof(best_large) - 1);
-    if (best_large[0]) {
-        char found[PATH_MAX]; found[0] = '\0';
-        if (find_thumb_filename_for_base(best_large, 0, found, sizeof(found))) {
-            strncpy(out_key, found, out_key_len - 1); out_key[out_key_len - 1] = '\0'; 
-            thread_mutex_unlock(&db_mutex); return 0;
+int thumbdb_delete(thumbdb_instance_t* inst, const char* key) {
+    if (!inst || !inst->rh_tbl || !key) return -1;
+    thread_mutex_lock(&inst->mutex);
+    int ret = -1;
+    if (!inst->tx_active) {
+        FILE* f = platform_fopen(inst->db_path, "ab");
+        if (f) {
+            if (fputc(MV_OPCODES.delete_op, f) != EOF && write_varint(f, strtoull(key, NULL, 10)) == 0 &&
+                write_varint(f, (uint64_t)time(NULL)) == 0 && fputc(MV_OPCODES.end, f) != EOF) {
+                fflush(f); if (platform_fsync(fileno(f)) == 0) ret = 0;
+            }
+            fclose(f);
         }
     }
-    thread_mutex_unlock(&db_mutex);
-    return 1;
+    if (rh_remove(inst->rh_tbl, key, strlen(key)) == 0) ret = 0;
+    thread_mutex_unlock(&inst->mutex);
+    return ret;
 }
 
-struct compact_write_ctx { FILE* f; int wrote; };
+void thumbdb_iterate(thumbdb_instance_t* inst, void (*cb)(const char* key, const char* value, void* ctx), void* ctx) {
+    if (!inst || !inst->rh_tbl || !cb) return;
+    thread_mutex_lock(&inst->mutex);
+    struct iter_ctx { void (*cb)(const char*, const char*, void*); void* user; } ic = {cb, ctx};
+    rh_iterate(inst->rh_tbl, NULL, &ic);
+    thread_mutex_unlock(&inst->mutex);
+}
 
-static int rh_compact_write_cb(const char* key, const unsigned char* val, size_t val_len, void* ctx) {
-    struct compact_write_ctx* c = (struct compact_write_ctx*)ctx;
-    if (!c || !c->f || !key) return -1;
-    const char* value = (val && val_len > 0) ? (const char*)val : NULL;
-    if (append_db_record(c->f, key, value) != 0) return -1;
-    c->wrote++;
+char* thumbdb_get_record_detail(thumbdb_instance_t* inst, const char* key) {
+    if (!inst || !key) return NULL;
+    thread_mutex_lock(&inst->mutex);
+    FILE* f = platform_fopen(inst->db_path, "rb");
+    if (!f) { thread_mutex_unlock(&inst->mutex); return NULL; }
+    uint8_t magic_hi, magic_lo;
+    if (fread(&magic_hi, 1, 1, f) != 1 || fread(&magic_lo, 1, 1, f) != 1) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
+    if ((((uint16_t)magic_hi << 8) | magic_lo) != MV_CONSTANTS.db_magic) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
+    uint8_t version; if (fread(&version, 1, 1, f) != 1) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
+    uint8_t flags; if (fread(&flags, 1, 1, f) != 1) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
+    int has_index = (flags >> 7) & 1;
+    uint64_t record_count, base_timestamp, dir_table_size;
+    if (read_varint(f, &record_count) != 0 || read_uint64_le(f, &base_timestamp) != 0 || read_varint(f, &dir_table_size) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
+    for (uint64_t i = 0; i < dir_table_size; i++) { uint64_t prefix_len, suffix_len; if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; } if (suffix_len > 0) fseek(f, suffix_len, SEEK_CUR); }
+    int is_first = 1;
+    for (;;) {
+        uint8_t peek; long pos = ftell(f);
+        if (fread(&peek, 1, 1, f) != 1) break;
+        fseek(f, pos, SEEK_SET);
+        if (has_index && peek == ((MV_CONSTANTS.index_magic >> 8) & 0xFF)) break;
+        record_t rec = {0};
+        if (read_record(inst, f, &rec, is_first) != 0) { if (feof(f)) break; free_record(&rec); continue; }
+        is_first = 0;
+        if (strcmp(rec.filename, key) == 0) {
+            char* result = malloc(8192);
+            if (!result) { free_record(&rec); fclose(f); thread_mutex_unlock(&inst->mutex); return NULL; }
+            char hash_str[64] = ""; if (rec.hash_len > 0) { char* hp = hash_str; for (size_t i = 0; i < rec.hash_len && i < 16; i++) hp += snprintf(hp, sizeof(hash_str) - (hp - hash_str), "%02x", rec.hash[i]); }
+            const char* type_str = "unknown";
+            switch (rec.meta.type) { case MEDIA_JPG: type_str = "JPG"; break; case MEDIA_PNG: type_str = "PNG"; break; case MEDIA_GIF: type_str = "GIF"; break; case MEDIA_WEBP: type_str = "WEBP"; break; case MEDIA_MP4: type_str = "MP4"; break; case MEDIA_WEBM: type_str = "WEBM"; break; }
+            const char* hash_mode_str = "unknown";
+            switch (rec.meta.hash_mode) { case HASH_FULL_MD5: hash_mode_str = "FULL_MD5"; break; case HASH_HALF_MD5: hash_mode_str = "HALF_MD5"; break; case HASH_RIPEMD128: hash_mode_str = "RIPEMD128"; break; case HASH_NONE: hash_mode_str = "NONE"; break; }
+            snprintf(result, 8192, "{\"record_seq\":%llu,\"timestamp\":%llu,\"media_type\":\"%s\",\"animated\":%s,\"thumb_mode\":%d,\"hash_mode\":\"%s\",\"hash\":\"%s\",\"dir_count\":%zu,\"width\":%u,\"height\":%u,\"duration\":%u,\"crc32\":%u,\"orientation\":%u,\"gps_lat\":%.6f,\"gps_lon\":%.6f}", (unsigned long long)rec.record_sequence, (unsigned long long)rec.timestamp, type_str, rec.meta.animated ? "true" : "false", rec.meta.thumb_mode, hash_mode_str, hash_str, rec.dir_count, rec.width, rec.height, rec.duration, rec.crc32, rec.orientation, rec.gps_lat, rec.gps_lon);
+            free_record(&rec); fclose(f); thread_mutex_unlock(&inst->mutex); return result;
+        }
+        free_record(&rec);
+    }
+    fclose(f);
+    thread_mutex_unlock(&inst->mutex);
+    return NULL;
+}
+
+typedef struct {
+    const char* media_path;
+    char* out_key;
+    size_t out_key_len;
+    int found;
+} find_media_ctx_t;
+
+static int find_media_cb(const char* key, const unsigned char* value, size_t value_len, void* user_data) {
+    find_media_ctx_t* ctx = (find_media_ctx_t*)user_data;
+    if (!ctx || ctx->found) return 0;
+    if (!value || value_len == 0) return 0;
+    char norm_val[PATH_MAX];
+    size_t copy_len = value_len < sizeof(norm_val) - 1 ? value_len : sizeof(norm_val) - 1;
+    memcpy(norm_val, value, copy_len);
+    norm_val[copy_len] = '\0';
+    normalize_path(norm_val);
+    char norm_media[PATH_MAX];
+    strncpy(norm_media, ctx->media_path, sizeof(norm_media) - 1);
+    norm_media[sizeof(norm_media) - 1] = '\0';
+    normalize_path(norm_media);
+    if (strcmp(norm_val, norm_media) == 0) {
+        strncpy(ctx->out_key, key, ctx->out_key_len - 1);
+        ctx->out_key[ctx->out_key_len - 1] = '\0';
+        ctx->found = 1;
+    }
     return 0;
 }
 
-int thumbdb_compact(void) {
-    if (!db_inited) return -1;
-    if (ensure_index_uptodate() != 0) return -1;
-    LOG_DEBUG("thumbdb_compact: starting for %s", db_path);
-    thread_mutex_lock(&db_mutex);
-    
-    if (!rh_tbl) {
-        thread_mutex_unlock(&db_mutex);
-        return -1;
+int thumbdb_find_for_media(thumbdb_instance_t* inst, const char* media_path, char* out_key, size_t out_key_len) {
+    if (!inst || !inst->rh_tbl || !media_path || !out_key || out_key_len == 0) return -1;
+    thread_mutex_lock(&inst->mutex);
+    out_key[0] = '\0';
+    find_media_ctx_t ctx = { media_path, out_key, out_key_len, 0 };
+    rh_iterate(inst->rh_tbl, find_media_cb, &ctx);
+    thread_mutex_unlock(&inst->mutex);
+    return ctx.found ? 0 : -1;
+}
+
+typedef struct { char* key; char* value; } compact_entry_t;
+
+static int collect_entry_cb(const char* key, const unsigned char* value, size_t value_len, void* user_data) {
+    compact_entry_t** entries = (compact_entry_t**)((void**)user_data)[0];
+    size_t* count = (size_t*)((void**)user_data)[1];
+    size_t* capacity = (size_t*)((void**)user_data)[2];
+    size_t key_len = strlen(key);
+    if (*count >= *capacity) {
+        size_t new_cap = (*capacity == 0) ? 64 : (*capacity * 2);
+        compact_entry_t* new_entries = realloc(*entries, new_cap * sizeof(compact_entry_t));
+        if (!new_entries) return -1;
+        *entries = new_entries; *capacity = new_cap;
     }
-    
-    
-    char temp_path[PATH_MAX];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", db_path);
-    
-    FILE* out = platform_fopen(temp_path, "wb");
-    if (!out) {
-        LOG_WARN("thumbdb: failed to open temporary database file for binary write");
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    if (fwrite(DB_MAGIC, 1, DB_MAGIC_LEN, out) != DB_MAGIC_LEN) {
-        LOG_WARN("thumbdb: failed to write magic header");
-        fclose(out);
-        platform_file_delete(temp_path);
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    struct compact_write_ctx ctx = { out, 0 };
-    int result = rh_iterate(rh_tbl, rh_compact_write_cb, &ctx);
-    if (result != 0) {
-        LOG_WARN("thumbdb: iteration failed during processing");
-        fclose(out);
-        platform_file_delete(temp_path);
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    if (fflush(out) != 0) {
-        LOG_WARN("thumbdb: fflush failed during processing");
-        fclose(out);
-        platform_file_delete(temp_path);
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    if (platform_fsync(fileno(out)) != 0) {
-        LOG_WARN("thumbdb: fsync failed during processing");
-        fclose(out);
-        platform_file_delete(temp_path);
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    fclose(out);
-    
-    
-    if (platform_move_file(temp_path, db_path) != 0) {
-        LOG_WARN("thumbdb: failed to replace database file");
-        platform_file_delete(temp_path);
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    
-    
-    struct stat st;
-    if (platform_stat(db_path, &st) == 0) {
-        db_last_mtime = st.st_mtime;
-        db_last_size = st.st_size;
-    }
-    
-    LOG_INFO("thumbdb: processing completed");
-    thread_mutex_unlock(&db_mutex);
+    (*entries)[*count].key = malloc(key_len + 1);
+    (*entries)[*count].value = malloc(value_len + 1);
+    if ((*entries)[*count].key && (*entries)[*count].value) {
+        memcpy((*entries)[*count].key, key, key_len); (*entries)[*count].key[key_len] = '\0';
+        memcpy((*entries)[*count].value, value, value_len); (*entries)[*count].value[value_len] = '\0';
+        (*count)++;
+    } else { free((*entries)[*count].key); free((*entries)[*count].value); return -1; }
     return 0;
 }
 
-static void sweep_cb(const char* key, const char* value, void* ctx) {
-    (void)ctx;
-    if (!value || value[0] == '\0') return;
-    
-    const char* media = value;
-    if (!media[0]) return;
-    if (!is_file(media)) {
-        char thumb_path[PATH_MAX];
-        bool removed = false;
-        char found[PATH_MAX]; found[0] = '\0';
-        if (find_thumb_filename_for_base(key, 1, found, sizeof(found))) {
-            char thumb_dir[PATH_MAX]; thumb_dir[0] = '\0';
-            if (db_path[0]) {
-                strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1); thumb_dir[sizeof(thumb_dir) - 1] = '\0'; char* last = strrchr(thumb_dir, DIR_SEP); if (last) *last = '\0'; else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
-                snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, found);
-                if (is_file(thumb_path)) { if (platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path); }
-            }
-        }
-        if (!removed && find_thumb_filename_for_base(key, 0, found, sizeof(found))) {
-            char thumb_dir[PATH_MAX]; thumb_dir[0] = '\0';
-            if (db_path[0]) {
-                strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1); thumb_dir[sizeof(thumb_dir) - 1] = '\0'; char* last = strrchr(thumb_dir, DIR_SEP); if (last) *last = '\0'; else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
-                snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, found);
-                if (is_file(thumb_path)) { if (platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; } else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path); }
-            }
-        }
-
-        if (!removed) {
-            char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-            diriter dit;
-            if (dir_open(&dit, thumbs_root)) {
-                const char* dname;
-                while ((dname = dir_next(&dit))) {
-                    if (!strcmp(dname, ".") || !strcmp(dname, "..")) continue;
-                    char sub[PATH_MAX]; path_join(sub, thumbs_root, dname);
-                    if (!is_dir(sub)) continue;
-                    if (find_thumb_filename_for_base_in_dir(sub, key, 1, found, sizeof(found))) {
-                        snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", sub, found);
-                        if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; break; }
-                    }
-                    if (find_thumb_filename_for_base_in_dir(sub, key, 0, found, sizeof(found))) {
-                        snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", sub, found);
-                        if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; break; }
-                    }
-                }
-                dir_close(&dit);
-            }
-        }
-
-        thumbdb_delete(key);
+int thumbdb_compact(thumbdb_instance_t* inst) {
+    if (!inst || !inst->rh_tbl) return -1;
+    thread_mutex_lock(&inst->mutex);
+    compact_entry_t* entries = NULL; size_t entry_count = 0, entry_capacity = 0;
+    void* user_data[3] = {&entries, &entry_count, &entry_capacity};
+    rh_iterate(inst->rh_tbl, collect_entry_cb, user_data);
+    if (inst->index_table.entries) { free(inst->index_table.entries); inst->index_table.entries = NULL; }
+    inst->index_table.count = 0; inst->index_table.capacity = 0;
+    char tmp_path[PATH_MAX]; snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", inst->db_path);
+    FILE* f = platform_fopen(tmp_path, "wb");
+    if (!f) { for (size_t i = 0; i < entry_count; i++) { free(entries[i].key); free(entries[i].value); } free(entries); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint8_t magic_hi = (MV_CONSTANTS.db_magic >> 8) & 0xFF, magic_lo = MV_CONSTANTS.db_magic & 0xFF;
+    fwrite(&magic_hi, 1, 1, f); fwrite(&magic_lo, 1, 1, f);
+    uint8_t version = MV_CONSTANTS.version; fwrite(&version, 1, 1, f);
+    uint8_t flags = inst->file_header.flags | 0x80; fwrite(&flags, 1, 1, f);
+    write_varint(f, (uint64_t)entry_count);
+    write_uint64_le(f, inst->file_header.base_timestamp);
+    write_varint(f, (uint64_t)inst->dir_table.count);
+    for (size_t i = 0; i < inst->dir_table.count; i++) {
+        size_t prefix_len = 0;
+        if (i > 0) { const char* prev = inst->dir_table.dirs[i - 1]; const char* curr = inst->dir_table.dirs[i]; while (prev[prefix_len] && curr[prefix_len] && prev[prefix_len] == curr[prefix_len]) prefix_len++; }
+        size_t suffix_len = strlen(inst->dir_table.dirs[i]) - prefix_len;
+        write_varint(f, prefix_len); write_varint(f, suffix_len);
+        if (suffix_len > 0) fwrite(inst->dir_table.dirs[i] + prefix_len, 1, suffix_len, f);
     }
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp; inst->current_record_seq = 0;
+    for (size_t i = 0; i < entry_count; i++) {
+        long record_offset = ftell(f);
+        record_t rec = {0};
+        rec.record_sequence = inst->current_record_seq++;
+        rec.filename = entries[i].key;
+        rec.timestamp = (uint64_t)time(NULL);
+        rec.meta.type = get_media_type_from_path(entries[i].value);
+        rec.meta.animated = 0; rec.meta.thumb_mode = 0; rec.meta.hash_override = 0; rec.meta.has_extensions = 0;
+        rec.meta.hash_mode = inst->file_header.default_hash_mode;
+        if (parse_path_into_dirs(inst, entries[i].value, &rec.dir_indexes, &rec.dir_count) == 0) {
+            if (is_file(entries[i].value)) { if (crypto_md5_file(entries[i].value, rec.hash) != 0) memset(rec.hash, 0, sizeof(rec.hash)); }
+            else memset(rec.hash, 0, sizeof(rec.hash));
+            rec.hash_len = get_hash_length(rec.meta.hash_mode);
+            int is_first = (i == 0);
+            if (write_record(inst, f, &rec, is_first) == 0) add_index_entry(inst, (uint64_t)record_offset, entries[i].key);
+            free(rec.dir_indexes);
+        }
+    }
+    if (write_index_block(inst, f) != 0) LOG_WARN("thumbdb_compact: failed to write index block");
+    else { inst->file_header.has_index = 1; LOG_DEBUG("thumbdb_compact: wrote index with %zu entries", inst->index_table.count); }
+    fflush(f); platform_fsync(fileno(f)); fclose(f);
+    for (size_t i = 0; i < entry_count; i++) { free(entries[i].key); free(entries[i].value); }
+    free(entries);
+    {
+        char bak_path[PATH_MAX]; snprintf(bak_path, sizeof(bak_path), "%s.bak", inst->db_path);
+        platform_file_delete(bak_path);
+        if (rename(inst->db_path, bak_path) != 0) LOG_WARN("thumbdb_compact: could not backup old database %s", inst->db_path);
+        if (rename(tmp_path, inst->db_path) != 0) { LOG_ERROR("thumbdb_compact: failed to rename %s to %s", tmp_path, inst->db_path); rename(bak_path, inst->db_path); thread_mutex_unlock(&inst->mutex); return -1; }
+        platform_file_delete(bak_path);
+    }
+    inst->last_filename_value = 0; inst->last_timestamp_value = inst->file_header.base_timestamp; inst->current_record_seq = 0;
+    thread_mutex_unlock(&inst->mutex);
+    return 0;
 }
 
-int thumbdb_sweep_orphans(void) {
-    if (!db_inited) return -1;
-
-    if (ensure_index_uptodate() != 0) return -1;
-    thread_mutex_lock(&db_mutex);
-    size_t cap = 128; size_t count = 0;
-    kv_t* arr = malloc(cap * sizeof(*arr));
-    if (!arr) {
-        LOG_ERROR("Failed to allocate array in thumbdb_sweep_orphans");
-        thread_mutex_unlock(&db_mutex);
-        return -1;
-    }
-    if (!rh_tbl) { free(arr); thread_mutex_unlock(&db_mutex); return -1; }
-    struct collect_ctx cctx = { &arr, &cap, &count, 0 };
-    int r = rh_iterate(rh_tbl, rh_collect_kv_cb, &cctx);
-    if (r != 0 || cctx.err) {
-        for (size_t j = 0; j < count; ++j) { free(arr[j].key); free(arr[j].val); }
-        free(arr); thread_mutex_unlock(&db_mutex); return -1;
-    }
-    thread_mutex_unlock(&db_mutex);
-
-    size_t del_cap = 64; size_t del_count = 0; char** dels = malloc(del_cap * sizeof(char*));
-    if (!dels) {
-        LOG_ERROR("Failed to allocate deletion array in thumbdb_sweep_orphans");
-        for (size_t j = 0; j < count; ++j) { free(arr[j].key); free(arr[j].val); }
-        free(arr);
-        return -1;
-    }
-
-    for (size_t i = 0; i < count; ++i) {
-        char* key = arr[i].key; char* value = arr[i].val;
-
-        if (!value || value[0] == '\0') { free(key); free(value); continue; }
-
-        bool removed = false;
-        char thumb_dir[PATH_MAX]; thumb_dir[0] = '\0';
-        if (db_path[0]) {
-            strncpy(thumb_dir, db_path, sizeof(thumb_dir) - 1);
-            thumb_dir[sizeof(thumb_dir) - 1] = '\0';
-            char* last = strrchr(thumb_dir, DIR_SEP);
-            if (last) *last = '\0'; else strncpy(thumb_dir, ".", sizeof(thumb_dir) - 1);
+int thumbdb_sweep_orphans(thumbdb_instance_t* inst) {
+    if (!inst || !inst->rh_tbl) return -1;
+    thread_mutex_lock(&inst->mutex);
+    char per_thumbs_root[PATH_MAX]; per_thumbs_root[0] = '\0';
+    if (!inst->db_path[0]) { thread_mutex_unlock(&inst->mutex); return -1; }
+    strncpy(per_thumbs_root, inst->db_path, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0';
+    char* last = strrchr(per_thumbs_root, DIR_SEP); if (last) *last = '\0';
+    if (!is_dir(per_thumbs_root)) { thread_mutex_unlock(&inst->mutex); return -1; }
+    int deleted_count = 0;
+    diriter it; if (!dir_open(&it, per_thumbs_root)) { thread_mutex_unlock(&inst->mutex); return -1; }
+    const char* entry;
+    while ((entry = dir_next(&it))) {
+        if (!entry || strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
+        if (strcmp(entry, "wal") == 0 || strcmp(entry, "thumbs.tdb") == 0 || strcmp(entry, "thumbs.tdb.tmp") == 0 || strcmp(entry, "thumbs.tdb.bak") == 0 || strcmp(entry, "thumbs.db") == 0 || strcmp(entry, "thumbs.db.tmp") == 0 || strcmp(entry, "thumbs.db.bak") == 0) continue;
+        const char* ext = strrchr(entry, '.'); int is_jpeg_thumb = ext && is_jpeg_extension(ext); int is_webp_thumb = ext && ascii_stricmp(ext, ".webp") == 0;
+        int has_marker = strstr(entry, "-small.") || strstr(entry, "-large.");
+        if (!has_marker || (!is_jpeg_thumb && !is_webp_thumb)) continue;
+        char base_key[PATH_MAX]; base_key[0] = '\0';
+        const char* small_marker = strstr(entry, "-small."); const char* large_marker = strstr(entry, "-large.");
+        if (small_marker) { size_t base_len = (size_t)(small_marker - entry); if (base_len >= sizeof(base_key)) base_len = sizeof(base_key) - 1; memcpy(base_key, entry, base_len); base_key[base_len] = '\0'; }
+        else if (large_marker) { size_t base_len = (size_t)(large_marker - entry); if (base_len >= sizeof(base_key)) base_len = sizeof(base_key) - 1; memcpy(base_key, entry, base_len); base_key[base_len] = '\0'; }
+        if (!base_key[0]) continue;
+        unsigned char* val = NULL; size_t val_len = 0;
+        int found = rh_find(inst->rh_tbl, base_key, strlen(base_key), &val, &val_len);
+        if (found != 0 || !val || val_len == 0) {
+            char thumb_path[PATH_MAX]; snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", per_thumbs_root, entry);
+            if (is_file(thumb_path)) { if (platform_file_delete(thumb_path) == 0) { deleted_count++; LOG_INFO("thumbdb_sweep_orphans: deleted orphan thumbnail %s", thumb_path); } else LOG_WARN("thumbdb_sweep_orphans: failed to delete orphan thumbnail %s", thumb_path); }
         }
-        else {
-            get_thumbs_root(thumb_dir, sizeof(thumb_dir));
+    }
+    dir_close(&it);
+    thread_mutex_unlock(&inst->mutex);
+    LOG_INFO("thumbdb_sweep_orphans: deleted %d orphan thumbnails", deleted_count);
+    return 0;
+}
+
+void thumbdb_request_compaction(thumbdb_instance_t* inst) {
+    if (!inst) return;
+    thread_mutex_lock(&inst->compaction_mutex);
+    inst->compaction_requested = 1;
+    thread_mutex_unlock(&inst->compaction_mutex);
+}
+
+int thumbdb_perform_requested_compaction(thumbdb_instance_t* inst) {
+    if (!inst) return 0;
+    thread_mutex_lock(&inst->compaction_mutex);
+    if (!inst->compaction_requested) { thread_mutex_unlock(&inst->compaction_mutex); return 0; }
+    inst->compaction_requested = 0;
+    thread_mutex_unlock(&inst->compaction_mutex);
+    return thumbdb_compact(inst) == 0 ? 1 : -1;
+}
+
+static void* repair_worker_thread(void* arg) {
+    thumbdb_instance_t* inst = (thumbdb_instance_t*)arg;
+    int interval = 3600;
+    while (inst && inst->db_inited) {
+        for (int i = 0; i < interval && inst->db_inited; i++) platform_sleep_ms(1000);
+        if (!inst->db_inited) break;
+        LOG_INFO("thumbdb: running scheduled database repair");
+        process_wal_chunks(inst);
+        thumbdb_perform_requested_compaction(inst);
+        thumbdb_sweep_orphans(inst);
+    }
+    return NULL;
+}
+
+int thumbdb_start_repair_task(thumbdb_instance_t* inst, int interval_seconds) {
+    if (!inst || !inst->db_inited) return -1;
+    if (thread_create_detached((void* (*)(void*))repair_worker_thread, inst) != 0) return -1;
+    LOG_INFO("thumbdb: started repair task with %d second interval", interval_seconds > 0 ? interval_seconds : 3600);
+    return 0;
+}
+
+int thumbdb_validate(thumbdb_instance_t* inst) {
+    if (!inst || !inst->rh_tbl) return -1;
+    thread_mutex_lock(&inst->mutex);
+    FILE* f = platform_fopen(inst->db_path, "rb");
+    if (!f) { thread_mutex_unlock(&inst->mutex); LOG_ERROR("thumbdb_validate: cannot open %s", inst->db_path); return -1; }
+    uint8_t magic_hi, magic_lo;
+    if (fread(&magic_hi, 1, 1, f) != 1 || fread(&magic_lo, 1, 1, f) != 1) { LOG_ERROR("thumbdb_validate: cannot read magic header"); fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint16_t magic = ((uint16_t)magic_hi << 8) | magic_lo;
+    if (magic != MV_CONSTANTS.db_magic) { LOG_ERROR("thumbdb_validate: invalid magic"); fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint8_t version; if (fread(&version, 1, 1, f) != 1) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint8_t flags; if (fread(&flags, 1, 1, f) != 1) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint64_t record_count; if (read_varint(f, &record_count) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint64_t base_timestamp; if (read_uint64_le(f, &base_timestamp) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    uint64_t dir_table_size; if (read_varint(f, &dir_table_size) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; }
+    for (uint64_t i = 0; i < dir_table_size; i++) { uint64_t prefix_len, suffix_len; if (read_varint(f, &prefix_len) != 0 || read_varint(f, &suffix_len) != 0) { fclose(f); thread_mutex_unlock(&inst->mutex); return -1; } if (suffix_len > 0) fseek(f, (long)suffix_len, SEEK_CUR); }
+    uint64_t records_validated = 0;
+    uint64_t crc_errors = 0;
+    uint64_t parse_errors = 0;
+    uint64_t saved_filename = inst->last_filename_value;
+    uint64_t saved_timestamp = inst->last_timestamp_value;
+    uint64_t saved_sequence = inst->current_record_seq;
+    inst->last_filename_value = 0;
+    inst->last_timestamp_value = base_timestamp;
+    inst->current_record_seq = 0;
+    int is_first = 1;
+    int has_index = (flags >> 7) & 1;
+
+    for (;;) {
+        long pos = ftell(f);
+        uint8_t op;
+        if (fread(&op, 1, 1, f) != 1) break;
+        fseek(f, pos, SEEK_SET);
+        if (has_index && op == ((MV_CONSTANTS.index_magic >> 8) & 0xFF)) break;
+        if (op == MV_OPCODES.tx_begin || op == MV_OPCODES.tx_end) {
+            fgetc(f);
+            continue;
         }
-
-        
-        const char* media = value;
-        char thumb_path[PATH_MAX];
-        snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", thumb_dir, key);
-        if (!is_file(media)) {
-            if (find_thumb_filename_for_base(key, 1, thumb_path, sizeof(thumb_path))) {
-                if (is_file(thumb_path)) {
-                    if (platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; }
-                    else LOG_WARN("thumbdb: failed to remove thumb %s", thumb_path);
-                }
-            }
-
-            if (!removed) {
-                char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
-                if (find_thumb_filename_for_base(key, 1, thumb_path, sizeof(thumb_path))) {
-                    if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; }
-                }
-                if (!removed && find_thumb_filename_for_base(key, 0, thumb_path, sizeof(thumb_path))) {
-                    if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; }
-                }
-                if (!removed) {
-                    diriter dit; if (dir_open(&dit, thumbs_root)) {
-                        const char* dname;
-                        while ((dname = dir_next(&dit))) {
-                            if (!strcmp(dname, ".") || !strcmp(dname, "..")) continue;
-                            char sub[PATH_MAX]; path_join(sub, thumbs_root, dname);
-                            if (!is_dir(sub)) continue;
-                            if (find_thumb_filename_for_base_in_dir(sub, key, 1, thumb_path, sizeof(thumb_path))) {
-                                snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", sub, thumb_path);
-                                if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; break; }
-                            }
-                            if (find_thumb_filename_for_base_in_dir(sub, key, 0, thumb_path, sizeof(thumb_path))) {
-                                snprintf(thumb_path, sizeof(thumb_path), "%s" DIR_SEP_STR "%s", sub, thumb_path);
-                                if (is_file(thumb_path) && platform_file_delete(thumb_path) == 0) { LOG_DEBUG("thumbdb: removed thumb %s because media missing: %s", thumb_path, media); removed = true; break; }
-                            }
-                        }
-                        dir_close(&dit);
-                    }
-                }
-            }
-
-            if (del_count + 1 > del_cap) {
-                size_t nc = del_cap * 2;
-                char** tmp = realloc(dels, nc * sizeof(char*));
-                if (!tmp) {
-                    LOG_ERROR("Failed to realloc deletion array, breaking early");
-                    break;
-                }
-                dels = tmp; del_cap = nc;
-            }
-            dels[del_count++] = strdup(key);
-            if (!dels[del_count - 1]) {
-                LOG_ERROR("Failed to duplicate key for deletion, breaking early");
-                del_count--;
+        if (op == MV_OPCODES.delete_op) {
+            fgetc(f);
+            uint64_t filename_ref;
+            uint64_t ts_ref;
+            uint8_t end_ref;
+            if (read_varint(f, &filename_ref) != 0 ||
+                read_varint(f, &ts_ref) != 0 ||
+                fread(&end_ref, 1, 1, f) != 1 ||
+                end_ref != MV_OPCODES.end) {
+                parse_errors++;
                 break;
             }
+            records_validated++;
+            continue;
+        }
+        if (op == 0xEE) {
+            fgetc(f);
+            uint64_t marker_count;
+            if (read_varint(f, &marker_count) != 0) {
+                parse_errors++;
+                break;
+            }
+            continue;
+        }
+        if (op != MV_OPCODES.begin) {
+            LOG_ERROR("thumbdb_validate: unexpected opcode 0x%02X at offset %ld", op, pos);
+            parse_errors++;
+            break;
         }
 
-        free(key); free(value);
+        record_t rec = {0};
+        rec.record_sequence = inst->current_record_seq++;
+        if (read_record(inst, f, &rec, is_first) != 0) {
+            free_record(&rec);
+            LOG_ERROR("thumbdb_validate: record read failed at offset %ld (first=%d)", pos, is_first);
+            if (feof(f)) {
+                parse_errors++;
+            } else {
+                crc_errors++;
+            }
+            break;
+        }
+        is_first = 0;
+        records_validated++;
+        free_record(&rec);
     }
-    free(arr);
 
-    if (del_count == 0) { free(dels); return 0; }
+    inst->last_filename_value = saved_filename;
+    inst->last_timestamp_value = saved_timestamp;
+    inst->current_record_seq = saved_sequence;
+    fclose(f);
+    thread_mutex_unlock(&inst->mutex);
+    LOG_INFO("thumbdb_validate: validated %llu records, %llu CRC errors", (unsigned long long)records_validated, (unsigned long long)crc_errors);
+    return (crc_errors > 0 || parse_errors > 0) ? -1 : 0;
+}
 
-    thread_mutex_lock(&db_mutex);
-    for (size_t i = 0; i < del_count; ++i) {
-        ht_set_internal(dels[i], NULL);
-    }
-    
-    for (size_t i = 0; i < del_count; ++i) {
-        int wr = thumbdb_write_wal_entry(dels[i], NULL);
-        if (wr != 0) LOG_WARN("thumbdb_sweep_orphans: failed to write WAL deletion for %s", dels[i]);
-    }
-    thumbdb_request_compaction();
-    thread_mutex_unlock(&db_mutex);
+typedef struct { int total_records; int missing_thumbs; int valid_records; char thumbs_root[PATH_MAX]; } verify_records_ctx_t;
 
-    for (size_t i = 0; i < del_count; ++i) free(dels[i]); free(dels);
-
+static int verify_record_cb(const char* key, const unsigned char* value, size_t value_len, void* user_data) {
+    verify_records_ctx_t* ctx = (verify_records_ctx_t*)user_data;
+    ctx->total_records++;
+    if (!value || value_len == 0) { LOG_WARN("thumbdb_verify_records: key %s has empty value", key); return 0; }
+    const char* media_path = (const char*)value;
+    if (!is_file(media_path)) LOG_WARN("thumbdb_verify_records: media file does not exist: %s", media_path);
+    char small_thumb[PATH_MAX], large_thumb[PATH_MAX];
+    snprintf(small_thumb, sizeof(small_thumb), "%s" DIR_SEP_STR "%s-small.jpg", ctx->thumbs_root, key);
+    snprintf(large_thumb, sizeof(large_thumb), "%s" DIR_SEP_STR "%s-large.jpg", ctx->thumbs_root, key);
+    int has_small = is_file(small_thumb), has_large = is_file(large_thumb);
+    if (!has_small && !has_large) { ctx->missing_thumbs++; LOG_WARN("thumbdb_verify_records: record %s missing both thumbnails (media: %s)", key, media_path); }
+    else ctx->valid_records++;
     return 0;
+}
+
+int thumbdb_verify_records(thumbdb_instance_t* inst) {
+    if (!inst || !inst->rh_tbl || !inst->db_inited) return -1;
+    thread_mutex_lock(&inst->mutex);
+    verify_records_ctx_t ctx = {0};
+    if (!inst->db_path[0]) { thread_mutex_unlock(&inst->mutex); return -1; }
+    strncpy(ctx.thumbs_root, inst->db_path, sizeof(ctx.thumbs_root) - 1); ctx.thumbs_root[sizeof(ctx.thumbs_root) - 1] = '\0';
+    char* last = strrchr(ctx.thumbs_root, DIR_SEP); if (last) *last = '\0';
+    if (!is_dir(ctx.thumbs_root)) { thread_mutex_unlock(&inst->mutex); return -1; }
+    rh_iterate(inst->rh_tbl, verify_record_cb, &ctx);
+    thread_mutex_unlock(&inst->mutex);
+    LOG_INFO("thumbdb_verify_records: total_records=%d valid=%d missing_thumbs=%d", ctx.total_records, ctx.valid_records, ctx.missing_thumbs);
+    return ctx.missing_thumbs > 0 ? 1 : 0;
+}
+
+int thumbdb_verify_thumbnails(thumbdb_instance_t* inst) {
+    if (!inst || !inst->rh_tbl || !inst->db_inited) return -1;
+    thread_mutex_lock(&inst->mutex);
+    char per_thumbs_root[PATH_MAX]; per_thumbs_root[0] = '\0';
+    if (!inst->db_path[0]) { thread_mutex_unlock(&inst->mutex); return -1; }
+    strncpy(per_thumbs_root, inst->db_path, sizeof(per_thumbs_root) - 1); per_thumbs_root[sizeof(per_thumbs_root) - 1] = '\0';
+    char* last = strrchr(per_thumbs_root, DIR_SEP); if (last) *last = '\0';
+    if (!is_dir(per_thumbs_root)) { thread_mutex_unlock(&inst->mutex); return -1; }
+    int total_thumbs = 0, orphaned_thumbs = 0, valid_thumbs = 0;
+    diriter it; if (!dir_open(&it, per_thumbs_root)) { thread_mutex_unlock(&inst->mutex); return -1; }
+    const char* entry;
+    while ((entry = dir_next(&it))) {
+        if (!entry || strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
+        if (strcmp(entry, "wal") == 0 || strcmp(entry, "thumbs.tdb") == 0 || strcmp(entry, "thumbs.tdb.tmp") == 0 || strcmp(entry, "thumbs.tdb.bak") == 0 || strcmp(entry, "thumbs.db") == 0 || strcmp(entry, "thumbs.db.tmp") == 0 || strcmp(entry, "thumbs.db.bak") == 0) continue;
+        const char* ext = strrchr(entry, '.'); int is_jpeg_thumb = ext && is_jpeg_extension(ext); int is_webp_thumb = ext && ascii_stricmp(ext, ".webp") == 0;
+        int has_marker = strstr(entry, "-small.") || strstr(entry, "-large.");
+        if (!has_marker || (!is_jpeg_thumb && !is_webp_thumb)) continue;
+        total_thumbs++;
+        char base_key[PATH_MAX]; base_key[0] = '\0';
+        const char* small_marker = strstr(entry, "-small."); const char* large_marker = strstr(entry, "-large.");
+        if (small_marker) { size_t base_len = (size_t)(small_marker - entry); if (base_len >= sizeof(base_key)) base_len = sizeof(base_key) - 1; memcpy(base_key, entry, base_len); base_key[base_len] = '\0'; }
+        else if (large_marker) { size_t base_len = (size_t)(large_marker - entry); if (base_len >= sizeof(base_key)) base_len = sizeof(base_key) - 1; memcpy(base_key, entry, base_len); base_key[base_len] = '\0'; }
+        if (!base_key[0]) continue;
+        unsigned char* val = NULL; size_t val_len = 0;
+        int found = rh_find(inst->rh_tbl, base_key, strlen(base_key), &val, &val_len);
+        if (found != 0 || !val || val_len == 0) { orphaned_thumbs++; LOG_WARN("thumbdb_verify_thumbnails: orphaned thumbnail %s", entry); }
+        else valid_thumbs++;
+    }
+    dir_close(&it);
+    thread_mutex_unlock(&inst->mutex);
+    LOG_INFO("thumbdb_verify_thumbnails: total_thumbs=%d valid=%d orphaned=%d", total_thumbs, valid_thumbs, orphaned_thumbs);
+    return orphaned_thumbs > 0 ? 1 : 0;
+}
+
+int thumbdb_seek_to_record(thumbdb_instance_t* inst, const char* filename, char* buf, size_t buflen) {
+    if (!inst || !inst->rh_tbl || !inst->db_inited || !filename || !buf) return -1;
+    if (inst->index_table.count == 0 || !inst->file_header.has_index) return thumbdb_get(inst, filename, buf, buflen);
+    thread_mutex_lock(&inst->mutex);
+    uint64_t target_hash = hash_filename(filename);
+    size_t left = 0, right = inst->index_table.count; int found_idx = -1;
+    while (left < right) {
+        size_t mid = left + (right - left) / 2;
+        if (inst->index_table.entries[mid].filename_hash == target_hash) { found_idx = (int)mid; break; }
+        else if (inst->index_table.entries[mid].filename_hash < target_hash) left = mid + 1;
+        else right = mid;
+    }
+    if (found_idx < 0) { thread_mutex_unlock(&inst->mutex); return -1; }
+    uint64_t file_offset = inst->index_table.entries[found_idx].file_offset;
+    FILE* f = platform_fopen(inst->db_path, "rb");
+    if (!f) { thread_mutex_unlock(&inst->mutex); return -1; }
+    uint64_t saved_fname = inst->last_filename_value;
+    uint64_t saved_ts = inst->last_timestamp_value;
+    inst->last_filename_value = 0;
+    inst->last_timestamp_value = inst->file_header.base_timestamp;
+    int is_first = 1;
+    for (;;) {
+        long pos = ftell(f);
+        if ((uint64_t)pos >= file_offset) break;
+        uint8_t peek;
+        if (fread(&peek, 1, 1, f) != 1) { fseek(f, pos, SEEK_SET); break; }
+        fseek(f, pos, SEEK_SET);
+        if (peek == MV_OPCODES.tx_begin || peek == MV_OPCODES.tx_end || peek == MV_OPCODES.delete_op) {
+            fgetc(f);
+            if (peek == MV_OPCODES.delete_op) { uint64_t dv; read_varint(f, &dv); uint64_t dt; read_varint(f, &dt); fgetc(f); }
+            continue;
+        }
+        if (peek != MV_OPCODES.begin) { fgetc(f); continue; }
+        record_t tmp = {0};
+        if (read_record(inst, f, &tmp, is_first) != 0) { break; }
+        is_first = 0;
+        free_record(&tmp);
+    }
+    record_t rec = {0};
+    if (read_record(inst, f, &rec, is_first) != 0) { fclose(f); inst->last_filename_value = saved_fname; inst->last_timestamp_value = saved_ts; thread_mutex_unlock(&inst->mutex); return -1; }
+    fclose(f);
+    inst->last_filename_value = saved_fname;
+    inst->last_timestamp_value = saved_ts;
+    if (strcmp(rec.filename, filename) != 0) { free_record(&rec); thread_mutex_unlock(&inst->mutex); return -1; }
+    if (serialize_record_to_value(inst, &rec, buf, buflen) != 0) { free_record(&rec); thread_mutex_unlock(&inst->mutex); return -1; }
+    free_record(&rec);
+    thread_mutex_unlock(&inst->mutex);
+    return 0;
+}
+
+int thumbdb_start_async_worker(thumbdb_instance_t* inst) {
+    if (!inst || inst->async_worker_running) return 0;
+    inst->async_worker_running = 1;
+    if (thread_create_detached((void* (*)(void*))async_worker_thread, inst) != 0) { inst->async_worker_running = 0; return -1; }
+    LOG_INFO("thumbdb: started async worker thread");
+    return 0;
+}
+
+void thumbdb_stop_async_worker(thumbdb_instance_t* inst) {
+    if (inst) inst->async_worker_running = 0;
+}
+
+int thumbdb_set_async(thumbdb_instance_t* inst, const char* key, const char* value) {
+    if (!inst || !key || !value) return -1;
+    int ret = write_wal_entry(inst, key, value);
+    if (ret == 0) ret = enqueue_async_op(inst, key, value, 0);
+    return ret;
+}
+
+int thumbdb_delete_async(thumbdb_instance_t* inst, const char* key) {
+    if (!inst || !key) return -1;
+    int ret = write_wal_entry(inst, key, NULL);
+    if (ret == 0) ret = enqueue_async_op(inst, key, NULL, 1);
+    return ret;
 }

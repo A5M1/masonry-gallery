@@ -9,12 +9,20 @@
 #include "config.h"
 #include "thumbs.h"
 #include "exception_handler.h"
+#include "memory.h"
 #include "platform.h"
 #include "websocket.h"
 
 int main(int argc, char** argv) {
     log_init();
     install_exception_handlers();
+    exception_handler_register_thread("main", "main");
+    if (mem_init() != 0) {
+        LOG_ERROR("Failed to initialize scoped memory manager");
+        return 1;
+    }
+    mem_scope_t* main_scope = mem_scope_create("main", mem_global_scope());
+    if (main_scope) mem_scope_enter(main_scope);
     LOG_DEBUG("startup: installed exception handlers");
     LOG_DEBUG("startup: after log_init");
     platform_init_network();
@@ -49,7 +57,10 @@ int main(int argc, char** argv) {
         }
     }
     LOG_DEBUG("Scanning for missing thumbnails on startup...");
-    scan_and_generate_missing_thumbs();
+    LOG_INFO("Starting periodic thumbnail maintenance...");
+    start_periodic_thumb_maintenance(300);
+    LOG_INFO("Starting WAL processing thread for periodic WAL chunk processing...");
+    start_wal_processing_thread(10);
     LOG_DEBUG("startup: about to create_listen_socket");
     int port = 3000;
     int s = create_listen_socket(port);
@@ -57,14 +68,32 @@ int main(int argc, char** argv) {
     if (s < 0) {
         LOG_ERROR("Failed to create listening socket on port %d", port);
         platform_cleanup_network();
+        if (main_scope) {
+            mem_scope_leave();
+            mem_scope_destroy(main_scope);
+        }
+        mem_purge_quarantine();
+        mem_report_leaks("startup-failure");
+        exception_handler_unregister_thread();
         return 1;
     }
     LOG_INFO("Gallery server running on http://localhost:%d", port);
     LOG_DEBUG("startup: about to start_thread_pool");
     start_thread_pool(0);
     LOG_DEBUG("startup: after start_thread_pool");
+    {
+#ifdef _WIN32
+        u_long mode = 1;
+        ioctlsocket(s, FIONBIO, &mode);
+#else
+        int flags = fcntl(s, F_GETFL, 0);
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+    }
     int wait_ct = 0;
+    int consecutive_failures = 0;
     for (;;) {
+        if (exception_handler_shutdown_requested()) break;
         struct sockaddr_in ca;
         socklen_t calen = sizeof(ca);
         if (wait_ct % 10 == 0)
@@ -72,16 +101,39 @@ int main(int argc, char** argv) {
         wait_ct++;
         int c = accept(s, (struct sockaddr*)&ca, &calen);
         if (c < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK)
-                LOG_ERROR("Accept failed: %s", strerror(errno));
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#endif
+                consecutive_failures = 0;
+                platform_sleep_ms(1);
+                continue;
+            }
+            LOG_ERROR("Accept failed: %s", strerror(errno));
+            consecutive_failures++;
+            if (consecutive_failures > 100) {
+                LOG_ERROR("Too many consecutive accept failures, shutting down");
+                break;
+            }
             continue;
         }
+        consecutive_failures = 0;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(ca.sin_addr), ip, INET_ADDRSTRLEN);
         LOG_DEBUG("Accepted connection from %s:%d (socket %d)", ip, ntohs(ca.sin_port), c);
         platform_set_socket_options(c);
         enqueue_job(c);
     }
+    stop_thread_pool();
     platform_cleanup_network();
+    if (main_scope) {
+        mem_scope_leave();
+        mem_scope_destroy(main_scope);
+    }
+    mem_purge_quarantine();
+    mem_report_leaks("shutdown");
+    exception_handler_unregister_thread();
     return 0;
 }

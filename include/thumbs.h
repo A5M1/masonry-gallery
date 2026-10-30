@@ -11,6 +11,7 @@ typedef struct progress {
     skip_counter_t* skip_head;
     size_t processed_files;
     size_t total_files;
+    
 } progress_t;
 void get_thumb_rel_names(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len);
 void get_thumb_rel_names_quick(const char* full_path, const char* filename, char* small_rel, size_t small_len, char* large_rel, size_t large_len);
@@ -21,8 +22,10 @@ int dir_has_missing_thumbs_shallow(const char* dir, int videos_only);
 bool check_thumb_exists(const char* media_path, char* thumb_path, size_t thumb_path_len);
 extern atomic_int ffmpeg_active;
 void make_safe_dir_name_from(const char* dir, char* out, size_t outlen);
+void thumbname_to_base_local(const char* name, char* base, size_t base_len);
 void make_thumb_fs_paths(const char* media_full, const char* filename, char* small_fs_out, size_t small_fs_out_len, char* large_fs_out, size_t large_fs_out_len);
 void start_periodic_thumb_maintenance(int interval_seconds);
+void start_wal_processing_thread(int interval_seconds);
 void start_auto_thumb_watcher(const char* dir_path);
 void run_thumb_generation(const char* dir);
 #ifndef MAX_FFMPEG

@@ -169,6 +169,49 @@ int crypto_sha1(const void* data, size_t len, uint8_t* digest_out) {
 	return 0;
 }
 
+static uint32_t crc32_table[256];
+static int crc32_table_initialized = 0;
+
+static void init_crc32_table(void) {
+	if (crc32_table_initialized) return;
+	for (uint32_t i = 0; i < 256; i++) {
+		uint32_t c = i;
+		for (int j = 0; j < 8; j++) {
+			if (c & 1)
+				c = 0xEDB88320 ^ (c >> 1);
+			else
+				c = c >> 1;
+		}
+		crc32_table[i] = c;
+	}
+	crc32_table_initialized = 1;
+}
+
+void crypto_crc32_init(CRC32_CTX *ctx) {
+	if (!crc32_table_initialized) init_crc32_table();
+	if (ctx) ctx->crc = 0xFFFFFFFF;
+}
+
+void crypto_crc32_update(CRC32_CTX *ctx, const void *data, size_t len) {
+	if (!ctx || !data) return;
+	const uint8_t *buf = (const uint8_t*)data;
+	for (size_t i = 0; i < len; i++)
+		ctx->crc = crc32_table[(ctx->crc ^ buf[i]) & 0xFF] ^ (ctx->crc >> 8);
+}
+
+uint32_t crypto_crc32_final(CRC32_CTX *ctx) {
+	return ctx ? (ctx->crc ^ 0xFFFFFFFF) : 0;
+}
+
+int crypto_crc32(const void* data, size_t len, uint32_t* crc_out) {
+	if (!data || !crc_out) return -1;
+	CRC32_CTX ctx;
+	crypto_crc32_init(&ctx);
+	crypto_crc32_update(&ctx, data, len);
+	*crc_out = crypto_crc32_final(&ctx);
+	return 0;
+}
+
 static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 size_t crypto_base64_encode_len(size_t in_len) {
 	return ((in_len + 2) / 3) * 4;

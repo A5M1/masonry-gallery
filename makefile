@@ -1,8 +1,8 @@
 # ======================================================
 # Compilers
-CC_x86=x86_64-w64-mingw32-clang
+CC_X64=/clang64/bin/clang
 CC_ARM=aarch64-w64-mingw32-clang
-CC_LINUX_X86=clang
+CC_LINUX_X64=clang
 CC_LINUX_ARM=aarch64-linux-gnu-clang
 
 # ======================================================
@@ -10,15 +10,15 @@ CC_LINUX_ARM=aarch64-linux-gnu-clang
 CFLAGS_COMMON=-std=c17 -Os -Iinclude -ffunction-sections -fdata-sections \
                 -Wno-format-truncation -Wno-misleading-indentation -w
 
-CFLAGS_X86_RELEASE=$(CFLAGS_COMMON) -msse2 -mavx2
+CFLAGS_X64_RELEASE=$(CFLAGS_COMMON) -m64 -msse4.2 -mavx2 -mpopcnt
 CFLAGS_ARM_RELEASE=$(CFLAGS_COMMON) -march=armv8-a+simd
-CFLAGS_LINUX_X86_RELEASE=$(CFLAGS_COMMON)
+CFLAGS_LINUX_X64_RELEASE=$(CFLAGS_COMMON) -m64 -msse4.2 -mavx2 -mpopcnt
 CFLAGS_LINUX_ARM_RELEASE=$(CFLAGS_COMMON) -march=armv8-a+simd
 
-CFLAGS_X86_DEBUG=-std=c17 -g -O0 -Iinclude \
+CFLAGS_X64_DEBUG=-std=c17 -g -O0 -Iinclude \
                     -ffunction-sections -fdata-sections \
                     -Wno-format-truncation -Wno-misleading-indentation \
-                    -DDEBUG_DIAGNOSTIC -msse2 -mavx2
+                    -DDEBUG_DIAGNOSTIC -m64 -msse4.2 -mavx2 -mpopcnt
 CFLAGS_ARM_DEBUG=-std=c17 -g -O0 -Iinclude \
                     -ffunction-sections -fdata-sections \
                     -Wno-format-truncation -Wno-misleading-indentation \
@@ -47,14 +47,16 @@ BUILDBN_DIR=buildbn
 
 # ======================================================
 # Executables
-EXEC_X86=$(DIST_DIR)/galleria.exe
+EXEC_X64=$(DIST_DIR)/galleria.exe
 EXEC_ARM=$(DIST_DIR)/galleria_arm64.exe
-EXEC_X86_DEBUG=$(DIST_DIR)/galleria_debug.exe
+EXEC_X64_DEBUG=$(DIST_DIR)/galleria_debug.exe
 EXEC_ARM_DEBUG=$(DIST_DIR)/galleria_arm64_debug.exe
-EXEC_LINUX_X86=$(DIST_DIR)/galleria_linux_x86
+EXEC_LINUX_X64=$(DIST_DIR)/galleria_linux_x64
 EXEC_LINUX_ARM=$(DIST_DIR)/galleria_linux_arm64
 EXEC_RUST_RELEASE=$(DIST_DIR)/galleria_view
 EXEC_RUST_DEBUG=$(DIST_DIR)/galleria_view_debug
+EXEC_TDB_EDITOR=$(DIST_DIR)/tdb-editor$(EXE)
+EXEC_TDB_EDITOR_DEBUG=$(DIST_DIR)/tdb-editor_debug$(EXE)
 
 # ======================================================
 # Executable extension for the current platform. When building
@@ -82,41 +84,44 @@ $(BUILD_DIR)/$1
 endef
 
 SRCS=$(shell find $(SRC_DIR) -name '*.c')
+RUST_LIB_WIN=$(RUST_DIR)/target/release/galleria.dll.lib
+RUST_DLL_WIN=$(RUST_DIR)/target/release/galleria.dll
+RUST_LIB_LINUX=$(RUST_DIR)/target/release/libgalleria.so
 
-OBJS_X86=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x86)/%.o,$(SRCS))
+OBJS_X64=$(filter-out $(call obj_dir,x64)/thumbdb.o,$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x64)/%.o,$(SRCS)))
 OBJS_ARM=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,arm)/%.o,$(SRCS))
-OBJS_X86_DEBUG=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x86_debug)/%.o,$(SRCS))
+OBJS_X64_DEBUG=$(filter-out $(call obj_dir,x64_debug)/thumbdb.o,$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,x64_debug)/%.o,$(SRCS)))
 OBJS_ARM_DEBUG=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,arm_debug)/%.o,$(SRCS))
-OBJS_LINUX_X86=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_x86)/%.o,$(SRCS))
+OBJS_LINUX_X64=$(filter-out $(call obj_dir,linux_x64)/thumbdb.o,$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_x64)/%.o,$(SRCS)))
 OBJS_LINUX_ARM=$(patsubst $(SRC_DIR)/%.c,$(call obj_dir,linux_arm)/%.o,$(SRCS))
 
 # ======================================================
 # Compilation rules
 
-$(call obj_dir,x86)/%.o: $(SRC_DIR)/%.c
+$(call obj_dir,x64)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	@echo "[CC] (Windows x86_64) $< -> $@"
-	@$(CC_x86) $(CFLAGS_X86_RELEASE) -c $< -o $@
+	@echo "[CC] (Windows x64) $< -> $@"
+	@$(CC_X64) $(CFLAGS_X64_RELEASE) -c $< -o $@
 
 $(call obj_dir,arm)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] (Windows ARM64) $< -> $@"
 	@$(CC_ARM) $(CFLAGS_ARM_RELEASE) -c $< -o $@
 
-$(call obj_dir,x86_debug)/%.o: $(SRC_DIR)/%.c
+$(call obj_dir,x64_debug)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	@echo "[CC] (Windows x86_64 Debug) $< -> $@"
-	@$(CC_x86) $(CFLAGS_X86_DEBUG) -c $< -o $@
+	@echo "[CC] (Windows x64 Debug) $< -> $@"
+	@$(CC_X64) $(CFLAGS_X64_DEBUG) -c $< -o $@
 
 $(call obj_dir,arm_debug)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] (Windows ARM64 Debug) $< -> $@"
 	@$(CC_ARM) $(CFLAGS_ARM_DEBUG) -c $< -o $@
 
-$(call obj_dir,linux_x86)/%.o: $(SRC_DIR)/%.c
+$(call obj_dir,linux_x64)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	@echo "[CC] (Linux x86_64) $< -> $@"
-	@$(CC_LINUX_X86) $(CFLAGS_LINUX_X86_RELEASE) -c $< -o $@
+	@echo "[CC] (Linux x64) $< -> $@"
+	@$(CC_LINUX_X64) $(CFLAGS_LINUX_X64_RELEASE) -c $< -o $@
 
 $(call obj_dir,linux_arm)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -125,38 +130,38 @@ $(call obj_dir,linux_arm)/%.o: $(SRC_DIR)/%.c
 
 # ======================================================
 # Linking rules
-all: x86
-x86: $(OBJS_X86)
+all: x64
+x64: rust-lib buildbn $(OBJS_X64)
 	@mkdir -p $(DIST_DIR)
-	@echo "[LD] $(EXEC_X86)"
-	@$(CC_x86) -o $(EXEC_X86) $(OBJS_X86) $(LDFLAGS_WIN)
+	@echo "[LD] $(EXEC_X64)"
+	@$(CC_X64) -o $(EXEC_X64) $(OBJS_X64) $(RUST_LIB_WIN) $(LDFLAGS_WIN)
 	@$(MAKE) copy-assets
 
-arm: $(OBJS_ARM)
+arm: buildbn $(OBJS_ARM)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_ARM)"
 	@$(CC_ARM) -o $(EXEC_ARM) $(OBJS_ARM) $(LDFLAGS_WIN)
 	@$(MAKE) copy-assets
 
-debug: $(OBJS_X86_DEBUG)
+debug: rust-lib buildbn $(OBJS_X64_DEBUG)
 	@mkdir -p $(DIST_DIR)
-	@echo "[LD] $(EXEC_X86_DEBUG)"
-	@$(CC_x86) -o $(EXEC_X86_DEBUG) $(OBJS_X86_DEBUG) $(LDFLAGS_WIN_DEBUG)
+	@echo "[LD] $(EXEC_X64_DEBUG)"
+	@$(CC_X64) -o $(EXEC_X64_DEBUG) $(OBJS_X64_DEBUG) $(RUST_LIB_WIN) $(LDFLAGS_WIN_DEBUG)
 	@$(MAKE) copy-assets
 
-debug-arm: $(OBJS_ARM_DEBUG)
+debug-arm: buildbn $(OBJS_ARM_DEBUG)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_ARM_DEBUG)"
 	@$(CC_ARM) -o $(EXEC_ARM_DEBUG) $(OBJS_ARM_DEBUG) $(LDFLAGS_WIN_DEBUG)
 	@$(MAKE) copy-assets
 
-linux-x86: $(OBJS_LINUX_X86)
+linux-x64: rust-lib buildbn $(OBJS_LINUX_X64)
 	@mkdir -p $(DIST_DIR)
-	@echo "[LD] $(EXEC_LINUX_X86)"
-	@$(CC_LINUX_X86) -o $(EXEC_LINUX_X86) $(OBJS_LINUX_X86) $(LDFLAGS_LINUX)
+	@echo "[LD] $(EXEC_LINUX_X64)"
+	@$(CC_LINUX_X64) -o $(EXEC_LINUX_X64) $(OBJS_LINUX_X64) -L$(RUST_DIR)/target/release -lgalleria -Wl,-rpath,'$$ORIGIN' $(LDFLAGS_LINUX)
 	@$(MAKE) copy-assets
 
-linux-arm: $(OBJS_LINUX_ARM)
+linux-arm: buildbn $(OBJS_LINUX_ARM)
 	@mkdir -p $(DIST_DIR)
 	@echo "[LD] $(EXEC_LINUX_ARM)"
 	@$(CC_LINUX_ARM) -o $(EXEC_LINUX_ARM) $(OBJS_LINUX_ARM) $(LDFLAGS_LINUX)
@@ -164,35 +169,60 @@ linux-arm: $(OBJS_LINUX_ARM)
 
 # ======================================================
 # Rust targets
+rust-lib:
+	@echo "[Cargo] Building Rust database library..."
+	@cd $(RUST_DIR) && cargo build --release --lib -p galleria
+
 rust-release:
-	@echo "[Cargo] Building Rust release..."
-	@cd $(RUST_DIR) && cargo build --release
+	@echo "[Cargo] Building Rust view release..."
+	@cd $(RUST_DIR) && cargo build --release -p galleria-view
 	@mkdir -p $(DIST_DIR)
 	@cp $(RUST_DIR)/target/release/galleria-view$(EXE) $(EXEC_RUST_RELEASE) 2>/dev/null || true
 	@$(MAKE) copy-assets
 
 rust-debug:
-	@echo "[Cargo] Building Rust debug..."
-	@cd $(RUST_DIR) && cargo build
+	@echo "[Cargo] Building Rust view debug..."
+	@cd $(RUST_DIR) && cargo build -p galleria-view
 	@mkdir -p $(DIST_DIR)
 	@cp $(RUST_DIR)/target/debug/galleria-view$(EXE) $(EXEC_RUST_DEBUG) 2>/dev/null || true
 	@$(MAKE) copy-assets
 
+tdb-editor:
+	@echo "[Cargo] Building TDB editor release..."
+	@cd $(RUST_DIR) && cargo build --release -p tdb-editor
+	@mkdir -p $(DIST_DIR)
+	@cp $(RUST_DIR)/target/release/tdb-editor$(EXE) $(EXEC_TDB_EDITOR) 2>/dev/null || true
+
+tdb-editor-debug:
+	@echo "[Cargo] Building TDB editor debug..."
+	@cd $(RUST_DIR) && cargo build -p tdb-editor
+	@mkdir -p $(DIST_DIR)
+	@cp $(RUST_DIR)/target/debug/tdb-editor$(EXE) $(EXEC_TDB_EDITOR_DEBUG) 2>/dev/null || true
+
 # ======================================================
 # Helpers and meta targets
-copy-assets: buildbn
-	@echo "[COPY] Copying assets (views/, public/)..."
-	@mkdir -p $(DIST_DIR)
-	@if [ -d "$(BUILDBN_DIR)/dist" ]; then echo "[COPY] copying buildbn/dist -> public/bundle"; mkdir -p public/bundle; cp -r $(BUILDBN_DIR)/dist/*.js public/bundle/ 2>/dev/null || true; cp -r $(BUILDBN_DIR)/dist/*.map public/bundle/ 2>/dev/null || true; fi
-	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
-	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi
-
-
 .PHONY: buildbn
 buildbn:
-	@if [ -d "$(BUILDBN_DIR)" ]; then echo "[BUILDBN] Building web bundle in $(BUILDBN_DIR)..."; cd $(BUILDBN_DIR) && if [ -f package.json ]; then npm run build || node build.js || true; else node build.js || true; fi; fi
+	@if [ -d "$(BUILDBN_DIR)" ]; then \
+		echo "[BUILDBN] Building web bundle..."; \
+		cd $(BUILDBN_DIR) && (npm run build || node build.js) 2>/dev/null || true; \
+	fi
+	@if [ -d "$(BUILDBN_DIR)/dist" ]; then \
+		echo "[COPY] buildbn/dist -> public/bundle"; \
+		mkdir -p public/bundle; \
+		cp $(BUILDBN_DIR)/dist/*.js public/bundle/ 2>/dev/null || true; \
+		cp $(BUILDBN_DIR)/dist/*.map public/bundle/ 2>/dev/null || true; \
+	fi
 
-all-platforms: x86 arm linux-x86 linux-arm rust-release
+copy-assets:
+	@echo "[COPY] Copying assets to $(DIST_DIR)..."
+	@mkdir -p $(DIST_DIR)
+	@if [ -d "views" ]; then cp -r views $(DIST_DIR)/; fi
+	@if [ -d "public" ]; then cp -r public $(DIST_DIR)/; fi
+	@if [ -f "$(RUST_DLL_WIN)" ]; then cp $(RUST_DLL_WIN) $(DIST_DIR)/; fi
+	@if [ -f "$(RUST_LIB_LINUX)" ]; then cp $(RUST_LIB_LINUX) $(DIST_DIR)/; fi
+
+all-platforms: x64 arm linux-x64 linux-arm rust-release
 	@echo "[DONE] Built all platforms successfully."
 
 view: rust-release
@@ -213,12 +243,13 @@ rebuild: clean all
 
 run:
 ifeq ($(OS),Windows_NT)
-	@$(EXEC_X86)
+	@$(EXEC_X64)
 else
-	@$(EXEC_LINUX_X86)
+	@$(EXEC_LINUX_X64)
 endif
 
 # ======================================================
-.PHONY: all clean rebuild run x86 arm debug debug-arm \
-		linux-x86 linux-arm rust-release rust-debug \
+.PHONY: all clean rebuild run x64 arm debug debug-arm \
+		linux-x64 linux-arm rust-lib rust-release rust-debug \
+		tdb-editor tdb-editor-debug \
 		copy-assets all-platforms view buildbn

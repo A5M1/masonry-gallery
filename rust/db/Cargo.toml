@@ -1,0 +1,9 @@
+[package]
+name = "galleria"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "galleria"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"

@@ -89,6 +89,11 @@ const char* dir_next(diriter* it) {
 	return it->current_utf8;
 }
 
+int dir_current_type(const diriter* it) {
+	if (!it) return -1;
+	return (it->ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+}
+
 void dir_close(diriter* it) {
 	if (it->h != INVALID_HANDLE_VALUE) FindClose(it->h);
 }
@@ -101,6 +106,15 @@ bool dir_open(diriter* it, const char* path) {
 const char* dir_next(diriter* it) {
 	it->e = readdir(it->d);
 	return it->e ? it->e->d_name : NULL;
+}
+
+int dir_current_type(const diriter* it) {
+	if (!it || !it->e) return -1;
+#ifdef DT_DIR
+	if (it->e->d_type == DT_DIR) return 1;
+	if (it->e->d_type == DT_REG) return 0;
+#endif
+	return -1;
 }
 
 void dir_close(diriter* it) {

@@ -4,10 +4,7 @@
 			"path": "."
 		},
 		{
-			"path": "G:/msys64.new/home/Anon/mp4box"
-		},
-		{
-			"path": "E:/quickjs"
+			"path": "../../../tarfs-rs"
 		}
 	],
 	"settings": {
@@ -26,7 +23,6 @@
 			"lmswsock",
 			"loadu",
 			"lpsapi",
-			"magick",
 			"msse",
 			"nogallery",
 			"noprefix",
@@ -49,6 +45,7 @@
 			"**/.features":true,
 			"**/.roo":true,
 			"**/logs": true,
+            "**/dist": true,
 			"**/license": true,
 			"**/tools": true,
 			".hintrc": true,
@@ -113,7 +110,8 @@
 			"platform.h": "c"
 		},
 		"prettier.bracketSpacing": false,
-		"problemsFilter.autoFilterEnabled": true
+		"problemsFilter.autoFilterEnabled": true,
+		"liveServer.settings.multiRootWorkspaceName": "dsref"
 
 	},
 	"launch": {
