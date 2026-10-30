@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["db", "view"]
+members = ["db", "view", "tdb-editor"]
 default-members = ["db", "view"]
 
 [profile.release]

@@ -1,0 +1,14 @@
+[package]
+name = "tdb-editor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tdb-editor"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.32"
+galleria = { path = "../db" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+rfd = "0.15"

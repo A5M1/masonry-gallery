@@ -55,6 +55,8 @@ EXEC_LINUX_X64=$(DIST_DIR)/galleria_linux_x64
 EXEC_LINUX_ARM=$(DIST_DIR)/galleria_linux_arm64
 EXEC_RUST_RELEASE=$(DIST_DIR)/galleria_view
 EXEC_RUST_DEBUG=$(DIST_DIR)/galleria_view_debug
+EXEC_TDB_EDITOR=$(DIST_DIR)/tdb-editor$(EXE)
+EXEC_TDB_EDITOR_DEBUG=$(DIST_DIR)/tdb-editor_debug$(EXE)
 
 # ======================================================
 # Executable extension for the current platform. When building
@@ -185,6 +187,18 @@ rust-debug:
 	@cp $(RUST_DIR)/target/debug/galleria-view$(EXE) $(EXEC_RUST_DEBUG) 2>/dev/null || true
 	@$(MAKE) copy-assets
 
+tdb-editor:
+	@echo "[Cargo] Building TDB editor release..."
+	@cd $(RUST_DIR) && cargo build --release -p tdb-editor
+	@mkdir -p $(DIST_DIR)
+	@cp $(RUST_DIR)/target/release/tdb-editor$(EXE) $(EXEC_TDB_EDITOR) 2>/dev/null || true
+
+tdb-editor-debug:
+	@echo "[Cargo] Building TDB editor debug..."
+	@cd $(RUST_DIR) && cargo build -p tdb-editor
+	@mkdir -p $(DIST_DIR)
+	@cp $(RUST_DIR)/target/debug/tdb-editor$(EXE) $(EXEC_TDB_EDITOR_DEBUG) 2>/dev/null || true
+
 # ======================================================
 # Helpers and meta targets
 .PHONY: buildbn
@@ -237,4 +251,5 @@ endif
 # ======================================================
 .PHONY: all clean rebuild run x64 arm debug debug-arm \
 		linux-x64 linux-arm rust-lib rust-release rust-debug \
+		tdb-editor tdb-editor-debug \
 		copy-assets all-platforms view buildbn
