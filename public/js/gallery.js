@@ -66,6 +66,55 @@
 		}
 	}
 
+	function applyThumb(el) {
+		if (!el) return false;
+		if (el.dataset.thumbDone === "1") return true;
+		const small = el.getAttribute("data-thumb-small");
+		const large = el.getAttribute("data-thumb-large");
+		if (!small) return false;
+		el.dataset.thumbDone = "1";
+		const src = el.getAttribute("src") || "";
+		if (src.includes("base64") || src.includes("placeholder") || src === "")
+			el.src = small;
+		const upgrade = () => {
+			scheduleLayout();
+			if (!large) return;
+			const img = new Image();
+			img.onload = () => {
+				el.src = large;
+				scheduleLayout();
+			};
+			img.src = large;
+		};
+		if (el.complete && el.naturalWidth > 0) upgrade();
+		else el.addEventListener("load", upgrade, { once: true });
+		return true;
+	}
+
+	function sweepThumbs() {
+		const vh = window.innerHeight || 0;
+		document
+			.querySelectorAll(
+				"img.thumb-img[data-thumb-small]:not([data-thumb-done])"
+			)
+			.forEach(el => {
+				const r = el.getBoundingClientRect();
+				if (r.bottom > -200 && r.top < vh + 800) applyThumb(el);
+			});
+	}
+
+	let sweepQueued = false;
+	function queueSweep() {
+		if (sweepQueued) return;
+		sweepQueued = true;
+		requestAnimationFrame(() => {
+			sweepQueued = false;
+			sweepThumbs();
+		});
+	}
+	window.addEventListener("scroll", queueSweep, { passive: true });
+	window.addEventListener("resize", queueSweep, { passive: true });
+
 	function observeLazyElements(selector, handler, margin) {
 		const observer = new IntersectionObserver(
 			(entries, obs) => {
@@ -168,39 +217,7 @@
 
 						observeLazyElements(
 							"img.thumb-img",
-							el => {
-								const small =
-									el.getAttribute("data-thumb-small");
-								const large =
-									el.getAttribute("data-thumb-large");
-								if (!small) return false;
-								const src = el.getAttribute("src") || "";
-								if (
-									src.includes("base64") ||
-									src.includes("placeholder") ||
-									src === ""
-								)
-									el.src = small;
-								const onLoad = () => {
-									scheduleLayout();
-									if (!large)
-										return el.removeEventListener(
-											"load",
-											onLoad
-										);
-									const img = new Image();
-									img.onload = () => {
-										el.src = large;
-										scheduleLayout();
-									};
-									img.src = large;
-									el.removeEventListener("load", onLoad);
-								};
-								el.addEventListener("load", onLoad, {
-									once: true
-								});
-								return true;
-							},
+							el => applyThumb(el),
 							"800px"
 						);
 
@@ -226,6 +243,7 @@
 							"500px"
 						);
 
+						sweepThumbs();
 						initFancybox();
 					}
 
@@ -539,9 +557,33 @@ function setupThumbSocket() {
 		console.error("Failed to setup thumbnail WebSocket:", e);
 	}
 }
+function pollThumbs() {
+	try {
+		$.getJSON(
+			"/api/thumbs?dir=" + encodeURIComponent(currentDir),
+			function (d) {
+				if (!d || !d.safe) return;
+				var safe = d.safe;
+				Array.from(document.querySelectorAll("img.thumb-img[data-media]")).forEach(function (img) {
+					var media = img.getAttribute("data-media") || "";
+					var fn = media.split("/").pop();
+					var md5 = d[fn];
+					if (!md5) return;
+					var small = "/images/thumbs/" + safe + "/" + md5 + "-small.jpg";
+					var large = "/images/thumbs/" + safe + "/" + md5 + "-large.jpg";
+					img.setAttribute("data-thumb-small", small);
+					img.setAttribute("data-thumb-large", large);
+				});
+				sweepThumbs();
+			}
+		);
+	} catch (e) {}
+	setTimeout(pollThumbs, 500);
+}
 
 	setupSidebarLogic();
 	setupThumbSocket();
+	pollThumbs();
 
 	window.w = initFancybox;
 	window.m = initMasonry;

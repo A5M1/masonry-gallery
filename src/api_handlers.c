@@ -2094,6 +2094,77 @@ void handle_api_thumbdb_thumbs_for_dir(int c, char* qs, bool keep_alive) {
 	free(buf); SAFE_FREE(dir);
 }
 
+void handle_api_thumbs(int c, char* qs, bool keep_alive) {
+	char dirparam[PATH_MAX] = { 0 };
+	if (qs) {
+		char* v = query_get(qs, "dir");
+		if (v) { strncpy(dirparam, v, PATH_MAX - 1); SAFE_FREE(v); }
+	}
+	sanitize_dirparam(dirparam);
+	char target[PATH_MAX];
+	if (dirparam[0] == '\0') {
+		size_t gf_count = 0; char** gfolders = get_gallery_folders(&gf_count);
+		if (gf_count > 0) { strncpy(target, gfolders[0], sizeof(target) - 1); target[sizeof(target) - 1] = '\0'; normalize_path(target); }
+		else { snprintf(target, sizeof(target), "%s/%s", BASE_DIR, dirparam); normalize_path(target); }
+	}
+	else {
+		snprintf(target, sizeof(target), "%s/%s", BASE_DIR, dirparam);
+		normalize_path(target);
+	}
+	normalize_path(target);
+	char target_real[PATH_MAX];
+	if (!real_path(target, target_real) || !is_dir(target_real) || !is_under_gallery_root(target_real)) {
+		const char* msg = "{\"error\":\"Invalid directory\"}";
+		send_header(c, 400, "Bad Request", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
+	char safe_dir[PATH_MAX]; make_safe_dir_name_from(target_real, safe_dir, sizeof(safe_dir));
+
+	size_t cap = 4096;
+	char* buf = malloc(cap);
+	if (!buf) {
+		const char* msg = "{\"error\":\"Out of memory\"}";
+		send_header(c, 500, "Internal Server Error", "application/json; charset=utf-8", (long)strlen(msg), NULL, 0, keep_alive);
+		send(c, msg, (int)strlen(msg), 0);
+		return;
+	}
+	size_t rem = cap; char* ptr = buf;
+	ptr = json_objOpen(ptr, NULL, &rem);
+	ptr = json_str(ptr, "safe", safe_dir, &rem);
+
+	diriter it;
+	if (dir_open(&it, target_real)) {
+		const char* name;
+		while ((name = dir_next(&it))) {
+			if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+			if (!(has_ext(name, IMAGE_EXTS) || has_ext(name, VIDEO_EXTS))) continue;
+			char full_path[PATH_MAX]; path_join(full_path, target_real, name);
+			if (!is_file(full_path)) continue;
+
+			char small_rel[PATH_MAX] = {0}; char large_rel[PATH_MAX] = {0};
+			get_thumb_rel_names(full_path, name, small_rel, sizeof(small_rel), large_rel, sizeof(large_rel));
+			char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
+			make_thumb_fs_paths(full_path, name, small_fs, sizeof(small_fs), large_fs, sizeof(large_fs));
+			if (!is_file(small_fs)) continue;
+
+			char md5[PATH_MAX];
+			thumbname_to_base_local(small_rel, md5, sizeof(md5));
+			if (!md5[0]) continue;
+
+			size_t used = ptr - buf;
+			ensure_json_buf(&buf, &cap, used, PATH_MAX + 64);
+			ptr = buf + used; rem = cap - used;
+			ptr = json_str(ptr, name, md5, &rem);
+		}
+		dir_close(&it);
+	}
+	ptr = json_objClose(ptr, &rem);
+	send_header(c, 200, "OK", "application/json; charset=utf-8", (long)(ptr - buf), NULL, 0, keep_alive);
+	send(c, buf, (int)(ptr - buf), 0);
+	free(buf);
+}
+
 void handle_api_thumbnail_generate(int c, char* qs, bool keep_alive) {	
 	if (!qs) { send_text(c, 400, "Bad Request", "Missing query", keep_alive); return; }
 	char* path_param = query_get(qs, "path");
@@ -2326,6 +2397,7 @@ int handle_single_request(int c, char* headers, char* body, size_t headers_len, 
 		{ "/api/folders/list", GET_SIMPLE, handle_api_list_folders },
 		{ "/api/folders", GET_QS, handle_api_folders },
 		{ "/api/media", GET_QS, handle_api_media },
+		{ "/api/thumbs", GET_QS, handle_api_thumbs },
 		{ "/api/folders/add", POST_BODY, handle_api_add_folder },
 		{ "/api/regenerate-thumbs", GET_QS, handle_api_regenerate_thumbs },
 		{ "/api/thumbnail/generate", GET_QS, handle_api_thumbnail_generate },
