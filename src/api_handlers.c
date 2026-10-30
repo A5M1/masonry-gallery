@@ -419,6 +419,12 @@ char* generate_media_fragment(const char* base_dir, const char* dirparam, int pa
 				strncpy(small_rel, found_thumb, sizeof(small_rel) - 1); small_rel[sizeof(small_rel) - 1] = '\0';
 			}
 		}
+		if (!small_rel[0] || !large_rel[0]) {
+			char md5_small[PATH_MAX]; char md5_large[PATH_MAX];
+			get_thumb_rel_names(full_path, files[i], md5_small, sizeof(md5_small), md5_large, sizeof(md5_large));
+			if (!small_rel[0]) { strncpy(small_rel, md5_small, sizeof(small_rel) - 1); small_rel[sizeof(small_rel) - 1] = '\0'; }
+			if (!large_rel[0]) { strncpy(large_rel, md5_large, sizeof(large_rel) - 1); large_rel[sizeof(large_rel) - 1] = '\0'; }
+		}
 		char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 		char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));
 		{
@@ -830,49 +836,6 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 				}
 			}
 		}
-		char cache_dir[PATH_MAX];
-		snprintf(cache_dir, sizeof(cache_dir), "%s" DIR_SEP_STR "cache" DIR_SEP_STR "media", BASE_DIR);
-		if (!is_dir(cache_dir)) mk_dir(cache_dir);
-		char safe_name[PATH_MAX];
-		if (dirparam[0] == 0) strncpy(safe_name, "root", sizeof(safe_name)); else {
-			make_safe_dir_name_from(dirparam, safe_name, sizeof(safe_name));
-		}
-		char cache_path[PATH_MAX];
-		snprintf(cache_path, sizeof(cache_path), "%s" DIR_SEP_STR "%s-%d.html", cache_dir, safe_name, page);
-		if (is_file(cache_path)) {
-			LOG_INFO("Serving cached media fragment: %s", cache_path);
-			struct stat stc; if (stat(cache_path, &stc) == 0) {
-				char etag[128]; snprintf(etag, sizeof(etag), "\"%08lx-%08lx\"", (unsigned long)stc.st_mtime, (unsigned long)stc.st_size);
-				char lm[128]; struct tm* t = gmtime(&stc.st_mtime); if (t) strftime(lm, sizeof(lm), "%a, %d %b %Y %H:%M:%S GMT", t); else lm[0] = '\0';
-				char* if_none = get_header_value(g_request_headers, "If-None-Match:");
-				if (if_none && strstr(if_none, etag)) {
-					send_header(c, 304, "Not Modified", "text/plain; charset=utf-8", 0, NULL, 0, keep_alive);
-					if (files) {
-						for (size_t ii = 0; ii < n; ++ii) free(files[ii]);
-						free(files);
-						files = NULL;
-					}
-					SAFE_FREE(if_none);
-					return;
-				}
-				SAFE_FREE(if_none);
-				send_header(c, 200, "OK", "text/html; charset=utf-8", (long)stc.st_size, NULL, 0, keep_alive);
-				send_file_stream(c, cache_path, NULL, keep_alive);
-				if (files) {
-					for (size_t ii = 0; ii < n; ++ii) free(files[ii]);
-					free(files);
-					files = NULL;
-				}
-				return;
-			}
-
-			if (files) {
-				for (size_t ii = 0; ii < n; ++ii) free(files[ii]);
-				free(files);
-				files = NULL;
-			}
-			return;
-		}
 		size_t hcap = 8192;
 		char* hbuf = malloc(hcap);
 		if (!hbuf) {
@@ -933,6 +896,12 @@ void handle_api_media(int c, char* qs, bool keep_alive) {
 				else {
 					strncpy(small_rel, found_thumb, sizeof(small_rel) - 1); small_rel[sizeof(small_rel) - 1] = '\0';
 				}
+			}
+			if (!small_rel[0] || !large_rel[0]) {
+				char md5_small[PATH_MAX]; char md5_large[PATH_MAX];
+				get_thumb_rel_names(full_path, files[i], md5_small, sizeof(md5_small), md5_large, sizeof(md5_large));
+				if (!small_rel[0]) { strncpy(small_rel, md5_small, sizeof(small_rel) - 1); small_rel[sizeof(small_rel) - 1] = '\0'; }
+				if (!large_rel[0]) { strncpy(large_rel, md5_large, sizeof(large_rel) - 1); large_rel[sizeof(large_rel) - 1] = '\0'; }
 			}
 			char small_fs[PATH_MAX]; char large_fs[PATH_MAX];
 			char thumbs_root[PATH_MAX]; get_thumbs_root(thumbs_root, sizeof(thumbs_root));

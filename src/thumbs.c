@@ -431,14 +431,11 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     char per_thumbs_root[PATH_MAX];
     per_thumbs_root[0] = '\0';
     get_parent_dir(job->output, per_thumbs_root, sizeof(per_thumbs_root));
-    int wrote_wal = 0;
     if (wal_write_entry(per_thumbs_root, base_key, normalized_input) == 0) {
-        wrote_wal = 1;
         LOG_DEBUG("record_thumb_job_completion: queued WAL %s -> %s", base_key, normalized_input);
     } else {
         LOG_WARN("record_thumb_job_completion: failed to write WAL entry for %s", job->input);
     }
-    if (!wrote_wal) return;
 
     process_wal_chunks(per_thumbs_root);
     char per_db[PATH_MAX];
@@ -446,17 +443,14 @@ static void record_thumb_job_completion(const thumb_job_t* job) {
     thumbdb_instance_t* tdb = thumbdb_find_instance(per_db);
     if (!tdb) {
         LOG_WARN("record_thumb_job_completion: thumbdb instance unavailable for %s", per_db);
-        return;
     }
-    char committed_key[PATH_MAX];
-    if (thumbdb_find_for_media(tdb, normalized_input, committed_key, sizeof(committed_key)) != 0) {
-        LOG_WARN("record_thumb_job_completion: WAL entry was not committed for %s", normalized_input);
-        return;
-    }
-    thumbdb_request_compaction(tdb);
-    if (thumbdb_perform_requested_compaction(tdb) < 0) {
-        LOG_WARN("record_thumb_job_completion: compaction failed for %s", per_db);
-        return;
+    else {
+        char committed_key[PATH_MAX];
+        if (thumbdb_find_for_media(tdb, normalized_input, committed_key, sizeof(committed_key)) != 0)
+            LOG_WARN("record_thumb_job_completion: WAL entry was not committed for %s", normalized_input);
+        thumbdb_request_compaction(tdb);
+        if (thumbdb_perform_requested_compaction(tdb) < 0)
+            LOG_WARN("record_thumb_job_completion: compaction failed for %s", per_db);
     }
     char parent[PATH_MAX];
     parent[0] = '\0';
