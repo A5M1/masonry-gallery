@@ -1,0 +1,18 @@
+[package]
+name = "galleria-view"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "galleria-view"
+path = "src/main.rs"
+
+[dependencies]
+dirs = "5.0"
+tao = "0.34"
+wry = "0.38"
+serde_json = "1.0"
+
+[build-dependencies]
+winres = "0.1"
